@@ -8,7 +8,6 @@ PRD Appendix A.7.
 
 from __future__ import annotations
 
-import math
 import random
 from dataclasses import dataclass
 from typing import Any
