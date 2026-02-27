@@ -19,6 +19,22 @@ import {
   featuresCoverage,
   featuresWatermarks,
 } from "./features/index.js";
+import {
+  statsAdfTest,
+  statsBootstrapSharpe,
+  statsDeflatedSharpe,
+  statsPbo,
+  statsRegimeDetect,
+  statsConditionalSharpe,
+  statsIcAnalysis,
+  statsScmLeakage,
+} from "./stats/index.js";
+import {
+  registryUniverses,
+  registryFeatureSets,
+  registryRegimeDetectors,
+  registryPolicies,
+} from "./registry_tools/index.js";
 
 const allTools: ToolDef[] = [
   dataIngest,
@@ -36,6 +52,18 @@ const allTools: ToolDef[] = [
   featuresCorrelations,
   featuresCoverage,
   featuresWatermarks,
+  statsAdfTest,
+  statsBootstrapSharpe,
+  statsDeflatedSharpe,
+  statsPbo,
+  statsRegimeDetect,
+  statsConditionalSharpe,
+  statsIcAnalysis,
+  statsScmLeakage,
+  registryUniverses,
+  registryFeatureSets,
+  registryRegimeDetectors,
+  registryPolicies,
 ];
 
 // Indexed by tool name for fast lookup
