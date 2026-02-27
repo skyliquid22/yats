@@ -35,6 +35,23 @@ import {
   registryRegimeDetectors,
   registryPolicies,
 } from "./registry_tools/index.js";
+import {
+  experimentCreate,
+  experimentRun,
+  experimentList,
+  experimentGet,
+  experimentCompare,
+} from "./experiment/index.js";
+import {
+  evalRun,
+  evalMetrics,
+  evalRegimeSlices,
+} from "./eval/index.js";
+import {
+  sweepRun,
+  sweepStatus,
+  sweepResults,
+} from "./sweep/index.js";
 
 const allTools: ToolDef[] = [
   dataIngest,
@@ -64,6 +81,17 @@ const allTools: ToolDef[] = [
   registryFeatureSets,
   registryRegimeDetectors,
   registryPolicies,
+  experimentCreate,
+  experimentRun,
+  experimentList,
+  experimentGet,
+  experimentCompare,
+  evalRun,
+  evalMetrics,
+  evalRegimeSlices,
+  sweepRun,
+  sweepStatus,
+  sweepResults,
 ];
 
 // Indexed by tool name for fast lookup
