@@ -10,6 +10,15 @@ import {
   dataCoverage,
   dataVendors,
 } from "./data/index.js";
+import {
+  featuresCompute,
+  featuresComputeIncremental,
+  featuresList,
+  featuresStats,
+  featuresCorrelations,
+  featuresCoverage,
+  featuresWatermarks,
+} from "./features/index.js";
 
 const allTools: ToolDef[] = [
   dataIngest,
@@ -20,6 +29,13 @@ const allTools: ToolDef[] = [
   dataQuery,
   dataCoverage,
   dataVendors,
+  featuresCompute,
+  featuresComputeIncremental,
+  featuresList,
+  featuresStats,
+  featuresCorrelations,
+  featuresCoverage,
+  featuresWatermarks,
 ];
 
 // Indexed by tool name for fast lookup
