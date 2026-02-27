@@ -25,6 +25,7 @@ from research.risk.project_weights import project_weights
 from research.shadow.data_source import Snapshot
 from research.shadow.logging import StepLogger, build_step_entry
 from research.shadow.portfolio import ShadowPortfolio
+from research.shadow.questdb_writer import ExecutionTableWriter
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +78,14 @@ class ShadowEngine:
         policy: PolicyProtocol,
         snapshots: list[Snapshot],
         config: ShadowRunConfig,
+        *,
+        questdb_writer: ExecutionTableWriter | None = None,
     ) -> None:
         self._spec = spec
         self._policy = policy
         self._snapshots = snapshots
         self._config = config
+        self._questdb_writer = questdb_writer
 
         self._symbols = spec.symbols
         self._n_symbols = len(self._symbols)
@@ -102,6 +106,9 @@ class ShadowEngine:
         # Replay state
         self._step_index = 0
         self._dagster_run_id: str | None = None
+
+        # Track daily returns for Sharpe computation
+        self._daily_returns: list[float] = []
 
     @property
     def portfolio(self) -> ShadowPortfolio:
@@ -157,6 +164,15 @@ class ShadowEngine:
 
         summary = self._build_summary()
         self._save_summary(summary)
+
+        # Write execution_metrics summary to QuestDB
+        if self._questdb_writer is not None:
+            self._questdb_writer.write_metrics(
+                sharpe=summary.get("sharpe", 0.0),
+                max_drawdown=summary.get("max_drawdown", 0.0),
+                total_return=summary.get("total_return", 0.0),
+            )
+
         logger.info(
             "Shadow run complete: %d steps, final_value=%.2f",
             total_snapshots - max(start_step, 1), self._portfolio.portfolio_value,
@@ -195,8 +211,9 @@ class ShadowEngine:
         # 6. Update portfolio
         prev_weights = self._portfolio.weights.tolist()
         self._portfolio.apply_step(projected, weighted_return, cost)
+        self._daily_returns.append(weighted_return - cost)
 
-        # 7. Log step
+        # 7. Log step to JSONL
         entry = build_step_entry(
             step_index=step_index,
             timestamp=curr_snap.as_of.isoformat(),
@@ -211,6 +228,30 @@ class ShadowEngine:
             drawdown=self._portfolio.drawdown,
         )
         self._step_logger.log_step(entry)
+
+        # 8. Write to QuestDB execution_log (per-symbol rows)
+        if self._questdb_writer is not None:
+            # In direct rebalance mode: fill at close, no slippage, no rejects
+            close_prices = [
+                curr_snap.panel.get(sym, {}).get("close", 0.0)
+                for sym in self._symbols
+            ]
+            per_symbol_fee = cost / self._n_symbols if self._n_symbols > 0 else 0.0
+            self._questdb_writer.write_step(
+                timestamp=curr_snap.as_of,
+                step=step_index,
+                symbols=self._symbols,
+                target_weights=raw_weights.tolist(),
+                realized_weights=projected.tolist(),
+                fill_prices=close_prices,
+                slippage_bps=[0.0] * self._n_symbols,
+                fees_per_symbol=[per_symbol_fee] * self._n_symbols,
+                rejected=[False] * self._n_symbols,
+                reject_reasons=[""] * self._n_symbols,
+                portfolio_value=self._portfolio.portfolio_value,
+                cash=self._portfolio.cash,
+                regime_bucket=self._get_regime_bucket(curr_snap),
+            )
 
     def _build_observation(self, snap: Snapshot) -> np.ndarray:
         """Build flat observation vector from snapshot (same format as SignalWeightEnv).
@@ -254,6 +295,14 @@ class ShadowEngine:
 
         return context
 
+    def _get_regime_bucket(self, snap: Snapshot) -> str:
+        """Extract regime bucket label from snapshot regime features."""
+        if snap.regime_feature_names and snap.regime_features:
+            for name, val in zip(snap.regime_feature_names, snap.regime_features):
+                if "regime" in name.lower() or "bucket" in name.lower():
+                    return str(val)
+        return "unknown"
+
     def _compute_returns(self, prev: Snapshot, curr: Snapshot) -> np.ndarray:
         """Compute per-symbol close-to-close returns."""
         returns = np.zeros(self._n_symbols)
@@ -275,6 +324,17 @@ class ShadowEngine:
             json.dumps(state, indent=2) + "\n", encoding="utf-8",
         )
 
+    def _compute_sharpe(self, annualization: float = 252.0) -> float:
+        """Compute annualized Sharpe ratio from daily returns."""
+        if len(self._daily_returns) < 2:
+            return 0.0
+        arr = np.array(self._daily_returns)
+        mean_ret = float(arr.mean())
+        std_ret = float(arr.std(ddof=1))
+        if std_ret == 0:
+            return 0.0
+        return mean_ret / std_ret * np.sqrt(annualization)
+
     def _build_summary(self) -> dict[str, Any]:
         """Build run summary dict."""
         total_steps = len(self._snapshots)
@@ -290,6 +350,7 @@ class ShadowEngine:
                 (self._portfolio.portfolio_value / self._config.initial_value) - 1.0
                 if self._config.initial_value > 0 else 0.0
             ),
+            "sharpe": self._compute_sharpe(),
             "peak_value": self._portfolio.peak_value,
             "max_drawdown": self._portfolio.drawdown,
             "final_weights": self._portfolio.weights.tolist(),

@@ -138,13 +138,30 @@ def run_shadow_engine(
     )
 
     policy = load_policy(spec)
-    engine = ShadowEngine(spec, policy, snapshots, engine_config)
+
+    # Set up QuestDB writer for unified execution tables (PRD §9.3)
+    from research.shadow.questdb_writer import (
+        ExecutionTableWriter,
+        QuestDBWriterConfig,
+    )
+    dagster_run_id = context.run_id if hasattr(context, "run_id") else None
+    questdb_writer = ExecutionTableWriter(
+        config=QuestDBWriterConfig(),
+        experiment_id=config.experiment_id,
+        run_id=run_id,
+        mode="shadow",
+        dagster_run_id=dagster_run_id,
+    )
+
+    engine = ShadowEngine(
+        spec, policy, snapshots, engine_config,
+        questdb_writer=questdb_writer,
+    )
 
     # Resume if state exists
     engine.resume()
 
     # Run
-    dagster_run_id = context.run_id if hasattr(context, "run_id") else None
     summary = engine.run(dagster_run_id=dagster_run_id)
 
     context.log.info(
