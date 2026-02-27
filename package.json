@@ -1,0 +1,22 @@
+{
+  "name": "yats",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "ts-node --esm src/server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "pg": "^8.12.0",
+    "@questdb/nodejs-client": "^3.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.0",
+    "@types/pg": "^8.11.0",
+    "@types/node": "^20.11.0"
+  }
+}

@@ -1,0 +1,14 @@
+dagster
+dagster-graphql
+psycopg2-binary
+questdb
+alpaca-py
+requests
+numpy
+pandas
+scipy
+statsmodels
+gymnasium
+torch
+stable-baselines3
+pyyaml

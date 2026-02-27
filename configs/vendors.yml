@@ -1,0 +1,9 @@
+alpaca:
+  base_url: https://paper-api.alpaca.markets
+  data_url: https://data.alpaca.markets
+  env_key: ALPACA_API_KEY
+  env_secret: ALPACA_API_SECRET
+
+financialdatasets:
+  base_url: https://api.financialdatasets.ai
+  env_key: FINANCIALDATASETS_API_KEY
