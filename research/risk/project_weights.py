@@ -1,10 +1,11 @@
-"""project_weights — deterministic risk constraint projection.
+"""Deterministic weight projection with risk constraints.
 
 Applies a sequence of risk constraints to raw portfolio weights:
 1. Long-only clamp (all weights >= 0)
 2. Per-symbol max weight clamp
 3. Exposure cap (sum of weights <= max, ensuring min cash)
-4. Optional max turnover vs previous weights (L1 delta)
+4. Max active positions
+5. Optional max turnover vs previous weights (L1 delta)
 
 PRD Appendix A.4.
 """
@@ -48,8 +49,7 @@ def project_weights(
 
     # 4. Max active positions: zero out smallest weights beyond limit
     if risk_config.max_active_positions < len(w):
-        # Keep top-k by weight, zero out the rest
-        threshold_idx = np.argsort(w)[:len(w) - risk_config.max_active_positions]
+        threshold_idx = np.argsort(w)[: len(w) - risk_config.max_active_positions]
         w[threshold_idx] = 0.0
 
     # 5. Max daily turnover (L1 delta from previous weights)
@@ -59,5 +59,6 @@ def project_weights(
         if l1 > risk_config.max_daily_turnover and l1 > 0:
             scale = risk_config.max_daily_turnover / l1
             w = prev_weights + delta * scale
+            np.maximum(w, 0.0, out=w)
 
     return w
