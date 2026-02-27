@@ -1,0 +1,4 @@
+vol_high: 0.20
+vol_low: 0.12
+trend_up: 0.02
+trend_down: -0.02

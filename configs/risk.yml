@@ -1,0 +1,40 @@
+# Kill switches
+daily_loss_limit: -0.05          # -5% daily loss triggers halt
+trailing_drawdown_limit: -0.20   # -20% drawdown triggers halt
+
+# Global limits
+max_gross_exposure: 1.0          # 100% of NAV
+max_net_exposure: 1.0            # 100% of NAV
+max_leverage: 1.0                # No leverage in v1
+
+# Per-symbol limits
+max_symbol_weight: 0.20          # 20% max per symbol
+max_active_positions: 50
+min_cash: 0.02                   # 2% minimum cash
+
+# Turnover
+max_daily_turnover: 0.50         # 50% of NAV daily
+
+# Concentration
+max_top_n_concentration: 0.60    # Top 5 positions <= 60%
+top_n: 5
+
+# Liquidity
+max_adv_pct: 0.05               # 5% of 20-day ADV
+
+# Volatility
+target_vol: 0.15                 # 15% annualized target
+vol_regime_threshold: 0.30       # 30% vol triggers brakes
+vol_brake_position_reduction: 0.50  # Halve position size in high-vol
+vol_brake_exposure_reduction: 0.50  # Halve gross exposure in high-vol
+
+# Signal constraints
+min_confidence: 0.0              # No confidence gating by default
+min_holding_period: 1            # 1 bar minimum hold
+
+# Size reduce
+minimum_order_threshold: 0.01   # 1% of NAV — below this, reject instead of size_reduce
+
+# Operational
+max_broker_errors: 5             # Consecutive broker errors before halt
+data_staleness_threshold: 300    # Seconds before data considered stale

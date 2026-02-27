@@ -1,0 +1,37 @@
+name: core_v1
+description: V1 feature set
+
+ohlcv:
+  - ret_1d
+  - ret_5d
+  - ret_21d
+  - rv_21d
+  - rv_63d
+  - dist_20d_high
+  - dist_20d_low
+
+cross_sectional:
+  - mom_3m
+  - mom_12m_excl_1m
+  - log_mkt_cap
+  - size_rank
+  - value_rank
+
+fundamental:
+  - pe_ttm
+  - ps_ttm
+  - pb
+  - ev_ebitda
+  - roe
+  - gross_margin
+  - operating_margin
+  - fcf_margin
+  - debt_equity
+  - eps_growth_1y
+  - revenue_growth_1y
+
+regime:
+  - market_vol_20d
+  - market_trend_20d
+  - dispersion_20d
+  - corr_mean_20d
