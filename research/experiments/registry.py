@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _DATA_ROOT = Path(".yats_data")
-_EXPERIMENTS_DIR = _DATA_ROOT / "experiments"
 
 _SUBDIRS = ("spec", "runs", "evaluation", "logs", "promotion")
 
@@ -336,17 +335,21 @@ def _list_from_questdb(
     writer = QuestDBWriter.from_resource(questdb_resource)
 
     conditions = []
+    params: list[Any] = []
     if universe is not None:
-        conditions.append(f"universe = '{universe}'")
+        conditions.append("universe = %s")
+        params.append(universe)
     if feature_set is not None:
-        conditions.append(f"feature_set = '{feature_set}'")
+        conditions.append("feature_set = %s")
+        params.append(feature_set)
     if policy_type is not None:
-        conditions.append(f"policy_type = '{policy_type}'")
+        conditions.append("policy_type = %s")
+        params.append(policy_type)
 
     query = "SELECT * FROM experiment_index"
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY created_at DESC"
+    query += " ORDER BY timestamp DESC"
 
     conn = psycopg2.connect(
         host=writer.pg_host,
@@ -359,7 +362,7 @@ def _list_from_questdb(
 
     try:
         cur = conn.cursor()
-        cur.execute(query)
+        cur.execute(query, params or None)
         col_names = [desc[0] for desc in cur.description]
         rows = cur.fetchall()
         cur.close()
@@ -387,4 +390,4 @@ def _derive_universe_from_spec(spec: ExperimentSpec) -> str:
     """Derive universe string from an ExperimentSpec."""
     if len(spec.symbols) > 10:
         return f"custom_{len(spec.symbols)}"
-    return ",".join(spec.symbols)
+    return ",".join(sorted(spec.symbols))
