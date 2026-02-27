@@ -1,0 +1,11 @@
+name: regime_v1_1
+version: "1.1"
+universe: [SPY, QQQ, IWM]
+features:
+  - market_vol_20d
+  - market_trend_20d
+  - dispersion_20d
+  - corr_mean_20d
+labeling: v2
+compute_module: research.features.regime_features_v1
+label_module: research.eval.regime_slicing
