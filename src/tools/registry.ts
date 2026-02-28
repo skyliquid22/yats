@@ -87,6 +87,17 @@ import {
   monitorAuditLog,
   monitorReconcile,
 } from "./monitor/index.js";
+import {
+  riskCheckOrder,
+  riskPortfolioSummary,
+  riskStressTest,
+  riskCorrelation,
+  riskTailAnalysis,
+  riskHaltTrading,
+  riskFlattenPositions,
+  riskResumeTrading,
+  riskDecisions,
+} from "./risk/index.js";
 
 const allTools: ToolDef[] = [
   dataIngest,
@@ -152,6 +163,15 @@ const allTools: ToolDef[] = [
   monitorDataFreshness,
   monitorAuditLog,
   monitorReconcile,
+  riskCheckOrder,
+  riskPortfolioSummary,
+  riskStressTest,
+  riskCorrelation,
+  riskTailAnalysis,
+  riskHaltTrading,
+  riskFlattenPositions,
+  riskResumeTrading,
+  riskDecisions,
 ];
 
 // Indexed by tool name for fast lookup
