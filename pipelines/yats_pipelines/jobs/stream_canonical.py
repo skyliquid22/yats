@@ -222,7 +222,7 @@ async def _stream_bars(
     stop_event = asyncio.Event()
 
     # Handle graceful shutdown
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
 
@@ -275,7 +275,7 @@ async def _stream_bars(
                     # Reset backoff and disconnect timer on successful connection
                     backoff = INITIAL_BACKOFF_S
                     if disconnect_start is not None:
-                        log.info("Reconnected after %.1fs", asyncio.get_event_loop().time() - disconnect_start)
+                        log.info("Reconnected after %.1fs", loop.time() - disconnect_start)
                         disconnect_start = None
 
                     # Receive loop
@@ -323,9 +323,9 @@ async def _stream_bars(
 
                 # Track disconnect duration for alerting
                 if disconnect_start is None:
-                    disconnect_start = asyncio.get_event_loop().time()
+                    disconnect_start = loop.time()
                 else:
-                    elapsed = asyncio.get_event_loop().time() - disconnect_start
+                    elapsed = loop.time() - disconnect_start
                     if elapsed > RECONNECT_ALERT_THRESHOLD_S:
                         alert_msg = (
                             f"Streaming reconnect failed for {elapsed:.0f}s "
