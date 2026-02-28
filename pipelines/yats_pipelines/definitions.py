@@ -7,6 +7,7 @@ from yats_pipelines.jobs.feature_pipeline import feature_pipeline
 from yats_pipelines.jobs.feature_pipeline_incremental import feature_pipeline_incremental
 from yats_pipelines.jobs.ingest_alpaca import ingest_alpaca
 from yats_pipelines.jobs.ingest_financialdatasets import ingest_financialdatasets
+from yats_pipelines.jobs.promote import promote_job
 from yats_pipelines.jobs.qualify import qualify
 from yats_pipelines.jobs.shadow_run import shadow_run
 
@@ -21,5 +22,6 @@ defs = Definitions(
         experiment_sweep,
         shadow_run,
         qualify,
+        promote_job,
     ],
 )
