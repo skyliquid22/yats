@@ -1,1 +1,1 @@
-"""Execution module — broker adapters and order management."""
+"""Execution module — broker adapters, order management, state, and recovery."""
