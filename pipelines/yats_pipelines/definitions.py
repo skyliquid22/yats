@@ -10,6 +10,7 @@ from yats_pipelines.jobs.ingest_financialdatasets import ingest_financialdataset
 from yats_pipelines.jobs.promote import promote_job
 from yats_pipelines.jobs.qualify import qualify
 from yats_pipelines.jobs.shadow_run import shadow_run
+from yats_pipelines.jobs.stream_canonical import stream_canonical
 
 defs = Definitions(
     jobs=[
@@ -23,5 +24,6 @@ defs = Definitions(
         shadow_run,
         qualify,
         promote_job,
+        stream_canonical,
     ],
 )
