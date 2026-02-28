@@ -59,13 +59,44 @@ class EvaluationSplitConfig:
 
 @dataclass(frozen=True)
 class RiskConfig:
+    # Global limits
     max_gross_exposure: float = 1.0
     min_cash: float = 0.0
     max_symbol_weight: float = 1.0
     max_daily_turnover: float = 1.0
     max_active_positions: int = 999
+
+    # Kill switches
     daily_loss_limit: float = -1.0
     trailing_drawdown_limit: float = -1.0
+
+    # Net exposure & leverage
+    max_net_exposure: float = 1.0
+    max_leverage: float = 1.0
+
+    # Concentration
+    max_top_n_concentration: float = 0.60
+    top_n: int = 5
+
+    # Liquidity
+    max_adv_pct: float = 0.05
+
+    # Volatility
+    target_vol: float = 0.15
+    vol_regime_threshold: float = 0.30
+    vol_brake_position_reduction: float = 0.50
+    vol_brake_exposure_reduction: float = 0.50
+
+    # Signal constraints
+    min_confidence: float = 0.0
+    min_holding_period: int = 1
+
+    # Size reduce
+    minimum_order_threshold: float = 0.01
+
+    # Operational
+    max_broker_errors: int = 5
+    data_staleness_threshold: float = 300.0
 
 
 @dataclass(frozen=True)
