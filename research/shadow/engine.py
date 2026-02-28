@@ -1,9 +1,12 @@
 """ShadowEngine — replay market data through a policy for shadow execution.
 
-Implements PRD Appendix F.2 with execution_mode=none (direct rebalance).
-For each snapshot in the replay window, builds an observation, runs the
-policy, projects weights through risk constraints, applies transaction
-costs, and tracks portfolio value.
+Implements PRD Appendix F.2 with two execution modes:
+- execution_mode=none: direct rebalance (weights applied instantly)
+- execution_mode=sim:  full order lifecycle (OrderCompiler → risk check →
+  SimBrokerAdapter fill with slippage)
+
+Supports all policy types: equal_weight, sma, ppo, sac (and sac_* variants).
+RL policies load trained checkpoints from .yats_data/experiments/<ID>/runs/.
 
 Artifacts are written under .yats_data/shadow/<experiment_id>/<run_id>/.
 """
@@ -20,6 +23,10 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from research.execution.broker_alpaca import Fill, SimBrokerAdapter, SimBrokerConfig
+from research.execution.signal import Signal
+from research.execution.order_translator import translate_signals
+from research.execution.state import Position
 from research.experiments.spec import ExperimentSpec, RiskConfig
 from research.risk.loader import effective_risk_config
 from research.risk.project_weights import project_weights
@@ -122,6 +129,17 @@ class ShadowEngine:
         # Track daily returns for Sharpe computation
         self._daily_returns: list[float] = []
 
+        # Sim execution mode: broker adapter + position tracking
+        self._sim_broker: SimBrokerAdapter | None = None
+        self._sim_positions: dict[str, Position] = {}
+        if config.execution_mode == "sim":
+            sim_cfg = spec.execution_sim
+            self._sim_broker = SimBrokerAdapter(SimBrokerConfig(
+                slippage_model=sim_cfg.slippage_model if sim_cfg else "flat",
+                slippage_bp=sim_cfg.slippage_bp if sim_cfg else 5.0,
+                transaction_cost_bp=spec.cost_config.transaction_cost_bp,
+            ))
+
     @property
     def portfolio(self) -> ShadowPortfolio:
         return self._portfolio
@@ -197,6 +215,18 @@ class ShadowEngine:
         prev_snap: Snapshot,
         curr_snap: Snapshot,
     ) -> None:
+        """Execute a single shadow step, routing by execution_mode."""
+        if self._config.execution_mode == "sim":
+            self._execute_step_sim(step_index, prev_snap, curr_snap)
+            return
+        self._execute_step_none(step_index, prev_snap, curr_snap)
+
+    def _execute_step_none(
+        self,
+        step_index: int,
+        prev_snap: Snapshot,
+        curr_snap: Snapshot,
+    ) -> None:
         """Execute a single shadow step (direct rebalance)."""
         # 1. Build observation from current snapshot
         obs = self._build_observation(curr_snap)
@@ -260,6 +290,187 @@ class ShadowEngine:
                 fees_per_symbol=[per_symbol_fee] * self._n_symbols,
                 rejected=[False] * self._n_symbols,
                 reject_reasons=[""] * self._n_symbols,
+                portfolio_value=self._portfolio.portfolio_value,
+                cash=self._portfolio.cash,
+                regime_bucket=self._get_regime_bucket(curr_snap),
+            )
+
+    def _execute_step_sim(
+        self,
+        step_index: int,
+        prev_snap: Snapshot,
+        curr_snap: Snapshot,
+    ) -> None:
+        """Execute a single shadow step with sim broker (PRD F.2 execution_mode=sim).
+
+        Flow: policy → project_weights → compile orders → risk check →
+              SimBrokerAdapter fill → update portfolio.
+        """
+        assert self._sim_broker is not None
+
+        # 1. Build observation and get target weights
+        obs = self._build_observation(curr_snap)
+        context = self._build_policy_context(curr_snap)
+        raw_weights = self._policy.act(obs, context)
+
+        # 2. Project weights through risk constraints
+        projected = project_weights(
+            raw_weights,
+            self._effective_risk_config,
+            self._portfolio.weights,
+        )
+
+        # 3. Compile weight deltas into order signals
+        current_prices: dict[str, float] = {}
+        for sym in self._symbols:
+            current_prices[sym] = curr_snap.panel.get(sym, {}).get("close", 0.0)
+
+        signals = [
+            Signal(
+                timestamp=curr_snap.as_of,
+                symbol=sym,
+                target_position_pct=float(projected[i]),
+                model_version=self._spec.policy,
+            )
+            for i, sym in enumerate(self._symbols)
+        ]
+
+        results = translate_signals(
+            signals,
+            self._portfolio.portfolio_value,
+            self._sim_positions,
+            current_prices,
+        )
+
+        # 4. ExecutionRiskEngine: portfolio-level risk check
+        risk_ok = True
+        risk_rc = self._effective_risk_config
+        if risk_rc.daily_loss_limit < 0 and self._daily_returns:
+            cumulative_daily = sum(self._daily_returns[-1:])
+            if cumulative_daily <= risk_rc.daily_loss_limit:
+                risk_ok = False
+                logger.warning(
+                    "Step %d: daily loss limit breached (%.4f <= %.4f) — rejecting all orders",
+                    step_index, cumulative_daily, risk_rc.daily_loss_limit,
+                )
+        if risk_rc.trailing_drawdown_limit < 0 and self._portfolio.drawdown <= risk_rc.trailing_drawdown_limit:
+            risk_ok = False
+            logger.warning(
+                "Step %d: trailing drawdown limit breached (%.4f <= %.4f) — rejecting all orders",
+                step_index, self._portfolio.drawdown, risk_rc.trailing_drawdown_limit,
+            )
+
+        approved_orders = []
+        rejected_orders = []
+        for tr in results:
+            if tr.order is None:
+                continue
+            if risk_ok:
+                approved_orders.append(tr)
+            else:
+                rejected_orders.append(tr)
+
+        # 5. SimBrokerAdapter: fill approved orders
+        total_fees = 0.0
+        fill_prices: dict[str, float] = {}
+        slippage_per_sym: dict[str, float] = {}
+        rejected_syms: set[str] = {tr.signal.symbol for tr in rejected_orders}
+
+        for tr in approved_orders:
+            order = tr.order
+            assert order is not None
+            snap_price = current_prices.get(order.symbol, 0.0)
+            if snap_price <= 0:
+                rejected_syms.add(order.symbol)
+                continue
+
+            volume = curr_snap.panel.get(order.symbol, {}).get("volume", 0.0)
+            sim_fill = self._sim_broker.fill_order(
+                symbol=order.symbol,
+                side=order.side,
+                notional=order.notional,
+                snapshot_price=snap_price,
+                volume=volume,
+            )
+            total_fees += sim_fill.transaction_cost
+            fill_prices[order.symbol] = sim_fill.fill_price
+            slippage_per_sym[order.symbol] = sim_fill.slippage_bps
+
+            # Update sim position tracking
+            fill = Fill(
+                symbol=order.symbol,
+                side=order.side,
+                filled_qty=order.notional / sim_fill.fill_price if sim_fill.fill_price > 0 else 0.0,
+                filled_avg_price=sim_fill.fill_price,
+                filled_at=curr_snap.as_of,
+                commission=sim_fill.transaction_cost,
+            )
+            if order.symbol not in self._sim_positions:
+                self._sim_positions[order.symbol] = Position(symbol=order.symbol)
+            self._sim_positions[order.symbol].apply_fill(fill)
+
+        # 6. Compute realized weights: projected for filled, previous for rejected
+        realized_weights = projected.copy()
+        for i, sym in enumerate(self._symbols):
+            if sym in rejected_syms:
+                realized_weights[i] = self._portfolio.weights[i]
+
+        # 7. Compute returns and update portfolio
+        returns = self._compute_returns(prev_snap, curr_snap)
+        weighted_return = float(np.dot(self._portfolio.weights, returns))
+
+        cost = total_fees / self._portfolio.portfolio_value if self._portfolio.portfolio_value > 0 else 0.0
+
+        prev_weights = self._portfolio.weights.tolist()
+        self._portfolio.apply_step(realized_weights, weighted_return, cost)
+        self._daily_returns.append(weighted_return - cost)
+
+        # 8. Log step
+        entry = build_step_entry(
+            step_index=step_index,
+            timestamp=curr_snap.as_of.isoformat(),
+            weights=realized_weights.tolist(),
+            previous_weights=prev_weights,
+            symbols=self._symbols,
+            returns_per_symbol=returns.tolist(),
+            weighted_return=weighted_return,
+            cost=cost,
+            portfolio_value=self._portfolio.portfolio_value,
+            peak_value=self._portfolio.peak_value,
+            drawdown=self._portfolio.drawdown,
+        )
+        self._step_logger.log_step(entry)
+
+        # 9. Write to QuestDB (per-symbol rows with sim execution details)
+        if self._questdb_writer is not None:
+            per_sym_slippage = [
+                slippage_per_sym.get(sym, 0.0) for sym in self._symbols
+            ]
+            per_sym_fees = [
+                total_fees / self._n_symbols if self._n_symbols > 0 else 0.0
+                for _ in self._symbols
+            ]
+            per_sym_fill_prices = [
+                fill_prices.get(sym, current_prices.get(sym, 0.0))
+                for sym in self._symbols
+            ]
+            per_sym_rejected = [sym in rejected_syms for sym in self._symbols]
+            per_sym_reject_reasons = [
+                "risk_limit_breached" if sym in rejected_syms else ""
+                for sym in self._symbols
+            ]
+
+            self._questdb_writer.write_step(
+                timestamp=curr_snap.as_of,
+                step=step_index,
+                symbols=self._symbols,
+                target_weights=raw_weights.tolist(),
+                realized_weights=realized_weights.tolist(),
+                fill_prices=per_sym_fill_prices,
+                slippage_bps=per_sym_slippage,
+                fees_per_symbol=per_sym_fees,
+                rejected=per_sym_rejected,
+                reject_reasons=per_sym_reject_reasons,
                 portfolio_value=self._portfolio.portfolio_value,
                 cash=self._portfolio.cash,
                 regime_bucket=self._get_regime_bucket(curr_snap),
@@ -407,10 +618,11 @@ def load_policy(spec: ExperimentSpec) -> PolicyProtocol:
         )
 
     if policy_name in ("ppo", "sac") or policy_name.startswith("sac_"):
-        raise NotImplementedError(
-            f"RL policy '{policy_name}' loading for shadow replay "
-            "requires a trained checkpoint — not yet supported in shadow engine."
-        )
+        from research.policies.rl_policy_wrapper import load_rl_checkpoint
+
+        data_root = Path(".yats_data")
+        checkpoint_dir = data_root / "experiments" / spec.experiment_id / "runs"
+        return load_rl_checkpoint(policy_name, checkpoint_dir, n_symbols)
 
     raise ValueError(f"Unknown policy: {policy_name}")
 
