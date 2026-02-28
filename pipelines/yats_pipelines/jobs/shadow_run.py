@@ -135,6 +135,7 @@ def run_shadow_engine(
         run_id=run_id,
         output_dir=output_dir,
         initial_value=config.initial_value,
+        execution_mode=config.execution_mode,
     )
 
     policy = load_policy(spec)

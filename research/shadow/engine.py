@@ -93,6 +93,15 @@ class ShadowEngine:
         self._symbols = spec.symbols
         self._n_symbols = len(self._symbols)
 
+        # Resolve effective risk config (PRD §12.2)
+        self._effective_risk_config, self._risk_audit = effective_risk_config(
+            spec.risk_config,
+            spec.risk_overrides,
+            mode="shadow",
+            execution_mode=config.execution_mode,
+            qualification_replay=config.qualification_replay,
+        )
+
         # Artifact paths
         self._logs_dir = config.output_dir / "logs"
         self._logs_dir.mkdir(parents=True, exist_ok=True)
@@ -196,10 +205,10 @@ class ShadowEngine:
         context = self._build_policy_context(curr_snap)
         raw_weights = self._policy.act(obs, context)
 
-        # 3. Project weights through risk constraints
+        # 3. Project weights through risk constraints (using effective config)
         projected = project_weights(
             raw_weights,
-            self._spec.risk_config,
+            self._effective_risk_config,
             self._portfolio.weights,
         )
 
@@ -344,7 +353,8 @@ class ShadowEngine:
         return {
             "experiment_id": self._config.experiment_id,
             "run_id": self._config.run_id,
-            "execution_mode": "none",
+            "execution_mode": self._config.execution_mode,
+            "qualification_replay": self._config.qualification_replay,
             "total_snapshots": total_steps,
             "steps_executed": max(0, self._step_index - 0),
             "initial_value": self._config.initial_value,
@@ -359,6 +369,7 @@ class ShadowEngine:
             "final_weights": self._portfolio.weights.tolist(),
             "dagster_run_id": self._dagster_run_id,
             "completed_at": datetime.now(timezone.utc).isoformat(),
+            "risk_audit": self._risk_audit,
         }
 
     def _save_summary(self, summary: dict[str, Any]) -> None:
@@ -411,6 +422,8 @@ def create_shadow_run(
     data_root: Path | None = None,
     run_id: str | None = None,
     initial_value: float = 1_000_000.0,
+    execution_mode: str = "none",
+    qualification_replay: bool = False,
 ) -> ShadowEngine:
     """Create a ShadowEngine with standard artifact layout.
 
@@ -429,6 +442,8 @@ def create_shadow_run(
         run_id=run_id,
         output_dir=output_dir,
         initial_value=initial_value,
+        execution_mode=execution_mode,
+        qualification_replay=qualification_replay,
     )
 
     policy = load_policy(spec)
