@@ -20,7 +20,8 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from research.experiments.spec import ExperimentSpec
+from research.experiments.spec import ExperimentSpec, RiskConfig
+from research.risk.loader import effective_risk_config
 from research.risk.project_weights import project_weights
 from research.shadow.data_source import Snapshot
 from research.shadow.logging import StepLogger, build_step_entry
@@ -55,6 +56,8 @@ class ShadowRunConfig:
     run_id: str
     output_dir: Path
     initial_value: float = 1_000_000.0
+    execution_mode: str = "none"
+    qualification_replay: bool = False
 
 
 class ShadowEngine:
