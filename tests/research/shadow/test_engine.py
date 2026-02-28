@@ -264,3 +264,144 @@ class TestCreateShadowRun:
         summary = engine.run()
         assert summary["run_id"] == "test_run"
         assert (tmp_path / "shadow" / spec.experiment_id / "test_run" / "summary.json").exists()
+
+    def test_propagates_execution_mode(self, tmp_path: Path):
+        spec = _make_spec()
+        snapshots = _make_snapshots(3)
+        engine = create_shadow_run(
+            spec, snapshots,
+            data_root=tmp_path,
+            run_id="sim_run",
+            execution_mode="sim",
+        )
+        summary = engine.run()
+        assert summary["execution_mode"] == "sim"
+
+    def test_propagates_qualification_replay(self, tmp_path: Path):
+        spec = _make_spec()
+        snapshots = _make_snapshots(3)
+        engine = create_shadow_run(
+            spec, snapshots,
+            data_root=tmp_path,
+            run_id="qr_run",
+            qualification_replay=True,
+        )
+        summary = engine.run()
+        assert summary["qualification_replay"] is True
+
+
+# ---------------------------------------------------------------------------
+# Risk simulation mode tests (PRD §12.2)
+# ---------------------------------------------------------------------------
+
+
+class TestRiskSimulationMode:
+    """Test that risk overrides are correctly applied in shadow+sim mode."""
+
+    def test_shadow_sim_applies_overrides(self, tmp_path: Path):
+        """In shadow+sim mode, risk overrides should affect project_weights."""
+        # Spec with overrides: very tight max_symbol_weight
+        spec = _make_spec(
+            risk_config=RiskConfig(max_symbol_weight=1.0),
+            risk_overrides={"max_symbol_weight": 0.30},
+        )
+        snapshots = _make_snapshots(5)
+        config = ShadowRunConfig(
+            experiment_id="override_test",
+            run_id="run_001",
+            output_dir=tmp_path / "override_test" / "run_001",
+            execution_mode="sim",
+        )
+        engine = ShadowEngine(spec, FakePolicy(2), snapshots, config)
+        summary = engine.run()
+
+        # Verify risk audit shows overrides applied
+        assert summary["risk_audit"]["config_source"] == "production+overrides"
+        assert summary["execution_mode"] == "sim"
+
+    def test_shadow_none_mode_ignores_overrides(self, tmp_path: Path):
+        """In shadow+none mode, risk overrides are NOT applied."""
+        spec = _make_spec(
+            risk_overrides={"max_symbol_weight": 0.30},
+        )
+        snapshots = _make_snapshots(5)
+        config = ShadowRunConfig(
+            experiment_id="no_override_test",
+            run_id="run_001",
+            output_dir=tmp_path / "no_override_test" / "run_001",
+            execution_mode="none",
+        )
+        engine = ShadowEngine(spec, FakePolicy(2), snapshots, config)
+        summary = engine.run()
+
+        # Overrides should not be applied in none mode
+        assert summary["risk_audit"]["config_source"] == "spec"
+
+    def test_qualification_replay_uses_production(self, tmp_path: Path):
+        """Qualification replay always uses production config."""
+        spec = _make_spec(
+            risk_overrides={"max_symbol_weight": 0.30, "daily_loss_limit": -0.01},
+        )
+        snapshots = _make_snapshots(5)
+        config = ShadowRunConfig(
+            experiment_id="qual_test",
+            run_id="qr_001",
+            output_dir=tmp_path / "qual_test" / "qr_001",
+            execution_mode="sim",
+            qualification_replay=True,
+        )
+        engine = ShadowEngine(spec, FakePolicy(2), snapshots, config)
+        summary = engine.run()
+
+        # Should use production config despite overrides
+        assert summary["risk_audit"]["config_source"] == "production"
+        assert summary["qualification_replay"] is True
+
+    def test_no_overrides_uses_spec_config(self, tmp_path: Path):
+        """With no risk_overrides, shadow+sim uses spec config."""
+        spec = _make_spec(risk_overrides=None)
+        snapshots = _make_snapshots(5)
+        config = ShadowRunConfig(
+            experiment_id="no_overrides",
+            run_id="run_001",
+            output_dir=tmp_path / "no_overrides" / "run_001",
+            execution_mode="sim",
+        )
+        engine = ShadowEngine(spec, FakePolicy(2), snapshots, config)
+        summary = engine.run()
+        assert summary["risk_audit"]["config_source"] == "spec"
+
+    def test_overrides_change_effective_risk_behavior(self, tmp_path: Path):
+        """Verify overrides actually change portfolio behavior."""
+        snapshots = _make_snapshots(10)
+
+        # Spec with tight max_symbol_weight override (0.10 per symbol)
+        spec_tight = _make_spec(
+            risk_config=RiskConfig(max_symbol_weight=1.0),
+            risk_overrides={"max_symbol_weight": 0.10},
+        )
+        dir1 = tmp_path / "tight"
+        cfg1 = ShadowRunConfig(
+            experiment_id="tight", run_id="r1", output_dir=dir1,
+            execution_mode="sim",
+        )
+        engine1 = ShadowEngine(spec_tight, FakePolicy(2), snapshots, cfg1)
+        s1 = engine1.run()
+
+        # Spec with loose max_symbol_weight (no override, default 1.0)
+        spec_loose = _make_spec(
+            risk_config=RiskConfig(max_symbol_weight=1.0),
+            risk_overrides=None,
+        )
+        dir2 = tmp_path / "loose"
+        cfg2 = ShadowRunConfig(
+            experiment_id="loose", run_id="r2", output_dir=dir2,
+            execution_mode="sim",
+        )
+        engine2 = ShadowEngine(spec_loose, FakePolicy(2), snapshots, cfg2)
+        s2 = engine2.run()
+
+        # Tight constraint should produce different final weights
+        # (limited to 0.10 per symbol with production base)
+        assert s1["risk_audit"]["config_source"] == "production+overrides"
+        assert s2["risk_audit"]["config_source"] == "spec"

@@ -18,6 +18,7 @@ import numpy as np
 
 from research.envs.signal_weight_env import SignalWeightEnv, SignalWeightEnvConfig
 from research.experiments.spec import ExperimentSpec
+from research.risk.loader import merge_risk_overrides
 from research.training.reward_registry import RewardAdapterEnv
 from research.training.sb3_wrapper import SB3EnvWrapper
 
@@ -63,6 +64,9 @@ def train_ppo(
     if observation_columns is None:
         observation_columns = _infer_observation_columns(data)
 
+    # Apply risk overrides for training (PRD §12.2)
+    training_risk_config = merge_risk_overrides(spec.risk_config, spec.risk_overrides)
+
     env_config = SignalWeightEnvConfig(
         symbols=list(spec.symbols),
         observation_columns=observation_columns,
@@ -70,7 +74,7 @@ def train_ppo(
         slippage_bp=spec.cost_config.slippage_bp,
         execution_sim=spec.execution_sim,
         regime_feature_names=regime_feature_names,
-        risk_config=spec.risk_config,
+        risk_config=training_risk_config,
     )
     base_env = SignalWeightEnv(env_config)
 
@@ -183,6 +187,9 @@ def rollout_ppo(
     if observation_columns is None:
         observation_columns = _infer_observation_columns(data)
 
+    # Apply risk overrides for rollout (PRD §12.2)
+    rollout_risk_config = merge_risk_overrides(spec.risk_config, spec.risk_overrides)
+
     env_config = SignalWeightEnvConfig(
         symbols=list(spec.symbols),
         observation_columns=observation_columns,
@@ -190,7 +197,7 @@ def rollout_ppo(
         slippage_bp=spec.cost_config.slippage_bp,
         execution_sim=spec.execution_sim,
         regime_feature_names=regime_feature_names,
-        risk_config=spec.risk_config,
+        risk_config=rollout_risk_config,
     )
     base_env = SignalWeightEnv(env_config)
     reward_env = RewardAdapterEnv(base_env, params)
