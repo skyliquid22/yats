@@ -52,6 +52,25 @@ import {
   sweepStatus,
   sweepResults,
 } from "./sweep/index.js";
+import {
+  shadowRun,
+  shadowRunSim,
+  shadowStatus,
+  shadowResults,
+  shadowCompareModes,
+} from "./shadow/index.js";
+import {
+  qualifyRun,
+  qualifyReport,
+  qualifyGates,
+} from "./qualify/index.js";
+import {
+  promoteToResearch,
+  promoteToCandidate,
+  promoteToProduction,
+  promoteList,
+  promoteHistory,
+} from "./promote/index.js";
 
 const allTools: ToolDef[] = [
   dataIngest,
@@ -92,6 +111,19 @@ const allTools: ToolDef[] = [
   sweepRun,
   sweepStatus,
   sweepResults,
+  shadowRun,
+  shadowRunSim,
+  shadowStatus,
+  shadowResults,
+  shadowCompareModes,
+  qualifyRun,
+  qualifyReport,
+  qualifyGates,
+  promoteToResearch,
+  promoteToCandidate,
+  promoteToProduction,
+  promoteList,
+  promoteHistory,
 ];
 
 // Indexed by tool name for fast lookup
