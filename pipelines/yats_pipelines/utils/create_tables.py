@@ -269,6 +269,8 @@ CREATE TABLE IF NOT EXISTS experiment_index (
     nan_inf_violations LONG,
     qualification_status SYMBOL,
     promotion_tier SYMBOL,
+    stale BOOLEAN,
+    canonical_hash STRING,
     spec_path STRING,
     metrics_path STRING,
     dagster_run_id STRING

@@ -106,6 +106,56 @@ def load_execution_metrics(
 
 
 # ---------------------------------------------------------------------------
+# Canonical hash loading (PRD §24.3, lines 2205-2213)
+# ---------------------------------------------------------------------------
+
+
+def _load_canonical_hash(
+    experiment_id: str,
+    *,
+    questdb_resource: Any | None = None,
+) -> str | None:
+    """Load canonical_hash for an experiment from experiment_index."""
+    import psycopg2
+
+    if questdb_resource is None:
+        from pipelines.yats_pipelines.resources.questdb import QuestDBResource
+        questdb_resource = QuestDBResource()
+
+    conn = psycopg2.connect(
+        host=questdb_resource.pg_host,
+        port=questdb_resource.pg_port,
+        user=questdb_resource.pg_user,
+        password=questdb_resource.pg_password,
+        database=questdb_resource.pg_database,
+    )
+    conn.autocommit = True
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT canonical_hash FROM experiment_index "
+            "WHERE experiment_id = %s "
+            "ORDER BY created_at DESC "
+            "LIMIT 1",
+            (experiment_id,),
+        )
+        row = cur.fetchone()
+        cur.close()
+        if row and row[0]:
+            return row[0]
+        return None
+    except Exception:
+        logger.debug(
+            "Could not load canonical_hash for %s", experiment_id,
+            exc_info=True,
+        )
+        return None
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Qualification-replay bypass (PRD §9.4, lines 750-768)
 # ---------------------------------------------------------------------------
 
@@ -267,6 +317,33 @@ def run_qualification(
     logger.info("Loading metrics for candidate=%s baseline=%s", candidate_id, baseline_id)
     candidate_metrics = load_experiment_metrics(candidate_id, data_root=root)
     baseline_metrics = load_experiment_metrics(baseline_id, data_root=root)
+
+    # --- Data drift detection (PRD §24.3, lines 2205-2213) ---
+    candidate_canonical_hash = candidate_metrics.get("inputs_used", {}).get("canonical_hash")
+    baseline_canonical_hash = baseline_metrics.get("inputs_used", {}).get("canonical_hash")
+    if candidate_canonical_hash is None:
+        # Try loading from experiment_index via QuestDB
+        candidate_canonical_hash = _load_canonical_hash(
+            candidate_id, questdb_resource=questdb_resource,
+        )
+    if baseline_canonical_hash is None:
+        baseline_canonical_hash = _load_canonical_hash(
+            baseline_id, questdb_resource=questdb_resource,
+        )
+
+    from research.data.canonical_integrity import check_data_drift as _check_drift
+    if _check_drift(candidate_canonical_hash, baseline_canonical_hash):
+        warnings.append("data_drift")
+        logger.warning(
+            "DATA DRIFT: candidate.canonical_hash (%s) != baseline.canonical_hash (%s)",
+            candidate_canonical_hash, baseline_canonical_hash,
+        )
+        all_gates.append(GateResult(
+            name="data_drift", passed=True,
+            value=candidate_canonical_hash, baseline=baseline_canonical_hash,
+            threshold=None, gate_type="hard",
+            detail="Canonical data differs between candidate and baseline",
+        ))
 
     # Determine hierarchy status from candidate spec
     candidate_spec_path = root / "experiments" / candidate_id / "spec" / "experiment_spec.json"

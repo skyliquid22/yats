@@ -234,6 +234,45 @@ def check_production_approval(
         )
 
 
+def check_staleness(
+    experiment_id: str,
+    *,
+    questdb_resource: Any | None = None,
+) -> None:
+    """Stale experiments CANNOT be promoted at any tier.
+
+    PRD §24.5 (line 2263): stale experiments are hard-blocked from promotion.
+    Refresh by re-running evaluation against updated canonical data.
+    """
+    from research.data.canonical_integrity import is_experiment_stale
+
+    import psycopg2
+
+    if questdb_resource is None:
+        from pipelines.yats_pipelines.resources.questdb import QuestDBResource
+        questdb_resource = QuestDBResource()
+
+    conn = psycopg2.connect(
+        host=questdb_resource.pg_host,
+        port=questdb_resource.pg_port,
+        user=questdb_resource.pg_user,
+        password=questdb_resource.pg_password,
+        database=questdb_resource.pg_database,
+    )
+    conn.autocommit = True
+
+    try:
+        if is_experiment_stale(conn, experiment_id):
+            raise PromotionError(
+                f"Cannot promote {experiment_id}: experiment is STALE. "
+                f"Canonical data has changed since evaluation. "
+                f"Re-run evaluation against updated canonical data to clear "
+                f"the stale flag."
+            )
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Immutability check
 # ---------------------------------------------------------------------------
@@ -434,6 +473,11 @@ def promote(
     root = data_root or Path(".yats_data")
 
     logger.info("Starting promotion: %s → %s", experiment_id, target_tier)
+
+    # --- Gate 0: Staleness check (PRD §24.5 line 2263) ---
+    check_staleness(
+        experiment_id, questdb_resource=questdb_resource,
+    )
 
     # --- Gate 1: Qualification passed ---
     qualification_report = check_qualification_passed(

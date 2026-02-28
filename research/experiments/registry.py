@@ -249,11 +249,15 @@ def write_index_row(
     qualification_status: str | None = None,
     promotion_tier: str | None = None,
     nan_inf_violations: int | None = None,
+    canonical_hash: str | None = None,
+    stale: bool | None = None,
     data_root: Path | None = None,
 ) -> None:
     """Write or update an experiment_index row in QuestDB via ILP.
 
     Called on creation (spec fields only) and after evaluation (with metrics).
+    canonical_hash records the canonical data hash used during evaluation.
+    stale indicates the experiment's canonical data has since changed.
     """
     from questdb.ingress import Protocol, Sender, TimestampNanos
 
@@ -306,6 +310,12 @@ def write_index_row(
 
     if nan_inf_violations is not None:
         columns["nan_inf_violations"] = nan_inf_violations
+
+    if canonical_hash is not None:
+        columns["canonical_hash"] = canonical_hash
+
+    if stale is not None:
+        columns["stale"] = stale
 
     if dagster_run_id is not None:
         columns["dagster_run_id"] = dagster_run_id
