@@ -7,6 +7,11 @@ from yats_pipelines.jobs.feature_pipeline import feature_pipeline
 from yats_pipelines.jobs.feature_pipeline_incremental import feature_pipeline_incremental
 from yats_pipelines.jobs.ingest_alpaca import ingest_alpaca
 from yats_pipelines.jobs.ingest_financialdatasets import ingest_financialdatasets
+from yats_pipelines.jobs.paper_trading import (
+    paper_trading_health_sensor,
+    paper_trading_setup,
+    paper_trading_teardown,
+)
 from yats_pipelines.jobs.promote import promote_job
 from yats_pipelines.jobs.qualify import qualify
 from yats_pipelines.jobs.shadow_run import shadow_run
@@ -25,5 +30,10 @@ defs = Definitions(
         qualify,
         promote_job,
         stream_canonical,
+        paper_trading_setup,
+        paper_trading_teardown,
+    ],
+    sensors=[
+        paper_trading_health_sensor,
     ],
 )
