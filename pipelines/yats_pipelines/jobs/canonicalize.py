@@ -143,9 +143,14 @@ def _build_rolling_stats(rows: list[dict], window: int = 60) -> dict[str, dict]:
 
 
 def _canonicalize_equity_ohlcv(
-    conn, sender, config: CanonicalizeConfig, now: datetime, run_id: str, log
+    conn, sender, config: CanonicalizeConfig, now: datetime, run_id: str, log,
+    *, canonical_rows_out: dict[str, list[dict]] | None = None,
 ) -> int:
-    """Read raw OHLCV, validate, write canonical + reconciliation log."""
+    """Read raw OHLCV, validate, write canonical + reconciliation log.
+
+    If canonical_rows_out is provided, appends {symbol: [row_dicts]} for
+    downstream canonical hash computation.
+    """
     where = _date_clause(config.start_date, config.end_date)
     query = f"SELECT * FROM raw_alpaca_equity_ohlcv{where} ORDER BY timestamp"
 
@@ -207,6 +212,20 @@ def _canonicalize_equity_ohlcv(
                  "canonicalized_at": _ts_nanos(now),
              },
              at=ts)
+
+        # Collect canonical row for hash computation
+        if canonical_rows_out is not None:
+            canonical_rows_out.setdefault(symbol, []).append({
+                "symbol": symbol,
+                "timestamp": ts,
+                "open": bar.get("open"),
+                "high": bar.get("high"),
+                "low": bar.get("low"),
+                "close": bar.get("close"),
+                "volume": bar.get("volume"),
+                "vwap": bar.get("vwap"),
+                "trade_count": bar.get("trade_count"),
+            })
 
         # Reconciliation log
         _row(sender, "reconciliation_log",
@@ -445,13 +464,22 @@ _DOMAIN_FNS = {
 
 @op
 def canonicalize_op(context: OpExecutionContext, config: CanonicalizeConfig):
-    """Read raw tables, validate, reconcile, write canonical + reconciliation log."""
+    """Read raw tables, validate, reconcile, write canonical + reconciliation log.
+
+    After canonicalization, computes canonical hashes, detects changes,
+    invalidates feature watermarks, and marks stale experiments (PRD §24.5).
+    """
+    from research.data.canonical_integrity import process_canonical_integrity
+
     qdb = QuestDBResource()
     now = datetime.now(timezone.utc)
     run_id = context.run_id
 
     conn = _pg_conn(qdb)
     conn.autocommit = True
+
+    # Collect canonical rows for hash computation
+    canonical_rows: dict[str, list[dict]] = {}
 
     try:
         with _ilp_sender(qdb) as sender:
@@ -462,10 +490,49 @@ def canonicalize_op(context: OpExecutionContext, config: CanonicalizeConfig):
                     continue
 
                 context.log.info("Canonicalizing domain: %s", domain)
-                count = fn(conn, sender, config, now, run_id, context.log)
+                if domain == "equity_ohlcv":
+                    count = fn(
+                        conn, sender, config, now, run_id, context.log,
+                        canonical_rows_out=canonical_rows,
+                    )
+                else:
+                    count = fn(conn, sender, config, now, run_id, context.log)
                 context.log.info("Domain %s: %d canonical rows written", domain, count)
 
             sender.flush()
+
+        # --- Canonical integrity check (PRD §24.5) ---
+        if canonical_rows:
+            context.log.info("Running canonical integrity checks...")
+
+            # Determine date range
+            date_from = datetime(2020, 1, 1, tzinfo=timezone.utc)
+            date_to = now
+            if config.start_date:
+                date_from = datetime.fromisoformat(config.start_date).replace(tzinfo=timezone.utc)
+            if config.end_date:
+                date_to = datetime.fromisoformat(config.end_date).replace(tzinfo=timezone.utc)
+
+            with _ilp_sender(qdb) as sender:
+                summary = process_canonical_integrity(
+                    conn, sender,
+                    canonical_rows_by_symbol=canonical_rows,
+                    date_from=date_from,
+                    date_to=date_to,
+                    run_id=run_id,
+                    now=now,
+                    ts_nanos_fn=_ts_nanos,
+                    log=context.log,
+                )
+                sender.flush()
+
+            context.log.info(
+                "Canonical integrity: %d symbols hashed, %d changed, "
+                "%d stale experiments",
+                summary["symbols_hashed"],
+                summary["symbols_changed"],
+                summary["stale_experiments"],
+            )
     finally:
         conn.close()
 
