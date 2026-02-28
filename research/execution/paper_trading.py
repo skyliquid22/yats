@@ -12,11 +12,12 @@ or equivalent), NOT as a Dagster long-running job.
 
 from __future__ import annotations
 
+import json
 import logging
 import signal
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -26,11 +27,17 @@ from research.execution.broker_alpaca import (
     AlpacaStreamAdapter,
     BrokerError,
     Fill,
+    OrderRequest,
     OrderResult,
     OrderSide,
     OrderStatus,
 )
 from research.execution.heartbeat import HeartbeatWriter
+from research.execution.kill_switch import (
+    KillSwitchStateMachine,
+    KillTrigger,
+    TradingState,
+)
 from research.execution.order_translator import translate_signals
 from research.execution.recovery import RecoveryConfig, recover_state
 from research.execution.signal import Signal
@@ -127,6 +134,16 @@ class PaperTradingLoop:
         # Broker adapter
         broker_cfg = AlpacaBrokerConfig.from_env(paper=config.alpaca_paper)
         self._broker = AlpacaBrokerAdapter(broker_cfg)
+
+        # Kill switch state machine (PRD §24.6)
+        self._kill_switch = KillSwitchStateMachine(
+            config.experiment_id,
+            "paper",
+            ilp_host=config.ilp_host,
+            ilp_port=config.ilp_port,
+            on_halt=self._handle_halt,
+            on_resume=self._handle_resume_verification,
+        )
 
         # Bar stream
         self._stream: AlpacaStreamAdapter | None = None
@@ -304,16 +321,21 @@ class PaperTradingLoop:
 
     def _execute_iteration(self) -> None:
         """Execute a single loop iteration."""
-        # 1. Check and process pending order fills
+        # 1. Check and process pending order fills (always — even when halted,
+        #    fills are recorded but no new orders generated)
         self._poll_pending_orders()
 
-        # 2. Process pending signals
-        self._process_signals()
+        # 2. Evaluate automatic kill switch triggers
+        self._evaluate_kill_triggers()
 
-        # 3. Write portfolio snapshot periodically
+        # 3. Process pending signals (only when TRADING)
+        if self._kill_switch.is_trading:
+            self._process_signals()
+
+        # 4. Write portfolio snapshot periodically
         self._maybe_write_portfolio_snapshot()
 
-        # 4. Write heartbeat
+        # 5. Write heartbeat
         self._heartbeat_writer.write(
             loop_iteration=self._loop_iteration,
             orders_pending=len(self._pending_orders),
@@ -378,12 +400,21 @@ class PaperTradingLoop:
         if nav <= 0:
             return False
 
-        # Check maximum order threshold
+        # Kill switch gate — no new orders if not in TRADING state
+        if not self._kill_switch.is_trading:
+            return False
+
+        # Check minimum order threshold
         order_pct = notional / nav
-        if order_pct > self._risk_config.maximum_order_threshold:
-            # This is just a single-order size check; the full weight projection
-            # happens in translate_signals via the target_position_pct
-            pass  # Allow — translate already handles weight constraints
+        min_threshold = getattr(
+            self._risk_config, "minimum_order_threshold", 0.01,
+        )
+        if order_pct < min_threshold:
+            logger.debug(
+                "Order below minimum threshold: %.4f < %.4f",
+                order_pct, min_threshold,
+            )
+            return False
 
         # Check daily loss limit via current drawdown
         positions = self._position_writer.positions
@@ -400,10 +431,200 @@ class PaperTradingLoop:
             )
             return False
 
-        # Check max broker errors (tracked by pending order failures)
-        # This is monitored by the Dagster sensor, not blocked here
+        return True
+
+    # ------------------------------------------------------------------
+    # Kill switch (PRD §24.6)
+    # ------------------------------------------------------------------
+
+    def _evaluate_kill_triggers(self) -> None:
+        """Evaluate automatic kill switch triggers each iteration."""
+        if not self._kill_switch.is_trading:
+            return
+
+        positions = self._position_writer.positions
+        current_prices = self._get_current_prices()
+        snapshot = self._portfolio_writer.write_snapshot(
+            positions=positions,
+            cash=self._cash,
+            current_prices=current_prices,
+        )
+
+        # Compute data staleness
+        data_staleness_s = 0.0
+        if self._last_bar_received is not None:
+            data_staleness_s = (
+                datetime.now(timezone.utc) - self._last_bar_received
+            ).total_seconds()
+
+        trigger = self._kill_switch.evaluate_triggers(
+            daily_pnl=snapshot.daily_pnl,
+            drawdown=snapshot.drawdown,
+            daily_loss_limit=self._risk_config.daily_loss_limit,
+            trailing_drawdown_limit=self._risk_config.trailing_drawdown_limit,
+            max_broker_errors=getattr(self._risk_config, "max_broker_errors", 5),
+            data_staleness_s=data_staleness_s,
+            data_staleness_threshold=getattr(
+                self._risk_config, "data_staleness_threshold", 300.0,
+            ),
+        )
+
+        if trigger is not None:
+            details = json.dumps({
+                "drawdown": snapshot.drawdown,
+                "daily_pnl": snapshot.daily_pnl,
+                "nav": snapshot.nav,
+                "data_staleness_s": data_staleness_s,
+                "broker_errors": self._kill_switch.consecutive_broker_errors,
+            })
+            self._kill_switch.trigger_halt(trigger, details=details)
+
+    def _handle_halt(self, trigger: KillTrigger, details: str) -> None:
+        """Halt callback: cancel open orders, settle partial fills.
+
+        Called by KillSwitchStateMachine during HALTING state.
+        WebSocket stays connected for data.
+        """
+        logger.warning(
+            "Executing halt procedure: trigger=%s experiment=%s",
+            trigger.value, self._config.experiment_id,
+        )
+
+        # Cancel all pending orders
+        for order_id in list(self._pending_orders.keys()):
+            try:
+                result = self._broker.cancel_order(order_id)
+                self._order_writer.write_order(result)
+                logger.info("Halt: cancelled order %s", order_id)
+            except BrokerError as exc:
+                logger.warning("Halt: failed to cancel order %s: %s", order_id, exc)
+
+        # Poll once more to settle any partial fills
+        self._poll_pending_orders()
+
+        # Clear pending signals — they won't be processed while halted
+        with self._signal_lock:
+            discarded = len(self._pending_signals)
+            self._pending_signals.clear()
+        if discarded:
+            logger.info("Halt: discarded %d pending signals", discarded)
+
+    def _handle_resume_verification(self) -> bool:
+        """Resume verification callback.
+
+        Verifies:
+        1. All orders settled (no pending orders)
+        2. No pending fills
+        3. Risk state clean (drawdown within limits)
+        """
+        # Check no pending orders
+        if self._pending_orders:
+            logger.warning(
+                "Resume verification failed: %d pending orders",
+                len(self._pending_orders),
+            )
+            return False
+
+        # Check risk state
+        positions = self._position_writer.positions
+        current_prices = self._get_current_prices()
+        snapshot = self._portfolio_writer.write_snapshot(
+            positions=positions,
+            cash=self._cash,
+            current_prices=current_prices,
+        )
+
+        if snapshot.drawdown < self._risk_config.trailing_drawdown_limit:
+            logger.warning(
+                "Resume verification failed: drawdown=%.4f exceeds limit=%.4f",
+                snapshot.drawdown, self._risk_config.trailing_drawdown_limit,
+            )
+            return False
+
+        logger.info(
+            "Resume verification passed: NAV=%.2f drawdown=%.4f pending_orders=0",
+            snapshot.nav, snapshot.drawdown,
+        )
+        return True
+
+    def halt_trading(
+        self,
+        *,
+        triggered_by: str = "manual",
+        details: str = "{}",
+    ) -> bool:
+        """Public API: manually halt trading (MCP risk.halt_trading).
+
+        Returns True if halt was successful or already halted.
+        """
+        result = self._kill_switch.trigger_halt(
+            KillTrigger.MANUAL_HALT,
+            triggered_by=triggered_by,
+            details=details,
+        )
+        return result.success
+
+    def flatten_positions(
+        self,
+        *,
+        triggered_by: str = "manual",
+        details: str = "{}",
+    ) -> bool:
+        """Public API: flatten all positions at market (MCP risk.flatten_positions).
+
+        Emergency action: halt + close all positions at market.
+        Returns True if successful.
+        """
+        result = self._kill_switch.trigger_halt(
+            KillTrigger.MANUAL_FLATTEN,
+            triggered_by=triggered_by,
+            details=details,
+        )
+        if not result.success:
+            return False
+
+        # Close all positions at market
+        positions = self._position_writer.positions
+        current_prices = self._get_current_prices()
+
+        for sym, pos in positions.items():
+            if abs(pos.quantity) < 1e-10:
+                continue
+
+            side = OrderSide.SELL if pos.quantity > 0 else OrderSide.BUY
+            notional = abs(pos.notional(
+                current_prices.get(sym, pos.avg_entry_price),
+            ))
+
+            if notional < 1.0:
+                continue
+
+            order = OrderRequest(
+                symbol=sym,
+                side=side,
+                notional=notional,
+            )
+            try:
+                order_result = self._broker.submit_order(order)
+                self._pending_orders[order_result.order_id] = order_result
+                self._order_writer.write_order(order_result)
+                logger.info(
+                    "Flatten: submitted close order %s %s $%.2f",
+                    sym, side.value, notional,
+                )
+            except BrokerError as exc:
+                logger.error("Flatten: failed to close %s: %s", sym, exc)
 
         return True
+
+    def resume_trading(self, *, approved_by: str) -> bool:
+        """Public API: resume trading after halt (MCP risk.resume_trading).
+
+        Requires approval — managing_partner for production, PM for paper.
+        Returns True if resume succeeded.
+        """
+        result = self._kill_switch.trigger_resume(approved_by=approved_by)
+        return result.success
 
     # ------------------------------------------------------------------
     # Order submission and fill polling
@@ -414,6 +635,7 @@ class PaperTradingLoop:
         try:
             result = self._broker.submit_order(order)
             self._pending_orders[result.order_id] = result
+            self._kill_switch.record_broker_success()
 
             # Record submission
             self._order_writer.write_order(result)
@@ -424,8 +646,8 @@ class PaperTradingLoop:
             )
 
         except BrokerError as exc:
+            self._kill_switch.record_broker_error()
             logger.error("Order submission failed: %s", exc)
-            # Record the failed attempt if we have enough info
             if hasattr(exc, "code"):
                 logger.error("Broker error code: %s", exc.code)
 
@@ -468,6 +690,7 @@ class PaperTradingLoop:
                         )
 
             except BrokerError as exc:
+                self._kill_switch.record_broker_error()
                 logger.warning(
                     "Failed to poll order %s: %s", order_id, exc,
                 )
@@ -605,3 +828,11 @@ class PaperTradingLoop:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def trading_state(self) -> TradingState:
+        return self._kill_switch.state
+
+    @property
+    def kill_switch(self) -> KillSwitchStateMachine:
+        return self._kill_switch
