@@ -100,10 +100,14 @@ export class PythonRunner {
         this.sandboxConfig.memoryLimitMb * 1024 * 1024;
 
       // Use ulimit wrapper on macOS/Linux to enforce memory limit
+      const projectRoot = process.cwd();
       const proc = spawn(this.pythonPath, args, {
         cwd: sandboxDir,
         env: {
           ...buildSanitizedEnv(),
+          // Preserve Python module resolution — project root must be on path
+          // so -m research.foo.bar still resolves from the sandbox
+          PYTHONPATH: projectRoot,
           YATS_SANDBOX: "1",
           YATS_SANDBOX_DIR: sandboxDir,
           PYTHONDONTWRITEBYTECODE: "1",
