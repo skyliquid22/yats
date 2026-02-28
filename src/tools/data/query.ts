@@ -1,10 +1,11 @@
-// data.query — Query canonical data (parameterized SELECT only)
+// data.query — Parameterized SELECT query builder with role-based table whitelisting
 import { QuestDBClient } from "../../bridge/questdb-client.js";
 import { ok, err, type ToolDef } from "../../types/tools.js";
+import { type Role, checkTableAccess, tableDeniedMessage } from "../../auth/index.js";
 
 export const dataQuery: ToolDef = {
   name: "data.query_v1",
-  description: "Execute a parameterized SELECT query against QuestDB canonical data. No DDL/DML allowed.",
+  description: "Execute a parameterized SELECT query against QuestDB canonical data. No DDL/DML allowed. Table access is role-restricted.",
   inputSchema: {
     type: "object",
     properties: {
@@ -18,11 +19,18 @@ export const dataQuery: ToolDef = {
     const sql = args.sql as string;
     const params = (args.params as unknown[] | undefined) ?? [];
     const limit = Math.min((args.limit as number | undefined) ?? 1000, 10000);
+    const role = (args._invoker_role as Role | undefined) ?? "intern";
 
-    // Enforce SELECT-only at handler level as well
+    // Enforce SELECT-only at handler level
     const trimmed = sql.trim().toUpperCase();
     if (!trimmed.startsWith("SELECT")) {
       return err("Only SELECT queries are allowed");
+    }
+
+    // Role-based table whitelist check (PRD Section 21.2)
+    const tableCheck = checkTableAccess(role, sql);
+    if (!tableCheck.allowed) {
+      return err(tableDeniedMessage(role, tableCheck.denied!));
     }
 
     // Append LIMIT if not already present
