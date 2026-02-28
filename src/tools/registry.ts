@@ -71,6 +71,22 @@ import {
   promoteList,
   promoteHistory,
 } from "./promote/index.js";
+import {
+  executionStartPaper,
+  executionStopPaper,
+  executionPaperStatus,
+  executionPromoteLive,
+  executionPositions,
+  executionOrders,
+  executionNav,
+} from "./execution/index.js";
+import {
+  monitorHealth,
+  monitorPipelineStatus,
+  monitorDataFreshness,
+  monitorAuditLog,
+  monitorReconcile,
+} from "./monitor/index.js";
 
 const allTools: ToolDef[] = [
   dataIngest,
@@ -124,6 +140,18 @@ const allTools: ToolDef[] = [
   promoteToProduction,
   promoteList,
   promoteHistory,
+  executionStartPaper,
+  executionStopPaper,
+  executionPaperStatus,
+  executionPromoteLive,
+  executionPositions,
+  executionOrders,
+  executionNav,
+  monitorHealth,
+  monitorPipelineStatus,
+  monitorDataFreshness,
+  monitorAuditLog,
+  monitorReconcile,
 ];
 
 // Indexed by tool name for fast lookup
