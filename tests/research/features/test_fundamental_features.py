@@ -1,1 +1,123 @@
-[[{'symbol': '["AAPL", "MSFT", "GOOGL"] * 10', 'timestamp': "pd.date_range('2023-01-01", 'freq="D': '.', 'pe_ratio': 15.0, 'ps_ratio': 'np.random.uniform(1, 10, 30)', 'pb_ratio': 'np.random.uniform(1, 5, 30)', 'ev_ebitda': 'np.random.uniform(5, 20, 30)', 'roe': 'np.random.uniform(0.05, 0.3, 30)', 'gross_margin': 'np.random.uniform(0.2, 0.8, 30)', 'operating_margin': 'np.random.uniform(0.1, 0.4, 30)', 'fcf_margin': 'np.random.uniform(0.05, 0.2, 30)', 'debt_to_equity': 'np.random.uniform(0.1, 2.0, 30)', 'eps_growth_yoy': 'np.random.uniform(-0.1, 0.3, 30)', 'revenue_growth_yoy': 'np.random.uniform(-0.1, 0.3, 30)', 'shares_outstanding': 'np.random.uniform(1e8, 1e10, 30)', 'df.set_index(["symbol': 'date"], inplace=True)\n        return df\n\n    def test_fundamental_feature_computations(self', 'Test that all fundamental features correctly extract their source columns."': 'Create a mapping of feature names to expected source columns\n        expected_mapping = {\n            "pe_ttm": "pe_ratio",\n            "ps_ttm": "ps_ratio",\n            "pb": "pb_ratio",\n            "ev_ebitda": "ev_ebitda",\n            "roe": "roe",\n            "gross_margin": "gross_margin",\n            "operating_margin": "operating_margin",\n            "fcf_margin": "fcf_margin",\n            "debt_equity": "debt_to_equity",\n            "eps_growth_1y": "eps_growth_yoy",\n            "revenue_growth_1y": "revenue_growth_yoy",\n        }\n        \n        # Test each fundamental feature\n        for feature_name, source_col in expected_mapping.items():\n            # Get the feature function from the registry\n            feature_func = load_feature_set([feature_name])[feature_name]\n            \n            # Create sample data with the source column\n            sample_data = sample_fundamental_data[[source_col]].copy()\n            sample_data.columns = [source_col]\n            \n            # Compute the feature\n            result = feature_func(sample_data)\n            \n            # Check that the result matches the source column\n            expected = sample_data[source_col]\n            pd.testing.assert_series_equal(result, expected, check_names=False)\n\n    def test_as_of_no_lookahead_semantics(self', 'Test as-of/no-lookahead semantics validation.\n        \n        This test ensures that fundamental data is forward-filled correctly with \n        point-in-time semantics - values are only available from their observation \n        date onward, with no lookahead.\n        "': 'Create a controlled test case with known dates and values\n        dates = pd.date_range(', 'periods=10, freq="D': 'n        symbols = [', 'AAPL': 'MSFT', 'symbols': "n            # Value 1 for first 3 days\n            for i in range(3'"}, 'n            # Value 2 for next 4 days\n            for i in range(3\', \'pe_ratio\': 20.0}\n            # Value 3 for last 3 days\n            for i in range(7\', \'pe_ratio\': 25.0}\n        \n        df = pd.DataFrame(test_data)\n        df.set_index(["symbol', 'timestamp'], [', \'"AAPL":\':', '.', 'copy()\n        \n        # Compute the pe_ttm feature\n        pe_ttm_func = load_feature_set(["pe_ttm'], ['pe_ttm'], [3], [3, 7], [7, 25.0, '.', "all()\n\n    def test_forward_fill_behavior(self', 'Test forward-fill behavior for fundamental features.", ": 'Create test data with gaps to verify forward-fill behavior\n        dates = pd.date_range(", 'periods=10, freq="D")\n        symbols = ["AAPL"]\n        \n        # Create sparse data - only values at specific dates\n        test_data = [\n            {"symbol": "AAPL", "timestamp": dates[0], "pe_ratio": 15.0},\n            {"symbol": "AAPL", "timestamp": dates[3], "pe_ratio": 20.0},\n            {"symbol": "AAPL", "timestamp": dates[7], "pe_ratio": 25.0},\n        ]\n        \n        df = pd.DataFrame(test_data)\n        df.set_index(["symbol", "timestamp"], inplace=True)\n        \n        # Before forward-fill, we should only have values at specific dates\n        assert df.shape[0] == 3\n        \n        # After forward-fill (simulated), values should propagate forward\n        # This test assumes the forward-fill happens in the pipeline before feature computation\n        # Here we just test that the feature correctly uses the forward-filled data\n        \n        # Create expected forward-filled data\n        expected_data = []\n        for i, date in enumerate(dates', 'expected_value', 15.0, 'if i < 3 else (20.0 if i < 7 else 25.0)}\n        \n        expected_df = pd.DataFrame(expected_data)\n        expected_df.set_index(["symbol', 'timestamp'], ['pe_ttm'], ['pe_ttm'], ['pe_ratio'], ['n            "pe_ttm', 'ps_ttm', 'pb', 'ev_ebitda', 'roe', 'n            "gross_margin', 'operating_margin', 'fcf_margin', 'n            "debt_equity', 'eps_growth_1y', 'revenue_growth_1y', 'n        ]\n        \n        feature_funcs = load_feature_set(fundamental_features)\n        \n        # Test that each feature correctly maps to its source column\n        mapping = {\n            "pe_ttm": "pe_ratio', 'n            "ps_ttm": "ps_ratio', 'n            "pb": "pb_ratio', 'n            "ev_ebitda": "ev_ebitda', 'n            "roe": "roe', 'n            "gross_margin": "gross_margin', 'n            "operating_margin": "operating_margin', 'n            "fcf_margin": "fcf_margin', 'n            "debt_equity": "debt_to_equity', 'n            "eps_growth_1y": "eps_growth_yoy', 'n            "revenue_growth_1y": "revenue_growth_yoy', "n        }\n        \n        for feature_name, source_col in mapping.items():\n            feature_func = feature_funcs[feature_name]\n            result = feature_func(sample_data)\n            expected = sample_data[source_col]\n            pd.testing.assert_series_equal(result, expected, check_names=False)']"]]
+"""Tests for fundamental_features — pass-through mapping and as-of/no-lookahead."""
+
+from __future__ import annotations
+
+import pandas as pd
+import pytest
+
+# Importing the module registers all fundamental features as a side effect
+import research.features.fundamental_features  # noqa: F401
+from research.features.feature_registry import registry
+
+
+_FUNDAMENTAL_MAP = {
+    "pe_ttm": "pe_ratio",
+    "ps_ttm": "ps_ratio",
+    "pb": "pb_ratio",
+    "ev_ebitda": "ev_ebitda",
+    "roe": "roe",
+    "gross_margin": "gross_margin",
+    "operating_margin": "operating_margin",
+    "fcf_margin": "fcf_margin",
+    "debt_equity": "debt_to_equity",
+    "eps_growth_1y": "eps_growth_yoy",
+    "revenue_growth_1y": "revenue_growth_yoy",
+}
+
+
+class TestFundamentalPassThrough:
+    def test_all_features_registered(self):
+        for feat_name in _FUNDAMENTAL_MAP:
+            fn = registry.get(feat_name)
+            assert callable(fn)
+
+    def test_each_feature_extracts_correct_column(self):
+        for feat_name, source_col in _FUNDAMENTAL_MAP.items():
+            df = pd.DataFrame({source_col: [1.5, 2.5, 3.5]})
+            fn = registry.get(feat_name)
+            result = fn(df)
+            pd.testing.assert_series_equal(result, df[source_col])
+
+    def test_pe_ttm_returns_pe_ratio(self):
+        df = pd.DataFrame({"pe_ratio": [15.0, 20.0, 25.0]})
+        fn = registry.get("pe_ttm")
+        result = fn(df)
+        assert list(result) == [15.0, 20.0, 25.0]
+
+    def test_debt_equity_maps_to_debt_to_equity(self):
+        df = pd.DataFrame({"debt_to_equity": [0.5, 1.2, 2.0]})
+        fn = registry.get("debt_equity")
+        result = fn(df)
+        assert list(result) == [0.5, 1.2, 2.0]
+
+
+class TestAsOfNoLookahead:
+    """Verify point-in-time / as-of semantics for fundamental forward-fill.
+
+    The canonicalizer forward-fills fundamentals so that each trading day has
+    the most recent known value — no future data leaks back in time.
+    We simulate this here to verify the expected behavior.
+    """
+
+    def test_forward_fill_no_lookahead(self):
+        """Metric filed on day 3 must NOT appear on days 0-2."""
+        dates = pd.date_range("2023-01-01", periods=10)
+        # Observation filed on day 3, updated on day 7
+        raw = pd.DataFrame({
+            "timestamp": [dates[3], dates[7]],
+            "pe_ratio": [15.0, 20.0],
+        }).set_index("timestamp")
+
+        # Reindex to all dates and forward-fill
+        filled = raw.reindex(dates).ffill()
+
+        # Days before first observation: NaN (no lookahead)
+        assert filled["pe_ratio"].iloc[0:3].isna().all()
+        # Day 3 onward: 15.0
+        assert filled["pe_ratio"].iloc[3] == 15.0
+        assert filled["pe_ratio"].iloc[6] == 15.0
+        # Day 7 onward: 20.0
+        assert filled["pe_ratio"].iloc[7] == 20.0
+        assert filled["pe_ratio"].iloc[9] == 20.0
+
+    def test_as_of_direction_forward_not_backward(self):
+        """Forward-fill must propagate values forward — backfill would be lookahead."""
+        dates = pd.date_range("2023-01-01", periods=5)
+        raw = pd.DataFrame({
+            "timestamp": [dates[2]],
+            "pe_ratio": [25.0],
+        }).set_index("timestamp")
+
+        filled = raw.reindex(dates).ffill()
+        backfilled = raw.reindex(dates).bfill()
+
+        # Forward-fill: days 0-1 are NaN
+        assert filled["pe_ratio"].iloc[0:2].isna().all()
+        # Backfill: days 0-1 get 25.0 — this is lookahead, should NOT be used
+        assert backfilled["pe_ratio"].iloc[0] == 25.0
+        # Confirm the two approaches differ
+        assert not filled.equals(backfilled)
+
+    def test_latest_report_supersedes_older(self):
+        """If two reports exist for same period, the later report_date wins."""
+        dates = pd.date_range("2023-01-01", periods=5)
+        # Two filings — day 1 first, day 3 supersedes
+        raw = pd.DataFrame({
+            "timestamp": [dates[1], dates[3]],
+            "pe_ratio": [10.0, 15.0],
+        }).set_index("timestamp")
+
+        filled = raw.reindex(dates).ffill()
+
+        # On day 2, value is 10.0 (only day 1 known)
+        assert filled["pe_ratio"].iloc[2] == 10.0
+        # On day 3 and after, value is 15.0 (superseded)
+        assert filled["pe_ratio"].iloc[3] == 15.0
+        assert filled["pe_ratio"].iloc[4] == 15.0
+
+    def test_feature_function_uses_prefilled_column(self):
+        """Feature function just reads column — pipeline pre-fills before calling."""
+        df = pd.DataFrame({"pe_ratio": [15.0, 15.0, 20.0, 20.0, 20.0]})
+        fn = registry.get("pe_ttm")
+        result = fn(df)
+        assert list(result) == [15.0, 15.0, 20.0, 20.0, 20.0]
