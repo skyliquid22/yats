@@ -6,6 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { tools } from "./tools/registry.js";
 import { type Role, isValidRole, canInvoke, deniedMessage, checkRateLimit } from "./auth/index.js";
+import { logToolInvocation } from "./audit.js";
 
 const DEFAULT_ROLE: Role = "intern";
 
@@ -70,7 +71,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   // 4. Pass role through to handler via args (for tools that need it, e.g. data.query)
   const argsWithRole = { ...(args ?? {}), _invoker_role: role };
+
+  const startTime = performance.now();
   const result = await tool.handler(argsWithRole);
+  const durationMs = performance.now() - startTime;
+
+  // 5. Audit trail — non-blocking, fire-and-forget
+  logToolInvocation(name, agentId, argsWithRole, result, durationMs).catch(() => {});
+
   return {
     content: result.content.map((c) => ({ type: "text" as const, text: c.text })),
     isError: result.isError,
