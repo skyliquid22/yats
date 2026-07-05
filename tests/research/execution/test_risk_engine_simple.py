@@ -1,0 +1,1 @@
+[[0.3, 0.2], [0.3, 0.2], ['RiskDecision(\n                rule_id="max_gross_exposure', 'decision=Decision.PASS,\n                details={"total', 0.5, 'limit', 1.0], [0], [0], [0.8, 0.7], [0.5, 0.5], ['RiskDecision(\n                rule_id="max_gross_exposure', 'decision=Decision.REJECT,\n                details={"total', 1.5, 'limit', 1.0]]
