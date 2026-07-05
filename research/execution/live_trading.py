@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+import numpy as np
+
 from research.execution.broker_alpaca import (
     AlpacaBrokerAdapter,
     AlpacaBrokerConfig,
@@ -51,7 +53,8 @@ from research.execution.state import (
 )
 from research.experiments.spec import RiskConfig
 from research.risk.loader import load_production_risk_config
-from research.risk.project_weights import project_weights
+from research.risk.project_weights import project_weights_full, Decision, RiskResult
+from research.risk.decisions import RiskDecisionsWriter
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +138,14 @@ class LiveTradingLoop:
 
         # Risk config — live trading ALWAYS uses production config
         self._risk_config = load_production_risk_config()
+
+        # Risk decisions writer
+        self._risk_writer = RiskDecisionsWriter(
+            experiment_id=config.experiment_id,
+            mode="live",
+            ilp_host=config.ilp_host,
+            ilp_port=config.ilp_port,
+        )
 
         # Broker adapter — LIVE endpoint, production_tier=True
         broker_cfg = AlpacaBrokerConfig.from_env(
@@ -352,9 +363,54 @@ class LiveTradingLoop:
             logger.warning("NAV is zero or negative (%.2f), skipping signals", nav)
             return
 
-        results = translate_signals(
-            signals, nav, positions, current_prices,
+        # Net signals per symbol (keep latest timestamp per symbol)
+        latest_by_symbol: dict[str, Signal] = {}
+        for sig in signals:
+            existing = latest_by_symbol.get(sig.symbol)
+            if existing is None or sig.timestamp > existing.timestamp:
+                latest_by_symbol[sig.symbol] = sig
+        netted = list(latest_by_symbol.values())
+
+        # Build target weight array and prev weight array for risk engine
+        syms = [s.symbol for s in netted]
+        target_weights = np.array([s.target_position_pct for s in netted])
+        prev_weights = np.array([
+            abs(positions[sym].notional(
+                current_prices.get(sym, positions[sym].avg_entry_price)
+            )) / nav
+            if sym in positions else 0.0
+            for sym in syms
+        ])
+
+        # --- Pre-order risk gate: full 15-constraint engine ---
+        risk_result = project_weights_full(
+            target_weights, self._risk_config, prev_weights, nav=nav,
         )
+        self._risk_writer.log_result(risk_result)
+
+        if risk_result.halted or any(
+            d.decision == Decision.HALT for d in risk_result.decisions
+        ):
+            logger.warning("Risk engine HALT — aborting signal batch")
+            self._kill_switch.trigger_halt(
+                KillTrigger.MANUAL_HALT,
+                details='{"reason": "risk_engine_halt"}',
+            )
+            return
+
+        # Rebuild signals with risk-projected weights
+        adjusted = [
+            Signal(
+                timestamp=sig.timestamp,
+                symbol=sig.symbol,
+                target_position_pct=float(risk_result.weights[i]),
+                model_version=sig.model_version,
+                confidence_score=sig.confidence_score,
+            )
+            for i, sig in enumerate(netted)
+        ]
+
+        results = translate_signals(adjusted, nav, positions, current_prices)
 
         for result in results:
             if result.order is None:
@@ -363,50 +419,7 @@ class LiveTradingLoop:
                     result.signal.symbol, result.reason,
                 )
                 continue
-
-            if not self._risk_check(result.order.symbol, result.order.notional, nav):
-                logger.info(
-                    "Risk check blocked order: %s %s $%.2f",
-                    result.order.symbol,
-                    result.order.side.value,
-                    result.order.notional,
-                )
-                continue
-
             self._submit_order(result.order)
-
-    def _risk_check(
-        self, symbol: str, notional: float, nav: float,
-    ) -> bool:
-        if nav <= 0:
-            return False
-
-        if not self._kill_switch.is_trading:
-            return False
-
-        order_pct = notional / nav
-        if order_pct < self._risk_config.minimum_order_threshold:
-            logger.debug(
-                "Order below minimum threshold: %.4f < %.4f",
-                order_pct, self._risk_config.minimum_order_threshold,
-            )
-            return False
-
-        positions = self._position_writer.positions
-        current_prices = self._get_current_prices()
-        snapshot = self._portfolio_writer.write_snapshot(
-            positions=positions,
-            cash=self._cash,
-            current_prices=current_prices,
-        )
-        if snapshot.drawdown < self._risk_config.daily_loss_limit:
-            logger.warning(
-                "Daily loss limit breached: drawdown=%.4f limit=%.4f",
-                snapshot.drawdown, self._risk_config.daily_loss_limit,
-            )
-            return False
-
-        return True
 
     # ------------------------------------------------------------------
     # Kill switch
@@ -659,6 +672,42 @@ class LiveTradingLoop:
             fill.symbol, fill.side.value,
             fill.filled_qty, fill.filled_avg_price, self._cash,
         )
+
+        # Post-fill constraint verification (three-layer enforcement layer 3)
+        self._verify_post_fill_constraints()
+
+    def _verify_post_fill_constraints(self) -> None:
+        """Verify portfolio constraints after a fill — PRD three-layer enforcement."""
+        positions = self._position_writer.positions
+        if not positions:
+            return
+
+        current_prices = self._get_current_prices()
+        nav = self._compute_nav(positions, current_prices)
+        if nav <= 0:
+            return
+
+        syms = list(positions.keys())
+        current_weights = np.array([
+            abs(positions[sym].notional(
+                current_prices.get(sym, positions[sym].avg_entry_price)
+            )) / nav
+            for sym in syms
+        ])
+
+        risk_result = project_weights_full(
+            current_weights, self._risk_config, current_weights, nav=nav,
+        )
+        self._risk_writer.log_result(risk_result)
+
+        if risk_result.halted or any(
+            d.decision == Decision.HALT for d in risk_result.decisions
+        ):
+            logger.warning("Post-fill constraint breach — halting trading")
+            self._kill_switch.trigger_halt(
+                KillTrigger.MANUAL_HALT,
+                details='{"reason": "post_fill_constraint_breach"}',
+            )
 
     # ------------------------------------------------------------------
     # Portfolio snapshots
