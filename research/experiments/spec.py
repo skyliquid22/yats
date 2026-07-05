@@ -125,7 +125,7 @@ class ExecutionSimConfig:
 # Allowed policies
 # ---------------------------------------------------------------------------
 
-_VALID_POLICIES = {"equal_weight", "sma", "ppo", "sac"}
+_VALID_POLICIES = {"equal_weight", "sma", "ppo", "sac", "hierarchical"}
 
 
 def _is_valid_policy(p: str) -> bool:

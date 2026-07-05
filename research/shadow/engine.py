@@ -197,6 +197,11 @@ class ShadowEngine:
         summary = self._build_summary()
         self._save_summary(summary)
 
+        # Write mode timeline for hierarchical policies
+        if hasattr(self._policy, "save_timeline"):
+            timeline_path = self._config.output_dir / "evaluation" / "mode_timeline.json"
+            self._policy.save_timeline(timeline_path)
+
         # Write execution_metrics summary to QuestDB
         if self._questdb_writer is not None:
             self._questdb_writer.write_metrics(
@@ -652,6 +657,17 @@ def load_policy(spec: ExperimentSpec) -> PolicyProtocol:
         data_root = Path(".yats_data")
         checkpoint_dir = data_root / "experiments" / spec.experiment_id / "runs"
         return load_rl_checkpoint(policy_name, checkpoint_dir, n_symbols)
+
+    if policy_name == "hierarchical":
+        from research.hierarchy.controller import ModeController
+        from research.hierarchy.policy_wrapper import HierarchicalPolicy
+        from research.hierarchy.allocators.factory import build_allocators
+
+        if not spec.hierarchy_enabled:
+            raise ValueError("policy='hierarchical' requires hierarchy_enabled=True in spec")
+        controller = ModeController.from_config(spec.controller_config)
+        allocators = build_allocators(spec.allocator_by_mode, n_symbols, spec)
+        return HierarchicalPolicy(controller, allocators)
 
     raise ValueError(f"Unknown policy: {policy_name}")
 
