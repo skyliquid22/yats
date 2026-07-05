@@ -264,18 +264,19 @@ def _winsorize(series: pd.Series, lower: float = 0.01, upper: float = 0.99) -> p
 
 def _features_run_already_written(conn, run_id: str) -> bool:
     """Return True if the features table already has rows for this dagster_run_id."""
-    cur = conn.cursor()
     try:
-        cur.execute(
-            "SELECT count(*) FROM features WHERE dagster_run_id = %s LIMIT 1",
-            (run_id,),
-        )
-        row = cur.fetchone()
-        return bool(row and row[0] > 0)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT count(*) FROM features WHERE dagster_run_id = %s LIMIT 1",
+                (run_id,),
+            )
+            row = cur.fetchone()
+            return bool(row and row[0] > 0)
+        finally:
+            cur.close()
     except Exception:
         return False
-    finally:
-        cur.close()
 
 
 def _write_features(
@@ -650,7 +651,7 @@ def _compute_regime_incremental(
             new_ts_reset = new_ts.reset_index(drop=True)
             written = _write_features(
                 sender, symbol, new_ts_reset,
-                regime_features, feature_set, feature_set_version, now,
+                regime_features, feature_set, feature_set_version, now, run_id,
             )
             total_written += written
 
@@ -686,6 +687,7 @@ def feature_pipeline_incremental_op(
     """
     qdb = QuestDBResource()
     now = datetime.now(timezone.utc)
+    run_id = context.run_id
 
     # Load feature set definition
     fs = registry.load_feature_set(config.feature_set)
@@ -702,6 +704,13 @@ def feature_pipeline_incremental_op(
     conn.autocommit = True
 
     try:
+        # Idempotency check: skip if this run already wrote features
+        if _features_run_already_written(conn, run_id):
+            context.log.info(
+                "Features for run %s already written — skipping (idempotent)", run_id
+            )
+            return
+
         # Read all watermarks for this feature set
         watermarks = _read_watermarks(conn, config.feature_set)
         context.log.info(
@@ -717,7 +726,7 @@ def feature_pipeline_incremental_op(
         per_symbol_written = _compute_per_symbol_incremental(
             conn, tickers, watermarks, fs,
             config.feature_set, config.feature_set_version,
-            qdb, now, context,
+            qdb, now, context, run_id,
         )
         context.log.info("Per-symbol: %d new rows written", per_symbol_written)
 
@@ -726,7 +735,7 @@ def feature_pipeline_incremental_op(
         cs_written = _compute_cross_sectional_incremental(
             conn, tickers, watermarks, fs,
             config.feature_set, config.feature_set_version,
-            qdb, now, context,
+            qdb, now, context, run_id,
         )
         context.log.info("Cross-sectional: %d new rows written", cs_written)
 
@@ -737,7 +746,7 @@ def feature_pipeline_incremental_op(
             regime_written = _compute_regime_incremental(
                 conn, tickers, config.regime_universe, watermarks, fs,
                 config.feature_set, config.feature_set_version,
-                qdb, now, context,
+                qdb, now, context, run_id,
             )
             context.log.info("Regime: %d new rows written", regime_written)
 

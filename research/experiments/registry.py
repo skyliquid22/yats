@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import psycopg2
+
 from research.experiments.spec import ExperimentSpec
 
 logger = logging.getLogger(__name__)
@@ -240,6 +242,33 @@ class QuestDBWriter:
         )
 
 
+def _index_run_exists(writer: "QuestDBWriter", dagster_run_id: str) -> bool:
+    """Return True if experiment_index already has a row for this dagster_run_id."""
+    try:
+        conn = psycopg2.connect(
+            host=writer.pg_host,
+            port=writer.pg_port,
+            user=writer.pg_user,
+            password=writer.pg_password,
+            database=writer.pg_database,
+        )
+        conn.autocommit = True
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT count(*) FROM experiment_index "
+                "WHERE dagster_run_id = %s LIMIT 1",
+                (dagster_run_id,),
+            )
+            row = cur.fetchone()
+            cur.close()
+            return bool(row and row[0] > 0)
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
 def write_index_row(
     spec: ExperimentSpec,
     *,
@@ -266,6 +295,15 @@ def write_index_row(
         questdb_resource = QuestDBResource()
 
     writer = QuestDBWriter.from_resource(questdb_resource)
+
+    # Idempotency: skip if this dagster_run_id already has an experiment_index row.
+    if dagster_run_id and _index_run_exists(writer, dagster_run_id):
+        logger.info(
+            "experiment_index: run %s already written for %s — skipping (idempotent)",
+            dagster_run_id,
+            spec.experiment_id,
+        )
+        return
     experiment_id = spec.experiment_id
     now = datetime.now(timezone.utc)
 
@@ -340,8 +378,6 @@ def _list_from_questdb(
     policy_type: str | None = None,
 ) -> list[dict[str, Any]]:
     """Query experiment_index from QuestDB via PG wire."""
-    import psycopg2
-
     writer = QuestDBWriter.from_resource(questdb_resource)
 
     conditions = []
