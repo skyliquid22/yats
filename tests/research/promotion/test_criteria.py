@@ -221,5 +221,17 @@ class TestArtifactGates:
         (tmp_path / "spec" / "experiment_spec.json").write_text("{}")
         (tmp_path / "evaluation").mkdir()
         (tmp_path / "evaluation" / "metrics.json").write_text("{}")
+        (tmp_path / "logs").mkdir()
+        (tmp_path / "logs" / "run_summary.json").write_text("{}")
         results = evaluate_artifact_gates(str(tmp_path))
         assert results[0].passed
+
+    def test_missing_run_summary_fails(self, tmp_path):
+        (tmp_path / "spec").mkdir()
+        (tmp_path / "spec" / "experiment_spec.json").write_text("{}")
+        (tmp_path / "evaluation").mkdir()
+        (tmp_path / "evaluation" / "metrics.json").write_text("{}")
+        # logs/run_summary.json intentionally omitted
+        results = evaluate_artifact_gates(str(tmp_path))
+        assert not results[0].passed
+        assert "run_summary.json" in results[0].detail

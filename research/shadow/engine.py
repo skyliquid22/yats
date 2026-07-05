@@ -589,9 +589,33 @@ class ShadowEngine:
         }
 
     def _save_summary(self, summary: dict[str, Any]) -> None:
-        """Write summary.json."""
+        """Write summary.json, execution_metrics.json, and metrics_sim.json."""
         self._summary_path.write_text(
             json.dumps(summary, indent=2) + "\n", encoding="utf-8",
+        )
+
+        execution_metrics = {
+            "experiment_id": summary["experiment_id"],
+            "run_id": summary["run_id"],
+            "execution_mode": summary["execution_mode"],
+            "execution_halts": summary["execution_halts"],
+            "completed_at": summary["completed_at"],
+        }
+        (self._config.output_dir / "execution_metrics.json").write_text(
+            json.dumps(execution_metrics, indent=2) + "\n", encoding="utf-8",
+        )
+
+        metrics_sim = {
+            "experiment_id": summary["experiment_id"],
+            "run_id": summary["run_id"],
+            "sharpe": summary["sharpe"],
+            "max_drawdown": summary["max_drawdown"],
+            "total_return": summary["total_return"],
+            "final_value": summary["final_value"],
+            "initial_value": summary["initial_value"],
+        }
+        (self._config.output_dir / "metrics_sim.json").write_text(
+            json.dumps(metrics_sim, indent=2) + "\n", encoding="utf-8",
         )
 
 
