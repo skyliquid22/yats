@@ -1,18 +1,126 @@
-"""Tests for canonicalize — _validate_ohlcv_row and _canonicalize_fundamentals."""
+"""Tests for canonicalize — dedup guards, validation, and fundamentals logic."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
 from yats_pipelines.jobs.canonicalize import (
     CanonicalizeConfig,
-    _validate_ohlcv_row,
     _build_rolling_stats,
+    _canonicalize_equity_ohlcv,
+    _canonicalize_financial_metrics,
     _canonicalize_fundamentals,
+    _run_already_written,
+    _validate_ohlcv_row,
 )
+
+
+# ---------------------------------------------------------------------------
+# _run_already_written
+# ---------------------------------------------------------------------------
+
+
+def _make_conn_dedup(count: int):
+    """Mock connection returning count for SELECT count(*) dedup check."""
+    cur = MagicMock()
+    cur.fetchone.return_value = (count,)
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    return conn
+
+
+def test_run_already_written_true():
+    conn = _make_conn_dedup(3)
+    assert _run_already_written(conn, "run-123", "equity_ohlcv") is True
+
+
+def test_run_already_written_false():
+    conn = _make_conn_dedup(0)
+    assert _run_already_written(conn, "run-456", "equity_ohlcv") is False
+
+
+def test_run_already_written_query_error_returns_false():
+    conn = MagicMock()
+    conn.cursor.side_effect = Exception("DB error")
+    assert _run_already_written(conn, "run-789", "fundamentals") is False
+
+
+def test_equity_ohlcv_dedup_skips_on_second_run():
+    """When run_id already in reconciliation_log, no ILP rows are written."""
+    now = datetime(2024, 1, 5, tzinfo=timezone.utc)
+    config = CanonicalizeConfig()
+    sender = MagicMock()
+    log = MagicMock()
+
+    conn = _make_conn_dedup(1)  # dedup check returns 1 → skip
+    count = _canonicalize_equity_ohlcv(conn, sender, config, now, "run-001", log)
+
+    assert count == 0
+    sender.row.assert_not_called()
+
+
+def test_equity_ohlcv_writes_on_first_run():
+    """When run_id is new, rows should be written and count > 0."""
+    now = datetime(2024, 1, 5, tzinfo=timezone.utc)
+    config = CanonicalizeConfig(domains=["equity_ohlcv"])
+    sender = MagicMock()
+    log = MagicMock()
+
+    raw_row = (
+        datetime(2024, 1, 4, 10, 0, 0, tzinfo=timezone.utc),
+        "AAPL", 150.0, 155.0, 149.0, 153.0, 10000, 151.0, 500, None,
+    )
+    raw_columns = ["timestamp", "symbol", "open", "high", "low", "close",
+                   "volume", "vwap", "trade_count", "ingested_at"]
+
+    call_count = [0]
+
+    def cursor_factory():
+        call_count[0] += 1
+        cur = MagicMock()
+        if call_count[0] == 1:
+            cur.fetchone.return_value = (0,)  # dedup: not written
+        else:
+            cur.description = [(col,) for col in raw_columns]
+            cur.fetchall.return_value = [raw_row]
+        return cur
+
+    conn = MagicMock()
+    conn.cursor.side_effect = cursor_factory
+
+    count = _canonicalize_equity_ohlcv(conn, sender, config, now, "run-NEW", log)
+
+    assert count == 1
+    assert sender.row.call_count == 2  # canonical row + reconciliation_log row
+
+
+def test_fundamentals_dedup_skips_on_second_run():
+    now = datetime(2024, 1, 5, tzinfo=timezone.utc)
+    config = CanonicalizeConfig()
+    sender = MagicMock()
+    log = MagicMock()
+
+    conn = _make_conn_dedup(1)
+    count = _canonicalize_fundamentals(conn, sender, config, now, "run-001", log)
+
+    assert count == 0
+    sender.row.assert_not_called()
+
+
+def test_financial_metrics_dedup_skips_on_second_run():
+    now = datetime(2024, 1, 5, tzinfo=timezone.utc)
+    config = CanonicalizeConfig()
+    sender = MagicMock()
+    log = MagicMock()
+
+    conn = _make_conn_dedup(1)
+    count = _canonicalize_financial_metrics(conn, sender, config, now, "run-001", log)
+
+    assert count == 0
+    sender.row.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +151,7 @@ class TestValidateOhlcvRow:
         assert "missing_low" in warnings
         assert "missing_close" in warnings
         assert "missing_volume" in warnings
-        assert "missing_open" not in warnings  # open is present
+        assert "missing_open" not in warnings
 
     def test_all_fields_missing(self):
         row = {"symbol": "AAPL"}
@@ -63,29 +171,21 @@ class TestValidateOhlcvRow:
         assert any("non_positive_close" in w for w in warnings)
 
     def test_outlier_detection_triggers(self):
-        # Build rolling stats where close=150 is far from mean=100
-        rolling_stats = {
-            "AAPL": {"mean": 100.0, "stdev": 10.0, "count": 20},
-        }
+        rolling_stats = {"AAPL": {"mean": 100.0, "stdev": 10.0, "count": 20}}
         row = _good_row(close=155.0)  # z = (155-100)/10 = 5.5 > 5.0
         warnings = _validate_ohlcv_row(row, rolling_stats=rolling_stats, std_threshold=5.0)
         assert any("outlier_close_z" in w for w in warnings)
-        # z value should be in the warning string
         assert any("5.50" in w for w in warnings)
 
     def test_outlier_not_triggered_below_threshold(self):
-        rolling_stats = {
-            "AAPL": {"mean": 100.0, "stdev": 10.0, "count": 20},
-        }
-        row = _good_row(close=140.0)  # z = (140-100)/10 = 4.0 < 5.0
+        rolling_stats = {"AAPL": {"mean": 100.0, "stdev": 10.0, "count": 20}}
+        row = _good_row(close=140.0)  # z = 4.0 < 5.0
         warnings = _validate_ohlcv_row(row, rolling_stats=rolling_stats, std_threshold=5.0)
         assert not any("outlier" in w for w in warnings)
 
     def test_outlier_requires_count_20(self):
-        rolling_stats = {
-            "AAPL": {"mean": 100.0, "stdev": 1.0, "count": 19},  # < 20
-        }
-        row = _good_row(close=200.0)  # Would be extreme outlier with count >= 20
+        rolling_stats = {"AAPL": {"mean": 100.0, "stdev": 1.0, "count": 19}}
+        row = _good_row(close=200.0)
         warnings = _validate_ohlcv_row(row, rolling_stats=rolling_stats, std_threshold=5.0)
         assert not any("outlier" in w for w in warnings)
 
@@ -120,10 +220,8 @@ class TestBuildRollingStats:
         assert "AAPL" not in stats
 
     def test_uses_last_window_rows(self):
-        # 100 rows, window=10 — should only use last 10
         rows = [{"symbol": "AAPL", "close": float(i)} for i in range(1, 101)]
         stats = _build_rolling_stats(rows, window=10)
-        # Last 10 values: 91..100, mean = 95.5
         import statistics
         expected_mean = statistics.mean(range(91, 101))
         assert pytest.approx(stats["AAPL"]["mean"], rel=1e-6) == expected_mean
@@ -135,7 +233,11 @@ class TestBuildRollingStats:
 
 
 def _make_conn_with_rows(rows: list[dict]):
-    """Build a mock psycopg2 connection that returns the given rows."""
+    """Build a mock psycopg2 connection that returns the given rows.
+
+    The first cursor call is the dedup check (_run_already_written) — it returns
+    fetchone=(0,) meaning not yet written. The second call returns the raw rows.
+    """
     if not rows:
         columns = []
         raw_rows = []
@@ -143,13 +245,22 @@ def _make_conn_with_rows(rows: list[dict]):
         columns = list(rows[0].keys())
         raw_rows = [tuple(r[c] for c in columns) for r in rows]
 
-    mock_cur = MagicMock()
-    mock_cur.description = [(col, None, None, None, None, None, None) for col in columns]
-    mock_cur.fetchall.return_value = raw_rows
+    call_count = [0]
+
+    def cursor_factory():
+        call_count[0] += 1
+        cur = MagicMock()
+        if call_count[0] == 1:
+            # Dedup check cursor: return count=0 (not already written)
+            cur.fetchone.return_value = (0,)
+        else:
+            cur.description = [(col, None, None, None, None, None, None) for col in columns]
+            cur.fetchall.return_value = raw_rows
+        return cur
 
     mock_conn = MagicMock()
-    mock_conn.cursor.return_value = mock_cur
-    return mock_conn, mock_cur
+    mock_conn.cursor.side_effect = cursor_factory
+    return mock_conn, None  # second element kept for API compat
 
 
 class TestCanonicalizeFundamentals:
@@ -173,7 +284,7 @@ class TestCanonicalizeFundamentals:
                 "weighted_average_shares_diluted": 103_000_000,
             },
             {
-                "symbol": "AAPL", "report_date": t2,  # same key, later date
+                "symbol": "AAPL", "report_date": t2,
                 "fiscal_period": "Q4", "period": "2022Q4",
                 "revenue": 1_100_000, "cost_of_revenue": 650_000,
                 "gross_profit": 450_000, "operating_expense": 210_000,
@@ -190,12 +301,9 @@ class TestCanonicalizeFundamentals:
 
         count = _canonicalize_fundamentals(conn, sender, self._config(), now, "run-1", log)
 
-        # Only 1 canonical row (deduplicated by key), plus 1 reconciliation log
         assert count == 1
-        # The row written should use t2 (latest) as timestamp
         canonical_call = sender.row.call_args_list[0]
         written_ts_arg = canonical_call[1]["at"]
-        # TimestampNanos doesn't implement __eq__ — compare via string representation
         from yats_pipelines.jobs.canonicalize import _ts_nanos
         assert str(written_ts_arg) == str(_ts_nanos(t2))
 
@@ -222,9 +330,8 @@ class TestCanonicalizeFundamentals:
 
         count = _canonicalize_fundamentals(conn, sender, self._config(), now, "run-2", log)
 
-        # 2 symbols → 2 canonical rows + 2 reconciliation log rows = 4 sender.row calls
         assert count == 2
-        assert sender.row.call_count == 4
+        assert sender.row.call_count == 4  # 2 canonical + 2 reconciliation_log
 
     def test_empty_rows_returns_zero(self):
         conn, _ = _make_conn_with_rows([])
@@ -238,7 +345,7 @@ class TestCanonicalizeFundamentals:
         sender.row.assert_not_called()
 
     def test_earlier_report_does_not_win(self):
-        """Ordering: rows come in time order; later row must supersede earlier."""
+        """Ordering: later row supersedes earlier for same key."""
         t_early = datetime(2023, 1, 1, tzinfo=timezone.utc)
         t_late = datetime(2023, 1, 5, tzinfo=timezone.utc)
         base = {
@@ -261,6 +368,5 @@ class TestCanonicalizeFundamentals:
 
         _canonicalize_fundamentals(conn, sender, self._config(), now, "run-4", log)
 
-        # First sender.row call is the canonical write — check revenue=999 (from t_late)
         canonical_call = sender.row.call_args_list[0]
         assert canonical_call[1]["columns"]["revenue"] == 999

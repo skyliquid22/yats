@@ -32,6 +32,7 @@ export const monitorReconcile: ToolDef = {
     const dataDir = join(process.cwd(), ".yats_data");
 
     const qdb = new QuestDBClient();
+    const dagster = new DagsterClient();
     try {
       // Check experiment artifacts consistency
       if (check === "all" || check === "experiments") {
@@ -53,7 +54,7 @@ export const monitorReconcile: ToolDef = {
             if (!dbIds.has(fsId)) {
               inconsistencies.push({
                 type: "orphaned_artifact",
-                description: `Experiment directory ${fsId} exists on filesystem but not in QuestDB`,
+                description: `Experiment directory ${fsId} exists on filesystem but not in experiment_index`,
                 source: "experiments",
               });
             }
@@ -62,10 +63,53 @@ export const monitorReconcile: ToolDef = {
             if (!fsDirs.has(dbId)) {
               inconsistencies.push({
                 type: "missing_artifact",
-                description: `Experiment ${dbId} exists in QuestDB but has no filesystem directory`,
+                description: `Experiment ${dbId} exists in experiment_index but has no filesystem directory`,
                 source: "experiments",
               });
             }
+          }
+
+          // Audit trail check: every indexed experiment should have audit_trail entries
+          for (const expId of dbIds) {
+            try {
+              const auditResult = await qdb.query(
+                `SELECT count(*) as cnt FROM audit_trail WHERE experiment_id = '${expId}' LIMIT 1`
+              );
+              const cnt = (auditResult.rows[0]?.cnt as number) ?? 0;
+              if (cnt === 0) {
+                inconsistencies.push({
+                  type: "missing_audit_trail",
+                  description: `Experiment ${expId} in experiment_index has no audit_trail entries`,
+                  source: "experiments",
+                });
+              }
+            } catch {
+              // audit_trail table may not exist yet — skip silently
+            }
+          }
+
+          // Dagster cross-check: for Dagster success runs, verify experiment_index has rows (PRD §20.5)
+          try {
+            const successRuns = await dagster.listSuccessRuns(50);
+            for (const run of successRuns) {
+              try {
+                const indexCheck = await qdb.query(
+                  `SELECT count(*) as cnt FROM experiment_index WHERE dagster_run_id = '${run.runId}' LIMIT 1`
+                );
+                const cnt = (indexCheck.rows[0]?.cnt as number) ?? 0;
+                if (cnt === 0) {
+                  inconsistencies.push({
+                    type: "dagster_run_missing_from_index",
+                    description: `Dagster success run ${run.runId} (${run.jobName}) has no experiment_index row`,
+                    source: "experiments",
+                  });
+                }
+              } catch {
+                // Table may not exist — skip
+              }
+            }
+          } catch {
+            // Dagster may be unavailable — skip cross-check gracefully
           }
         } catch {
           inconsistencies.push({

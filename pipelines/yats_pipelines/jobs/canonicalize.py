@@ -144,19 +144,20 @@ def _build_rolling_stats(rows: list[dict], window: int = 60) -> dict[str, dict]:
 
 def _run_already_written(conn, run_id: str, domain: str) -> bool:
     """Return True if reconciliation_log already has rows for this run_id + domain."""
-    cur = conn.cursor()
     try:
-        cur.execute(
-            "SELECT count(*) FROM reconciliation_log "
-            "WHERE dagster_run_id = %s AND domain = %s LIMIT 1",
-            (run_id, domain),
-        )
-        row = cur.fetchone()
-        return bool(row and row[0] > 0)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT count(*) FROM reconciliation_log "
+                "WHERE dagster_run_id = %s AND domain = %s LIMIT 1",
+                (run_id, domain),
+            )
+            row = cur.fetchone()
+            return bool(row and row[0] > 0)
+        finally:
+            cur.close()
     except Exception:
         return False
-    finally:
-        cur.close()
 
 
 def _canonicalize_equity_ohlcv(
