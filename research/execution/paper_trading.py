@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+import numpy as np
+
 from research.execution.broker_alpaca import (
     AlpacaBrokerAdapter,
     AlpacaBrokerConfig,
@@ -38,7 +40,7 @@ from research.execution.kill_switch import (
     KillTrigger,
     TradingState,
 )
-from research.execution.order_translator import translate_signals
+from research.execution.order_translator import translate_signals, TranslationResult
 from research.execution.recovery import RecoveryConfig, recover_state
 from research.execution.signal import Signal
 from research.execution.state import (
@@ -50,7 +52,8 @@ from research.execution.state import (
 )
 from research.experiments.spec import RiskConfig
 from research.risk.loader import load_production_risk_config
-from research.risk.project_weights import project_weights
+from research.risk.project_weights import project_weights, project_weights_full, Decision, RiskResult
+from research.risk.decisions import RiskDecisionsWriter
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +133,14 @@ class PaperTradingLoop:
 
         # Risk config — paper trading ALWAYS uses production config
         self._risk_config = load_production_risk_config()
+
+        # Risk decisions writer
+        self._risk_writer = RiskDecisionsWriter(
+            experiment_id=config.experiment_id,
+            mode="paper",
+            ilp_host=config.ilp_host,
+            ilp_port=config.ilp_port,
+        )
 
         # Broker adapter
         broker_cfg = AlpacaBrokerConfig.from_env(paper=config.alpaca_paper)
