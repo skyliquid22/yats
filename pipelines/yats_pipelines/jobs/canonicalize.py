@@ -142,6 +142,23 @@ def _build_rolling_stats(rows: list[dict], window: int = 60) -> dict[str, dict]:
     return result
 
 
+def _run_already_written(conn, run_id: str, domain: str) -> bool:
+    """Return True if reconciliation_log already has rows for this run_id + domain."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT count(*) FROM reconciliation_log "
+            "WHERE dagster_run_id = %s AND domain = %s LIMIT 1",
+            (run_id, domain),
+        )
+        row = cur.fetchone()
+        return bool(row and row[0] > 0)
+    except Exception:
+        return False
+    finally:
+        cur.close()
+
+
 def _canonicalize_equity_ohlcv(
     conn, sender, config: CanonicalizeConfig, now: datetime, run_id: str, log,
     *, canonical_rows_out: dict[str, list[dict]] | None = None,
@@ -151,6 +168,10 @@ def _canonicalize_equity_ohlcv(
     If canonical_rows_out is provided, appends {symbol: [row_dicts]} for
     downstream canonical hash computation.
     """
+    if _run_already_written(conn, run_id, "equity_ohlcv"):
+        log.info("equity_ohlcv: run %s already written — skipping (idempotent)", run_id)
+        return 0
+
     where = _date_clause(config.start_date, config.end_date)
     query = f"SELECT * FROM raw_alpaca_equity_ohlcv{where} ORDER BY timestamp"
 
@@ -259,6 +280,10 @@ def _canonicalize_fundamentals(
     Point-in-time semantics: report_date = when filed, not fiscal period end.
     Latest filing supersedes prior values for the same (symbol, fiscal_period, period).
     """
+    if _run_already_written(conn, run_id, "fundamentals"):
+        log.info("fundamentals: run %s already written — skipping (idempotent)", run_id)
+        return 0
+
     where = _date_clause(config.start_date, config.end_date, ts_col="report_date")
     query = f"SELECT * FROM raw_fd_fundamentals{where} ORDER BY report_date"
 
@@ -346,6 +371,10 @@ def _canonicalize_financial_metrics(
     to every subsequent trading day until a newer observation arrives.
     No lookahead — values are only available from their observation date onward.
     """
+    if _run_already_written(conn, run_id, "financial_metrics"):
+        log.info("financial_metrics: run %s already written — skipping (idempotent)", run_id)
+        return 0
+
     where = _date_clause(config.start_date, config.end_date)
     query = f"SELECT * FROM raw_fd_financial_metrics{where} ORDER BY timestamp"
 

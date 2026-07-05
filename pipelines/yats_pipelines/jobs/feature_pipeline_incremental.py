@@ -262,6 +262,22 @@ def _winsorize(series: pd.Series, lower: float = 0.01, upper: float = 0.99) -> p
     return series.clip(lo, hi)
 
 
+def _features_run_already_written(conn, run_id: str) -> bool:
+    """Return True if the features table already has rows for this dagster_run_id."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT count(*) FROM features WHERE dagster_run_id = %s LIMIT 1",
+            (run_id,),
+        )
+        row = cur.fetchone()
+        return bool(row and row[0] > 0)
+    except Exception:
+        return False
+    finally:
+        cur.close()
+
+
 def _write_features(
     sender,
     symbol: str,
@@ -270,6 +286,7 @@ def _write_features(
     feature_set: str,
     feature_set_version: str,
     now: datetime,
+    run_id: str = "",
 ) -> int:
     """Write feature rows to QuestDB via ILP."""
     written = 0
@@ -294,6 +311,8 @@ def _write_features(
             continue
 
         columns["computed_at"] = _ts_nanos(now)
+        if run_id:
+            columns["dagster_run_id"] = run_id
 
         sender.row(
             "features",
@@ -325,6 +344,7 @@ def _compute_per_symbol_incremental(
     qdb: QuestDBResource,
     now: datetime,
     context: OpExecutionContext,
+    run_id: str = "",
 ) -> int:
     """Compute per-symbol OHLCV + fundamental features incrementally.
 
@@ -407,7 +427,7 @@ def _compute_per_symbol_incremental(
 
             written = _write_features(
                 sender, symbol, new_timestamps,
-                all_features, feature_set, feature_set_version, now,
+                all_features, feature_set, feature_set_version, now, run_id,
             )
             total_written += written
 
@@ -446,6 +466,7 @@ def _compute_cross_sectional_incremental(
     qdb: QuestDBResource,
     now: datetime,
     context: OpExecutionContext,
+    run_id: str = "",
 ) -> int:
     """Compute cross-sectional features incrementally.
 
@@ -514,7 +535,7 @@ def _compute_cross_sectional_incremental(
 
             written = _write_features(
                 sender, symbol, new_timestamps,
-                all_features, feature_set, feature_set_version, now,
+                all_features, feature_set, feature_set_version, now, run_id,
             )
             total_written += written
 
@@ -551,6 +572,7 @@ def _compute_regime_incremental(
     qdb: QuestDBResource,
     now: datetime,
     context: OpExecutionContext,
+    run_id: str = "",
 ) -> int:
     """Compute regime features incrementally.
 
