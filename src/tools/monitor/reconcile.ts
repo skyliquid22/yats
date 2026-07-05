@@ -46,7 +46,7 @@ export const monitorReconcile: ToolDef = {
             // Directory may not exist
           }
 
-          const dbResult = await qdb.query("SELECT DISTINCT experiment_id FROM experiments");
+          const dbResult = await qdb.query("SELECT DISTINCT experiment_id FROM experiment_index");
           const dbIds = new Set(dbResult.rows.map((r) => r.experiment_id as string));
 
           for (const fsId of fsDirs) {
@@ -82,7 +82,7 @@ export const monitorReconcile: ToolDef = {
           const promoResult = await qdb.query(
             `SELECT experiment_id, tier FROM promotions WHERE tier = 'production'`
           );
-          const dbResult = await qdb.query("SELECT DISTINCT experiment_id FROM experiments");
+          const dbResult = await qdb.query("SELECT DISTINCT experiment_id FROM experiment_index");
           const allExperiments = new Set(dbResult.rows.map((r) => r.experiment_id as string));
 
           for (const row of promoResult.rows) {
