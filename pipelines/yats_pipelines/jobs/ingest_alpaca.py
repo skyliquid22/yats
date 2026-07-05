@@ -108,7 +108,7 @@ def write_bars_to_questdb(
     context.log.info("Successfully wrote %d rows to %s", len(rows), table)
 
 
-@job
+@job(tags={"yats/concurrency_pool": "ingest", "dagster/priority": "10"})
 def ingest_alpaca():
     """Dagster job: ingest Alpaca historical OHLCV bars into QuestDB."""
     bars = fetch_alpaca_bars()

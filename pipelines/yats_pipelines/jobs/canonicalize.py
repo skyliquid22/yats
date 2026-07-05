@@ -569,7 +569,7 @@ def canonicalize_op(context: OpExecutionContext, config: CanonicalizeConfig):
     context.log.info("Canonicalization complete")
 
 
-@job
+@job(tags={"yats/concurrency_pool": "ingest", "dagster/priority": "10"})
 def canonicalize():
     """Dagster job: canonicalize raw data into canonical tables with reconciliation."""
     canonicalize_op()

@@ -220,7 +220,7 @@ def run_shadow_engine(
 # ---------------------------------------------------------------------------
 
 
-@job
+@job(tags={"yats/concurrency_pool": "shadow", "dagster/priority": "50"})
 def shadow_run():
     """Shadow execution replay: load spec -> replay data -> run engine."""
     spec_data = load_shadow_spec()

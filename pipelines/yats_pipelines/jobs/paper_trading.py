@@ -373,7 +373,7 @@ def write_final_state(
 # ---------------------------------------------------------------------------
 
 
-@job
+@job(tags={"yats/concurrency_pool": "paper", "dagster/priority": "80"})
 def paper_trading_setup():
     """Paper trading setup: load spec → validate promotion → init state."""
     spec_data = load_paper_trading_spec()
@@ -381,7 +381,7 @@ def paper_trading_setup():
     initialize_paper_trading_state(validated)
 
 
-@job
+@job(tags={"yats/concurrency_pool": "paper", "dagster/priority": "80"})
 def paper_trading_teardown():
     """Paper trading teardown: cancel orders → settle → write final state."""
     cancel_result = cancel_pending_orders()

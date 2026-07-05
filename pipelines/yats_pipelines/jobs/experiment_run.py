@@ -320,7 +320,7 @@ def update_experiment_index(
 # ---------------------------------------------------------------------------
 
 
-@job
+@job(tags={"yats/concurrency_pool": "experiment", "dagster/priority": "40"})
 def experiment_run():
     """Run a single experiment: load → fetch → train → evaluate → index."""
     spec_data = load_experiment_spec()

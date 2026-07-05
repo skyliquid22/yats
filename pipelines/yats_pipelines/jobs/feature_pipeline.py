@@ -546,7 +546,7 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
         conn.close()
 
 
-@job
+@job(tags={"yats/concurrency_pool": "feature", "dagster/priority": "20"})
 def feature_pipeline():
     """Dagster job: compute features from canonical data (full recompute)."""
     feature_pipeline_op()

@@ -383,7 +383,7 @@ def stream_canonical_op(context: OpExecutionContext, config: StreamCanonicalConf
     )
 
 
-@job
+@job(tags={"yats/concurrency_pool": "ingest", "dagster/priority": "10"})
 def stream_canonical():
     """Dagster job: stream Alpaca WebSocket bars to canonical_equity_ohlcv."""
     stream_canonical_op()

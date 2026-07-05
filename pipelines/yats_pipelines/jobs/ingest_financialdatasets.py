@@ -290,7 +290,7 @@ def ingest_financialdatasets_op(context: OpExecutionContext, config: IngestFinan
     context.log.info("ingest_financialdatasets complete")
 
 
-@job
+@job(tags={"yats/concurrency_pool": "ingest", "dagster/priority": "10"})
 def ingest_financialdatasets():
     """Ingest financialdatasets.ai data into raw_fd_* QuestDB tables."""
     ingest_financialdatasets_op()

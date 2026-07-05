@@ -144,7 +144,7 @@ def write_promotion(
 # ---------------------------------------------------------------------------
 
 
-@job
+@job(tags={"yats/concurrency_pool": "qualify", "dagster/priority": "60"})
 def promote_job():
     """Promotion pipeline: verify qualification -> check gates -> write record."""
     qualification_report = verify_qualification()
