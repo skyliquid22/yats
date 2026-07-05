@@ -24,11 +24,36 @@ class ShadowRunConfig(Config):
     end_date: str = ""
     data_root: str = ".yats_data"
     initial_value: float = 1_000_000.0
+    qualification_replay: bool = False
 
 
 # ---------------------------------------------------------------------------
 # Ops
 # ---------------------------------------------------------------------------
+
+
+def _is_promoted_or_allowlisted(
+    experiment_id: str,
+    data_root: Path,
+) -> bool:
+    """Return True if experiment is at tier>=candidate or on the shadow allowlist."""
+    import yaml
+
+    # Check promotions: candidate or production tier
+    for tier in ("candidate", "production"):
+        record = data_root / "promotions" / tier / f"{experiment_id}.json"
+        if record.exists():
+            return True
+
+    # Check explicit allowlist in configs/shadow_allowlist.yml
+    allowlist_path = Path("configs") / "shadow_allowlist.yml"
+    if allowlist_path.exists():
+        data = yaml.safe_load(allowlist_path.read_text(encoding="utf-8")) or {}
+        allowlist = data.get("allowlist", [])
+        if experiment_id in allowlist:
+            return True
+
+    return False
 
 
 @op(out=Out(dict))
@@ -39,6 +64,23 @@ def load_shadow_spec(
     from research.experiments.registry import get
 
     data_root = Path(config.data_root)
+
+    if not config.qualification_replay:
+        if not _is_promoted_or_allowlisted(config.experiment_id, data_root):
+            raise ValueError(
+                f"Shadow run blocked: experiment {config.experiment_id!r} is not "
+                "promoted (tier>=candidate) and not on the shadow allowlist. "
+                "Promote the experiment or add it to configs/shadow_allowlist.yml."
+            )
+        context.log.info(
+            "Promotion gate passed for %s", config.experiment_id,
+        )
+    else:
+        context.log.info(
+            "Promotion gate bypassed for %s (qualification_replay=True)",
+            config.experiment_id,
+        )
+
     exp = get(config.experiment_id, data_root=data_root)
     spec_data = exp["spec"]
     context.log.info(

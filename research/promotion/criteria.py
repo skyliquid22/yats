@@ -293,7 +293,7 @@ def evaluate_artifact_gates(
     from pathlib import Path
 
     results: list[GateResult] = []
-    required_artifacts = ["spec/experiment_spec.json", "evaluation/metrics.json"]
+    required_artifacts = ["spec/experiment_spec.json", "evaluation/metrics.json", "logs/run_summary.json"]
 
     if experiment_path is None:
         results.append(GateResult(

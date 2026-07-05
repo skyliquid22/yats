@@ -1,0 +1,3 @@
+# Shadow execution allowlist — experiments that may run shadow without promotion.
+# Only the risk_officer role may add entries here (PRD §9.4).
+allowlist: []
