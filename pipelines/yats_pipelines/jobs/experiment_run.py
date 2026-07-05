@@ -230,11 +230,10 @@ def evaluate_experiment(
         dates = [row.get("timestamp", f"t{i}") for i, row in enumerate(data[1:])]  # Skip first row (reset)
         weights_df = pd.DataFrame(weights_list, index=dates[:len(weights_list)], columns=symbols)
     else:
-        # Non-RL policy: equal weight
+        # Non-RL policy: run real rollout (raises for unsupported types)
+        weights_list = _rollout_non_rl_policy(policy, data, symbols, spec_data)
         dates = [row.get("timestamp", f"t{i}") for i, row in enumerate(data[1:])]
-        n_rows = len(dates)
-        equal_w = np.full((n_rows, n_symbols), 1.0 / n_symbols)
-        weights_df = pd.DataFrame(equal_w, index=dates, columns=symbols)
+        weights_df = pd.DataFrame(weights_list, index=dates[:len(weights_list)], columns=symbols)
 
     # Build returns DataFrame from data
     returns_df = _build_returns_df(data, symbols)
@@ -261,6 +260,17 @@ def evaluate_experiment(
         output_path=eval_dir / "metrics.json",
         regime_features=regime_df,
         data_hash=features.get("data_hash"),
+    )
+
+    # Write run artifacts per PRD §8.2
+    _write_run_artifacts(
+        data_root=data_root,
+        experiment_id=config.experiment_id,
+        spec_data=spec_data,
+        weights_df=weights_df,
+        metrics=metrics,
+        features=features,
+        dagster_run_id=context.run_id if hasattr(context, "run_id") else None,
     )
 
     context.log.info("Evaluation complete: sharpe=%.4f", metrics.get("performance", {}).get("sharpe", 0.0))
@@ -323,6 +333,107 @@ def experiment_run():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _rollout_non_rl_policy(
+    policy_name: str,
+    data: list[dict[str, Any]],
+    symbols: list[str],
+    spec_data: dict,
+) -> list[np.ndarray]:
+    """Run a non-RL policy rollout over data rows, returning a list of weight vectors.
+
+    Supported policies: 'equal_weight', 'sma'.
+    Raises ValueError for any other policy type — callers must not silently substitute.
+    """
+    n_symbols = len(symbols)
+    if policy_name == "equal_weight":
+        from research.policies.equal_weight_policy import EqualWeightPolicy
+        policy = EqualWeightPolicy(n_symbols)
+    elif policy_name == "sma":
+        from research.policies.sma_weight_policy import SMAWeightPolicy
+        params = spec_data.get("policy_params", {})
+        policy = SMAWeightPolicy(
+            n_symbols,
+            short_window=int(params.get("short_window", 5)),
+            long_window=int(params.get("long_window", 20)),
+        )
+    else:
+        raise ValueError(
+            f"Unsupported policy type '{policy_name}'. "
+            "Supported non-RL policies: 'equal_weight', 'sma'. "
+            "RL policies (ppo, sac) require a trained checkpoint."
+        )
+
+    if hasattr(policy, "reset"):
+        policy.reset()
+
+    weights_list: list[np.ndarray] = []
+    for row in data[1:]:  # Skip first row (env reset step, matches RL rollout convention)
+        close = row.get("close", {})
+        if isinstance(close, dict):
+            prices = np.array([close.get(s, 0.0) for s in symbols], dtype=np.float64)
+        else:
+            prices = np.full(n_symbols, float(close), dtype=np.float64)
+        w = policy.act(prices, {"close_prices": prices})
+        weights_list.append(w)
+
+    return weights_list
+
+
+def _write_run_artifacts(
+    data_root: Path,
+    experiment_id: str,
+    spec_data: dict,
+    weights_df: "pd.DataFrame",
+    metrics: dict,
+    features: dict,
+    dagster_run_id: Optional[str],
+) -> None:
+    """Write runs/rollout.json and logs/run_summary.json per PRD §8.2."""
+    runs_dir = data_root / "experiments" / experiment_id / "runs"
+    logs_dir = data_root / "experiments" / experiment_id / "logs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    rollout_path = runs_dir / "rollout.json"
+    summary_path = logs_dir / "run_summary.json"
+
+    rollout = {
+        "metadata": {
+            "experiment_id": experiment_id,
+            "policy": spec_data.get("policy"),
+            "symbols": sorted(spec_data.get("symbols", [])),
+            "data_hash": features.get("data_hash"),
+        },
+        "inputs_used": {
+            "data_hash": features.get("data_hash"),
+            "observation_columns": features.get("observation_columns", []),
+            "feature_set": spec_data.get("feature_set"),
+        },
+        "series": {
+            "dates": list(weights_df.index),
+            "weights": {col: list(weights_df[col]) for col in weights_df.columns},
+        },
+        "performance": metrics.get("performance", {}),
+        "trading": metrics.get("trading", {}),
+        "safety": metrics.get("safety", {}),
+    }
+
+    eval_dir = data_root / "experiments" / experiment_id / "evaluation"
+    run_summary = {
+        "experiment_id": experiment_id,
+        "dagster_run_id": dagster_run_id,
+        "artifacts": {
+            "rollout_json": str(rollout_path),
+            "metrics_json": str(eval_dir / "metrics.json"),
+        },
+        "policy": spec_data.get("policy"),
+        "symbols": sorted(spec_data.get("symbols", [])),
+    }
+
+    rollout_path.write_text(json.dumps(rollout, default=str, indent=2))
+    summary_path.write_text(json.dumps(run_summary, default=str, indent=2))
 
 
 def _reconstruct_spec(spec_data: dict) -> Any:

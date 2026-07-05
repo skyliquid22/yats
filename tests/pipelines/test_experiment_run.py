@@ -81,6 +81,8 @@ from pipelines.yats_pipelines.jobs.experiment_run import (
     _build_returns_df,
     _reconstruct_spec,
     _dataframe_to_env_rows,
+    _rollout_non_rl_policy,
+    _write_run_artifacts,
 )
 
 
@@ -245,3 +247,121 @@ class TestDataframeToEnvRows:
 
         assert len(rows) == 1
         assert rows[0]["market_vol_20d"] == 0.15
+
+
+# ---------------------------------------------------------------------------
+# _rollout_non_rl_policy tests
+# ---------------------------------------------------------------------------
+
+def _make_trend_data(n: int = 50) -> list[dict]:
+    """Data with a strong upward trend in AAPL and flat MSFT — SMA should differ from equal-weight."""
+    rows = []
+    for i in range(n):
+        rows.append({
+            "timestamp": f"2024-01-{i+1:02d}" if i < 31 else f"2024-02-{i-30:02d}",
+            "close": {
+                "AAPL": 100.0 + i * 2.0,   # strong uptrend
+                "MSFT": 200.0,              # flat
+            },
+        })
+    return rows
+
+
+class TestRolloutNonRlPolicy:
+    def test_equal_weight_produces_uniform_weights(self):
+        symbols = ["AAPL", "MSFT"]
+        data = _make_data_rows(10)
+        weights = _rollout_non_rl_policy("equal_weight", data, symbols, {})
+
+        assert len(weights) == len(data) - 1  # skip first row
+        for w in weights:
+            assert w.shape == (2,)
+            np.testing.assert_allclose(w, [0.5, 0.5])
+
+    def test_sma_weights_differ_from_equal_weight_on_trend_data(self):
+        """Core acceptance criterion: SMA rollout metrics must differ from equal-weight."""
+        symbols = ["AAPL", "MSFT"]
+        data = _make_trend_data(50)
+        spec_data = {"policy_params": {"short_window": 5, "long_window": 10}}
+
+        sma_weights = _rollout_non_rl_policy("sma", data, symbols, spec_data)
+        ew_weights = _rollout_non_rl_policy("equal_weight", data, symbols, {})
+
+        # After SMA warms up (long_window steps), it should diverge from equal-weight
+        # because AAPL is trending up and MSFT is flat.
+        sma_arr = np.array(sma_weights)
+        ew_arr = np.array(ew_weights)
+
+        # At least some rows (after warmup) should differ
+        warmed_up = sma_arr[10:]  # skip warmup period
+        ew_warmed = ew_arr[10:]
+        diffs = np.abs(warmed_up - ew_warmed).sum(axis=1)
+        assert diffs.max() > 0.01, (
+            "SMA weights should differ from equal-weight after warmup on trending data"
+        )
+
+    def test_unsupported_policy_raises(self):
+        data = _make_data_rows(5)
+        with pytest.raises(ValueError, match="Unsupported policy type"):
+            _rollout_non_rl_policy("hierarchical", data, ["AAPL", "MSFT"], {})
+
+    def test_unsupported_rl_policy_raises(self):
+        data = _make_data_rows(5)
+        with pytest.raises(ValueError, match="Unsupported policy type"):
+            _rollout_non_rl_policy("ppo", data, ["AAPL", "MSFT"], {})
+
+    def test_sma_output_sums_to_one(self):
+        symbols = ["AAPL", "MSFT", "GOOG"]
+        data = [
+            {"timestamp": f"t{i}", "close": {"AAPL": 100.0 + i, "MSFT": 200.0, "GOOG": 150.0}}
+            for i in range(30)
+        ]
+        weights = _rollout_non_rl_policy("sma", data, symbols, {})
+        for w in weights:
+            assert abs(w.sum() - 1.0) < 1e-9, f"Weights must sum to 1, got {w.sum()}"
+
+
+class TestWriteRunArtifacts:
+    def test_artifacts_written(self, tmp_path):
+        symbols = ["AAPL", "MSFT"]
+        data = _make_data_rows(5)
+        weights_df = pd.DataFrame(
+            np.full((4, 2), 0.5),
+            index=[f"2024-01-0{i+2}" for i in range(4)],
+            columns=symbols,
+        )
+        metrics = {
+            "performance": {"sharpe": 1.2, "total_return": 0.1},
+            "trading": {"win_rate": 0.55},
+            "safety": {},
+        }
+        features = {"data_hash": "abc123", "observation_columns": ["close"], "feature_set": "core_v1"}
+        spec_data = {"policy": "equal_weight", "symbols": symbols, "feature_set": "core_v1"}
+
+        _write_run_artifacts(
+            data_root=tmp_path,
+            experiment_id="test_exp",
+            spec_data=spec_data,
+            weights_df=weights_df,
+            metrics=metrics,
+            features=features,
+            dagster_run_id="run-123",
+        )
+
+        rollout_path = tmp_path / "experiments" / "test_exp" / "runs" / "rollout.json"
+        summary_path = tmp_path / "experiments" / "test_exp" / "logs" / "run_summary.json"
+
+        assert rollout_path.exists(), "runs/rollout.json must be written"
+        assert summary_path.exists(), "logs/run_summary.json must be written"
+
+        import json
+        rollout = json.loads(rollout_path.read_text())
+        assert rollout["metadata"]["experiment_id"] == "test_exp"
+        assert rollout["performance"]["sharpe"] == pytest.approx(1.2)
+        assert rollout["trading"]["win_rate"] == pytest.approx(0.55)
+        assert "AAPL" in rollout["series"]["weights"]
+
+        summary = json.loads(summary_path.read_text())
+        assert summary["experiment_id"] == "test_exp"
+        assert summary["dagster_run_id"] == "run-123"
+        assert "rollout_json" in summary["artifacts"]
