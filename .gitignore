@@ -15,3 +15,5 @@ dist/
 bun.lockb
 bun.lock
 .beads/
+.claude/settings.local.json
+.DS_Store
