@@ -129,6 +129,8 @@ class ShadowEngine:
         # Track daily returns for Sharpe computation
         self._daily_returns: list[float] = []
 
+        # Track execution halts for promotion criteria
+        self._execution_halts: int = 0
         # Sim execution mode: broker adapter + position tracking
         self._sim_broker: SimBrokerAdapter | None = None
         self._sim_positions: dict[str, Position] = {}
@@ -349,12 +351,14 @@ class ShadowEngine:
             cumulative_daily = sum(self._daily_returns[-1:])
             if cumulative_daily <= risk_rc.daily_loss_limit:
                 risk_ok = False
+                self._execution_halts += 1
                 logger.warning(
                     "Step %d: daily loss limit breached (%.4f <= %.4f) — rejecting all orders",
                     step_index, cumulative_daily, risk_rc.daily_loss_limit,
                 )
         if risk_rc.trailing_drawdown_limit < 0 and self._portfolio.drawdown <= risk_rc.trailing_drawdown_limit:
             risk_ok = False
+            self._execution_halts += 1
             logger.warning(
                 "Step %d: trailing drawdown limit breached (%.4f <= %.4f) — rejecting all orders",
                 step_index, self._portfolio.drawdown, risk_rc.trailing_drawdown_limit,
@@ -581,6 +585,7 @@ class ShadowEngine:
             "dagster_run_id": self._dagster_run_id,
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "risk_audit": self._risk_audit,
+            "execution_halts": self._execution_halts,
         }
 
     def _save_summary(self, summary: dict[str, Any]) -> None:
