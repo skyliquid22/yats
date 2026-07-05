@@ -385,13 +385,10 @@ class LiveTradingLoop:
             return False
 
         order_pct = notional / nav
-        min_threshold = getattr(
-            self._risk_config, "minimum_order_threshold", 0.01,
-        )
-        if order_pct < min_threshold:
+        if order_pct < self._risk_config.minimum_order_threshold:
             logger.debug(
                 "Order below minimum threshold: %.4f < %.4f",
-                order_pct, min_threshold,
+                order_pct, self._risk_config.minimum_order_threshold,
             )
             return False
 
@@ -438,11 +435,9 @@ class LiveTradingLoop:
             drawdown=snapshot.drawdown,
             daily_loss_limit=self._risk_config.daily_loss_limit,
             trailing_drawdown_limit=self._risk_config.trailing_drawdown_limit,
-            max_broker_errors=getattr(self._risk_config, "max_broker_errors", 5),
+            max_broker_errors=self._risk_config.max_broker_errors,
             data_staleness_s=data_staleness_s,
-            data_staleness_threshold=getattr(
-                self._risk_config, "data_staleness_threshold", 300.0,
-            ),
+            data_staleness_threshold=self._risk_config.data_staleness_threshold,
         )
 
         if trigger is not None:
