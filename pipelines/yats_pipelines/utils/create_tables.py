@@ -231,7 +231,8 @@ CREATE TABLE IF NOT EXISTS features (
     market_trend_20d DOUBLE,
     dispersion_20d DOUBLE,
     corr_mean_20d DOUBLE,
-    computed_at TIMESTAMP
+    computed_at TIMESTAMP,
+    dagster_run_id STRING
 ) TIMESTAMP(timestamp) PARTITION BY MONTH;
 """
 
