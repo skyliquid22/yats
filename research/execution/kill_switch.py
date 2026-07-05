@@ -170,6 +170,7 @@ class KillSwitchStateMachine:
         max_broker_errors: int = 5,
         data_staleness_s: float = 0.0,
         data_staleness_threshold: float = 300.0,
+        risk_engine_failure: bool = False,
     ) -> KillTrigger | None:
         """Evaluate automatic kill switch triggers.
 
@@ -178,6 +179,10 @@ class KillSwitchStateMachine:
         """
         if self._state != TradingState.TRADING:
             return None
+
+        # Risk engine failure (cannot initialize or validate state)
+        if risk_engine_failure:
+            return KillTrigger.RISK_ENGINE_FAILURE
 
         # Daily loss breach
         if daily_loss_limit < 0 and daily_pnl < daily_loss_limit:

@@ -174,6 +174,13 @@ class PaperTradingLoop:
         self._cash = config.initial_cash
         self._last_snapshot_time = datetime.now(timezone.utc)
 
+        # Daily P&L tracking: NAV at session start (or last midnight UTC reset)
+        self._session_start_nav: float = config.initial_cash
+        self._session_start_date = datetime.now(timezone.utc).date()
+
+        # Decision-time prices keyed by order_id for slippage computation
+        self._order_decision_prices: dict[str, float] = {}
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -395,9 +402,17 @@ class PaperTradingLoop:
         ])
 
         # --- Pre-order risk gate: full 15-constraint engine ---
-        risk_result = project_weights_full(
-            target_weights, self._risk_config, prev_weights, nav=nav,
-        )
+        try:
+            risk_result = project_weights_full(
+                target_weights, self._risk_config, prev_weights, nav=nav,
+            )
+        except Exception as exc:
+            logger.error("Risk engine failure: %s", exc, exc_info=True)
+            self._kill_switch.trigger_halt(
+                KillTrigger.RISK_ENGINE_FAILURE,
+                details=json.dumps({"error": str(exc)}),
+            )
+            return
         self._risk_writer.log_result(risk_result)
 
         if risk_result.halted or any(
@@ -444,10 +459,13 @@ class PaperTradingLoop:
 
         positions = self._position_writer.positions
         current_prices = self._get_current_prices()
+        nav = self._compute_nav(positions, current_prices)
+        daily_pnl = self._compute_daily_pnl(nav)
         snapshot = self._portfolio_writer.write_snapshot(
             positions=positions,
             cash=self._cash,
             current_prices=current_prices,
+            daily_pnl=daily_pnl,
         )
 
         # Compute data staleness
@@ -526,10 +544,13 @@ class PaperTradingLoop:
         # Check risk state
         positions = self._position_writer.positions
         current_prices = self._get_current_prices()
+        nav = self._compute_nav(positions, current_prices)
+        daily_pnl = self._compute_daily_pnl(nav)
         snapshot = self._portfolio_writer.write_snapshot(
             positions=positions,
             cash=self._cash,
             current_prices=current_prices,
+            daily_pnl=daily_pnl,
         )
 
         if snapshot.drawdown < self._risk_config.trailing_drawdown_limit:
@@ -631,8 +652,10 @@ class PaperTradingLoop:
     def _submit_order(self, order: Any) -> None:
         """Submit an order to Alpaca and record it."""
         try:
+            decision_price = self._get_current_prices().get(order.symbol, 0.0)
             result = self._broker.submit_order(order)
             self._pending_orders[result.order_id] = result
+            self._order_decision_prices[result.order_id] = decision_price
             self._kill_switch.record_broker_success()
 
             # Record submission
@@ -706,6 +729,13 @@ class PaperTradingLoop:
             filled_at=result.filled_at or datetime.now(timezone.utc),
         )
 
+        # Compute slippage from decision-time snapshot price
+        decision_price = self._order_decision_prices.pop(result.order_id, 0.0)
+        if decision_price > 0:
+            slippage_bps = abs(fill.filled_avg_price - decision_price) / decision_price * 10_000
+        else:
+            slippage_bps = 0.0
+
         # Update positions
         current_prices = self._get_current_prices()
         self._position_writer.apply_fill(fill, current_prices)
@@ -719,7 +749,7 @@ class PaperTradingLoop:
         self._cash -= fill.commission
 
         # Write order fill to ledger
-        self._order_writer.write_fill(result, fill)
+        self._order_writer.write_fill(result, fill, slippage_bps=slippage_bps)
 
         self._last_fill_received = datetime.now(timezone.utc)
 
@@ -780,17 +810,30 @@ class PaperTradingLoop:
 
         positions = self._position_writer.positions
         current_prices = self._get_current_prices()
+        nav = self._compute_nav(positions, current_prices)
+        daily_pnl = self._compute_daily_pnl(nav)
 
         self._portfolio_writer.write_snapshot(
             positions=positions,
             cash=self._cash,
             current_prices=current_prices,
+            daily_pnl=daily_pnl,
         )
         self._last_snapshot_time = now
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _compute_daily_pnl(self, current_nav: float) -> float:
+        """Compute daily P&L as fraction of session-start NAV, resetting at midnight UTC."""
+        today = datetime.now(timezone.utc).date()
+        if today != self._session_start_date:
+            self._session_start_nav = current_nav
+            self._session_start_date = today
+        if self._session_start_nav <= 0:
+            return 0.0
+        return (current_nav - self._session_start_nav) / self._session_start_nav
 
     def _get_current_prices(self) -> dict[str, float]:
         """Get current prices from latest bars."""
@@ -832,15 +875,17 @@ class PaperTradingLoop:
         # Write final portfolio snapshot
         positions = self._position_writer.positions
         current_prices = self._get_current_prices()
+        nav = self._compute_nav(positions, current_prices)
         self._portfolio_writer.write_snapshot(
             positions=positions,
             cash=self._cash,
             current_prices=current_prices,
+            daily_pnl=self._compute_daily_pnl(nav),
         )
 
         logger.info(
             "Paper trading loop stopped. Final NAV=%.2f, %d positions",
-            self._compute_nav(positions, current_prices),
+            nav,
             len(positions),
         )
 
