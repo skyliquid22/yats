@@ -263,3 +263,181 @@ class TestPaperTradingLoop:
         assert "order-1" not in loop._pending_orders
         # Fill should have been processed
         loop._position_writer.apply_fill.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Acceptance: daily_pnl + slippage + kill switch integration
+# ---------------------------------------------------------------------------
+
+
+class TestDailyPnlAndKillSwitch:
+    """Acceptance: simulated losing day trips DAILY_LOSS → HALTED."""
+
+    @patch("research.execution.paper_trading.load_production_risk_config")
+    @patch("research.execution.paper_trading.AlpacaBrokerAdapter")
+    @patch("research.execution.paper_trading.AlpacaBrokerConfig.from_env")
+    @patch("research.execution.paper_trading.RiskDecisionsWriter")
+    @patch("research.execution.paper_trading.HeartbeatWriter")
+    @patch("research.execution.kill_switch.Sender")
+    def test_daily_loss_trips_kill_switch(
+        self,
+        mock_ks_sender,
+        mock_heartbeat_cls,
+        mock_risk_writer_cls,
+        mock_from_env,
+        mock_broker_cls,
+        mock_risk,
+        config,
+    ):
+        """A simulated losing day (-6% vs -5% limit) halts trading TRADING→HALTED."""
+        mock_risk.return_value = MagicMock(
+            daily_loss_limit=-0.05,
+            trailing_drawdown_limit=-0.20,
+            max_broker_errors=5,
+            data_staleness_threshold=300.0,
+        )
+        mock_broker_cls.return_value = MagicMock()
+
+        loop = PaperTradingLoop(config)
+
+        # Simulate session start NAV = 100_000; cash has dropped 6%
+        loop._session_start_nav = 100_000.0
+        loop._cash = 94_000.0  # -6% loss
+
+        # Mock portfolio writer — returns snapshot reflecting computed daily_pnl
+        mock_portfolio_writer = MagicMock()
+        loop._portfolio_writer = mock_portfolio_writer
+
+        def fake_write_snapshot(*, positions, cash, current_prices, daily_pnl=0.0):
+            from research.execution.state import PortfolioSnapshot
+            return PortfolioSnapshot(
+                nav=cash,
+                cash=cash,
+                daily_pnl=daily_pnl,
+                drawdown=-0.01,
+            )
+
+        mock_portfolio_writer.write_snapshot.side_effect = fake_write_snapshot
+
+        # No positions, no bars — nav = cash only
+        loop._position_writer = MagicMock()
+        loop._position_writer.positions = {}
+
+        # State starts TRADING
+        assert loop.trading_state.value == "trading"
+
+        # Evaluate triggers — daily_pnl = (94000 - 100000) / 100000 = -0.06 < -0.05 limit
+        loop._evaluate_kill_triggers()
+
+        # DAILY_LOSS should have fired → HALTED
+        assert loop.trading_state.value == "halted"
+
+    @patch("research.execution.paper_trading.load_production_risk_config")
+    @patch("research.execution.paper_trading.AlpacaBrokerAdapter")
+    @patch("research.execution.paper_trading.AlpacaBrokerConfig.from_env")
+    @patch("research.execution.paper_trading.RiskDecisionsWriter")
+    @patch("research.execution.paper_trading.HeartbeatWriter")
+    @patch("research.execution.kill_switch.Sender")
+    def test_fill_carries_nonzero_slippage_bps(
+        self,
+        mock_ks_sender,
+        mock_heartbeat_cls,
+        mock_risk_writer_cls,
+        mock_from_env,
+        mock_broker_cls,
+        mock_risk,
+        config,
+    ):
+        """Fills where fill price != decision price produce nonzero slippage_bps."""
+        mock_risk.return_value = MagicMock()
+        mock_broker_cls.return_value = MagicMock()
+
+        loop = PaperTradingLoop(config)
+        loop._position_writer = MagicMock()
+        loop._position_writer.positions = {}
+        loop._order_writer = MagicMock()
+
+        # Record decision price for order at submit time: 100.0
+        loop._order_decision_prices["order-slippage"] = 100.0
+
+        # Fill arrives at 100.05 — 5 bps slippage
+        fill_result = OrderResult(
+            order_id="order-slippage",
+            client_order_id="client-slippage",
+            symbol="AAPL",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            submitted_at=datetime(2024, 6, 15, tzinfo=timezone.utc),
+            filled_qty=10.0,
+            filled_avg_price=100.05,
+            filled_at=datetime(2024, 6, 15, 0, 1, tzinfo=timezone.utc),
+        )
+
+        loop._handle_fill(fill_result)
+
+        call_kwargs = loop._order_writer.write_fill.call_args
+        slippage_bps = call_kwargs.kwargs["slippage_bps"]
+        assert slippage_bps > 0
+        # (100.05 - 100.0) / 100.0 * 10000 = 5.0 bps
+        assert abs(slippage_bps - 5.0) < 0.01
+
+    @patch("research.execution.paper_trading.load_production_risk_config")
+    @patch("research.execution.paper_trading.AlpacaBrokerAdapter")
+    @patch("research.execution.paper_trading.AlpacaBrokerConfig.from_env")
+    @patch("research.execution.paper_trading.RiskDecisionsWriter")
+    @patch("research.execution.paper_trading.HeartbeatWriter")
+    @patch("research.execution.kill_switch.Sender")
+    def test_risk_engine_failure_halts_trading(
+        self,
+        mock_ks_sender,
+        mock_heartbeat_cls,
+        mock_risk_writer_cls,
+        mock_from_env,
+        mock_broker_cls,
+        mock_risk,
+        config,
+    ):
+        """Risk engine exception triggers RISK_ENGINE_FAILURE halt."""
+        mock_risk.return_value = MagicMock()
+        mock_broker_cls.return_value = MagicMock()
+
+        loop = PaperTradingLoop(config)
+
+        # Inject a signal to process
+        sig = Signal(
+            timestamp=datetime(2024, 6, 15, tzinfo=timezone.utc),
+            symbol="AAPL",
+            target_position_pct=0.1,
+            model_version="v1",
+        )
+        loop._pending_signals = [sig]
+
+        # Wire up state
+        loop._position_writer = MagicMock()
+        loop._position_writer.positions = {}
+        loop._cash = 100_000.0
+        loop._latest_bars = {"AAPL": {"close": 185.0}}
+
+        with patch("research.execution.paper_trading.project_weights_full", side_effect=RuntimeError("engine down")):
+            loop._process_signals()
+
+        assert loop.trading_state.value == "halted"
+
+    @patch("research.execution.paper_trading.load_production_risk_config")
+    @patch("research.execution.paper_trading.AlpacaBrokerAdapter")
+    @patch("research.execution.paper_trading.AlpacaBrokerConfig.from_env")
+    @patch("research.execution.paper_trading.RiskDecisionsWriter")
+    @patch("research.execution.paper_trading.HeartbeatWriter")
+    def test_compute_daily_pnl(
+        self, mock_heartbeat, mock_risk_writer, mock_from_env, mock_broker_cls, mock_risk, config,
+    ):
+        """Daily P&L is computed as fractional NAV change from session start."""
+        mock_risk.return_value = MagicMock()
+        mock_broker_cls.return_value = MagicMock()
+
+        loop = PaperTradingLoop(config)
+        loop._session_start_nav = 100_000.0
+
+        assert loop._compute_daily_pnl(100_000.0) == 0.0
+        assert abs(loop._compute_daily_pnl(105_000.0) - 0.05) < 1e-10
+        assert abs(loop._compute_daily_pnl(97_000.0) - (-0.03)) < 1e-10
