@@ -16,14 +16,27 @@ export const promoteToProduction: ToolDef = {
         type: "boolean",
         description: "Managing partner acknowledgment required for production promotion (must be true)",
       },
+      requires_human_approval: {
+        type: "boolean",
+        description:
+          "Non-bypassable human approval flag (PRD §23.4). Must be explicitly set to true by a human. Cannot be set via agent configuration.",
+      },
     },
-    required: ["experiment_id", "promotion_reason", "promoted_by", "managing_partner_ack"],
+    required: ["experiment_id", "promotion_reason", "promoted_by", "managing_partner_ack", "requires_human_approval"],
   },
   async handler(args) {
     const experimentId = args.experiment_id as string;
     const promotionReason = args.promotion_reason as string;
     const promotedBy = args.promoted_by as string;
     const managingPartnerAck = args.managing_partner_ack as boolean;
+    const requiresHumanApproval = args.requires_human_approval as boolean;
+
+    if (!requiresHumanApproval) {
+      return err(
+        "Production promotion requires requires_human_approval=true. " +
+        "This flag must be explicitly set by a human — it cannot be bypassed by agent configuration (PRD §23.4)."
+      );
+    }
 
     if (!managingPartnerAck) {
       return err("Production promotion requires managing_partner_ack=true");

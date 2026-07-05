@@ -170,7 +170,7 @@ def update_experiment_index(
 # ---------------------------------------------------------------------------
 
 
-@job
+@job(tags={"yats/concurrency_pool": "qualify", "dagster/priority": "60"})
 def qualify():
     """Qualification pipeline: load specs -> evaluate gates -> update index."""
     spec_data = load_candidate_spec()

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from dagster import Config, DynamicOut, DynamicOutput, In, OpExecutionContext, Out, job, op
+from dagster import Config, DynamicOut, DynamicOutput, In, Nothing, OpExecutionContext, Out, job, op
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ class ExperimentSweepConfig(Config):
     sweep_config_path: str = ""
     sweep_config_json: str = ""
     data_root: str = ".yats_data"
+    managing_partner_ack: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +36,25 @@ class ExperimentSweepConfig(Config):
 # ---------------------------------------------------------------------------
 
 
-@op(out=Out(list))
+@op(out=Out(Nothing))
+def check_experiment_explosion_guard(
+    context: OpExecutionContext, config: ExperimentSweepConfig
+) -> None:
+    """Block sweep creation if experiment_index exceeds the explosion threshold.
+
+    PRD §23.5: >1000 experiments in last 30 days blocks new sweeps.
+    Requires managing_partner_ack=True to proceed when guard is tripped.
+    """
+    from research.governance.explosion_guard import ExplosionGuardError, check_explosion_guard
+
+    try:
+        check_explosion_guard(managing_partner_ack=config.managing_partner_ack)
+        context.log.info("Explosion guard passed — sweep creation allowed")
+    except ExplosionGuardError as exc:
+        raise Exception(str(exc)) from exc
+
+
+@op(ins={"guard": In(Nothing)}, out=Out(list))
 def load_sweep_config(context: OpExecutionContext, config: ExperimentSweepConfig) -> list[dict]:
     """Load sweep config and expand the override grid into experiment specs.
 
@@ -143,10 +162,11 @@ def run_sweep_experiments(
 # ---------------------------------------------------------------------------
 
 
-@job
+@job(tags={"yats/concurrency_pool": "sweep", "dagster/priority": "30"})
 def experiment_sweep():
-    """Run a parameter sweep: load config → create experiments → run each."""
-    specs = load_sweep_config()
+    """Run a parameter sweep: guard → load config → create experiments → run each."""
+    guard = check_experiment_explosion_guard()
+    specs = load_sweep_config(guard)
     experiment_ids = create_sweep_experiments(specs)
     run_sweep_experiments(experiment_ids)
 

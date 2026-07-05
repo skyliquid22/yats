@@ -440,7 +440,7 @@ def write_live_final_state(
 # ---------------------------------------------------------------------------
 
 
-@job
+@job(tags={"yats/concurrency_pool": "live", "dagster/priority": "100"})
 def live_trading_setup():
     """Live trading setup: gate → tier → paper validation → init state."""
     gate_result = validate_managing_partner_gate()
@@ -449,7 +449,7 @@ def live_trading_setup():
     initialize_live_trading_state(validation_result)
 
 
-@job
+@job(tags={"yats/concurrency_pool": "live", "dagster/priority": "100"})
 def live_trading_teardown():
     """Live trading teardown: cancel orders → settle → write final state."""
     cancel_result = cancel_live_pending_orders()

@@ -761,7 +761,7 @@ def feature_pipeline_incremental_op(
         conn.close()
 
 
-@job
+@job(tags={"yats/concurrency_pool": "feature", "dagster/priority": "20"})
 def feature_pipeline_incremental():
     """Dagster job: incremental feature computation with watermark tracking."""
     feature_pipeline_incremental_op()

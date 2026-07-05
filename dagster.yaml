@@ -1,0 +1,30 @@
+# dagster.yaml — Dagster instance configuration
+# QueuedRunCoordinator with tag-based concurrency limits (PRD §23.1)
+# and priority queue (PRD §23.2).
+
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: QueuedRunCoordinator
+  config:
+    max_concurrent_runs: 10
+    tag_concurrency_limits:
+      # PRD §23.1: shadow replays (IO-heavy)
+      - key: "yats/concurrency_pool"
+        value: "shadow"
+        limit: 3
+      # PRD §23.1: sweeps (each spawns multiple experiment runs)
+      - key: "yats/concurrency_pool"
+        value: "sweep"
+        limit: 2
+      # PRD §23.1: paper trading (broker rate limits + monitoring)
+      - key: "yats/concurrency_pool"
+        value: "paper"
+        limit: 3
+      # PRD §23.1: live trading (capital safety — 1 total)
+      - key: "yats/concurrency_pool"
+        value: "live"
+        limit: 1
+      # PRD §23.1: feature computation (QuestDB write throughput)
+      - key: "yats/concurrency_pool"
+        value: "feature"
+        limit: 3
