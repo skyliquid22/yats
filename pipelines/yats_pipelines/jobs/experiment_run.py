@@ -289,7 +289,7 @@ def update_experiment_index(
         "max_drawdown": perf.get("max_drawdown"),
         "total_return": perf.get("total_return"),
         "annualized_return": perf.get("annualized_return"),
-        "win_rate": perf.get("win_rate"),
+        "win_rate": trading.get("win_rate"),
         "turnover_1d_mean": trading.get("turnover_1d_mean"),
     }
     flat_metrics = {k: v for k, v in flat_metrics.items() if v is not None}
