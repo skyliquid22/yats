@@ -242,16 +242,16 @@ def evaluate_experiment(
                 "train_end": fn_split_meta.get("train_boundary_date"),
                 "test_start": fn_split_meta.get("test_boundary_date"),
                 "test_end": eval_data[-1].get("timestamp") if eval_data else None,
-                "purged_count": fn_split_meta.get("purged_count", 0),
-                "embargoed_count": fn_split_meta.get("embargoed_count", 0),
+                "purged_label_bars": fn_split_meta.get("purged_label_bars", 0),
+                "purged_buffer_bars": fn_split_meta.get("purged_buffer_bars", 0),
             }
         }
         context.log.info(
             "Evaluation split: evaluating on %d/%d rows "
-            "(purged=%d embargo=%d test window: %s to %s)",
+            "(purged_label=%d purged_buffer=%d test window: %s to %s)",
             len(eval_data), len(data),
-            fn_split_meta.get("purged_count", 0),
-            fn_split_meta.get("embargoed_count", 0),
+            fn_split_meta.get("purged_label_bars", 0),
+            fn_split_meta.get("purged_buffer_bars", 0),
             split_meta["evaluation_split"]["test_start"],
             split_meta["evaluation_split"]["test_end"],
         )
@@ -400,14 +400,28 @@ def _apply_evaluation_split(
 
     Returns (full_data, full_data, {}) when evaluation_split is None.
 
-    When a split is configured, applies López de Prado purge+embargo (AFML §5):
-    1. Compute the raw split boundary (split_idx).
-    2. PURGE: drop the last label_horizon training bars whose label/reward
-       window overlaps the test set. Eliminates the old deliberate overlap bar.
-    3. EMBARGO: drop embargo_bars = floor(embargo_pct * n) bars from both
-       train-end and test-start to break serial-correlation bleed.
+    When a split is configured, applies a forward-only purge with two before-side
+    components (AFML Ch. 7):
 
-    Returns split_meta with purged_count, embargoed_count, and boundary dates.
+    1. Compute the raw split boundary (split_idx = first bar of the test set).
+    2. LABEL PURGE: drop the last label_horizon bars from train. These bars'
+       reward windows reach forward into the test period — deterministic leakage.
+    3. PURGE BUFFER: drop an additional purge_buffer bars from train. These bars'
+       feature windows overlap with early test bars due to serial correlation in
+       the feature computation — distributional leakage.
+
+    Both components are applied exclusively on the before-side (train_end):
+        train_end = split_idx - label_horizon - purge_buffer_bars
+
+    Classic after-embargo is intentionally omitted: the split is forward-only
+    (test is the terminal edge), so there is no post-test training to embargo —
+    see the WFO harness for why splits are always forward-only.
+
+    When split.purge_buffer is None, purge_buffer_bars is auto-computed as the
+    maximum feature lookback for the spec's feature set (queried from the feature
+    registry). An explicit integer overrides the default.
+
+    Returns split_meta with purged_label_bars, purged_buffer_bars, and boundary dates.
     """
     split = spec.evaluation_split
     if split is None:
@@ -422,11 +436,17 @@ def _apply_evaluation_split(
         split_idx = max(2, int(n * split.train_ratio))
 
     label_horizon = split.label_horizon
-    embargo_bars = max(0, int(split.embargo_pct * n))
 
-    # Apply purge then embargo
-    train_end = split_idx - label_horizon - embargo_bars
-    test_start = split_idx + embargo_bars
+    if split.purge_buffer is None:
+        from research.features.feature_registry import registry
+        purge_buffer_bars = registry.max_lookback(spec.feature_set)
+    else:
+        purge_buffer_bars = split.purge_buffer
+
+    # Both purge components are on the before-side only.
+    # test_start stays at split_idx — no after-embargo.
+    train_end = split_idx - label_horizon - purge_buffer_bars
+    test_start = split_idx
 
     # Clamp so each partition has at least 1 bar; fall back to clean split if degenerate
     train_end = max(1, train_end)
@@ -439,8 +459,8 @@ def _apply_evaluation_split(
     test_data = data[test_start:]
 
     split_meta = {
-        "purged_count": label_horizon,
-        "embargoed_count": embargo_bars,
+        "purged_label_bars": label_horizon,
+        "purged_buffer_bars": purge_buffer_bars,
         "train_rows": train_end,
         "test_rows": n - test_start,
         "train_boundary_date": data[train_end - 1].get("timestamp") if train_end > 0 else None,

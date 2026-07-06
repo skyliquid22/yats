@@ -72,21 +72,21 @@ def compute_regime_features(
 # compute_regime_features() directly for efficiency, but individual
 # registrations are needed for the registry validation.
 
-@feature("market_vol_20d")
+@feature("market_vol_20d", lookback=21)
 def _market_vol_20d(df: pd.DataFrame) -> pd.Series:
     return df["market_vol_20d"]
 
 
-@feature("market_trend_20d")
+@feature("market_trend_20d", lookback=21)
 def _market_trend_20d(df: pd.DataFrame) -> pd.Series:
     return df["market_trend_20d"]
 
 
-@feature("dispersion_20d")
+@feature("dispersion_20d", lookback=21)
 def _dispersion_20d(df: pd.DataFrame) -> pd.Series:
     return df["dispersion_20d"]
 
 
-@feature("corr_mean_20d")
+@feature("corr_mean_20d", lookback=21)
 def _corr_mean_20d(df: pd.DataFrame) -> pd.Series:
     return df["corr_mean_20d"]

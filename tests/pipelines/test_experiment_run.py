@@ -374,19 +374,19 @@ class TestApplyEvaluationSplit:
 
     def _make_spec_with_split(
         self, train_ratio=0.8, test_ratio=0.2, test_window_months=None,
-        label_horizon=0, embargo_pct=0.0,
+        label_horizon=0, purge_buffer=0,
     ):
         """Build a spec with an evaluation split.
 
-        label_horizon=0, embargo_pct=0.0 by default so existing size assertions
-        are not perturbed; tests that verify purge/embargo set these explicitly.
+        label_horizon=0, purge_buffer=0 by default so existing size assertions
+        are not perturbed; tests that verify purge set these explicitly.
         """
         spec_data = _make_spec_dict()
         spec_data["evaluation_split"] = {
             "train_ratio": train_ratio,
             "test_ratio": test_ratio,
             "label_horizon": label_horizon,
-            "embargo_pct": embargo_pct,
+            "purge_buffer": purge_buffer,
             **({"test_window_months": test_window_months} if test_window_months else {}),
         }
         return _reconstruct_spec(spec_data)
@@ -455,65 +455,85 @@ class TestApplyEvaluationSplit:
         spec = self._make_spec_with_split(train_ratio=0.8, test_ratio=0.2, label_horizon=2)
         data = _make_data_rows(100)
         train, test, meta = _apply_evaluation_split(data, spec)
-        # split_idx=80, label_horizon=2, embargo_bars=0 → train[:78], test[80:]
+        # split_idx=80, label_horizon=2, purge_buffer=0 → train[:78], test[80:]
         assert len(train) == 78
-        assert meta["purged_count"] == 2
+        assert meta["purged_label_bars"] == 2
 
-    def test_embargo_creates_gap_on_both_sides(self):
-        """With embargo_bars=k, train loses k from end and test loses k from start."""
+    def test_purge_buffer_widens_train_gap_before_side_only(self):
+        """purge_buffer widens the before-side gap; test_start is NOT moved.
+
+        Classic after-embargo is intentionally omitted — the split is forward-only
+        (test is the terminal edge), so there is no post-test training to embargo.
+        """
         spec = self._make_spec_with_split(
-            train_ratio=0.8, test_ratio=0.2, label_horizon=0, embargo_pct=0.05,
+            train_ratio=0.8, test_ratio=0.2, label_horizon=0, purge_buffer=5,
         )
         data = _make_data_rows(100)
         train, test, meta = _apply_evaluation_split(data, spec)
-        # split_idx=80, embargo_bars=floor(0.05*100)=5
-        # train = data[:80-5] = data[:75]; test = data[80+5:] = data[85:]
+        # split_idx=80, purge_buffer=5 (absolute, before-side only)
+        # train = data[:80-5] = data[:75]; test = data[80:] (no after-embargo)
         assert len(train) == 75
-        assert len(test) == 15
-        assert meta["embargoed_count"] == 5
+        assert len(test) == 20
+        assert meta["purged_buffer_bars"] == 5
         # Verify the gap: last train timestamp < first test timestamp
         train_ts_set = {r["timestamp"] for r in train}
         test_ts_set = {r["timestamp"] for r in test}
         assert train_ts_set.isdisjoint(test_ts_set)
 
-    def test_purge_and_embargo_combined(self):
-        """Purge + embargo bars are both removed."""
+    def test_purge_and_buffer_combined(self):
+        """label_horizon + purge_buffer bars are both removed from before-side."""
         spec = self._make_spec_with_split(
-            train_ratio=0.8, test_ratio=0.2, label_horizon=1, embargo_pct=0.01,
+            train_ratio=0.8, test_ratio=0.2, label_horizon=1, purge_buffer=1,
         )
         data = _make_data_rows(100)
         train, test, meta = _apply_evaluation_split(data, spec)
-        # split_idx=80, purge=1, embargo_bars=floor(0.01*100)=1
-        # train = data[:80-1-1] = data[:78]; test = data[80+1:] = data[81:]
+        # split_idx=80, purge=1, purge_buffer=1 (absolute)
+        # train = data[:80-1-1] = data[:78]; test = data[80:] (no after-embargo)
         assert len(train) == 78
-        assert len(test) == 19
-        assert meta["purged_count"] == 1
-        assert meta["embargoed_count"] == 1
+        assert len(test) == 20
+        assert meta["purged_label_bars"] == 1
+        assert meta["purged_buffer_bars"] == 1
 
-    def test_purge_embargo_metadata_fields(self):
-        """split_meta carries boundary dates and counts."""
+    def test_purge_buffer_is_absolute_not_pct(self):
+        """purge_buffer is an absolute bar count, independent of dataset size."""
+        spec_small = self._make_spec_with_split(
+            train_ratio=0.8, test_ratio=0.2, label_horizon=0, purge_buffer=10,
+        )
+        spec_large = self._make_spec_with_split(
+            train_ratio=0.8, test_ratio=0.2, label_horizon=0, purge_buffer=10,
+        )
+        train_small, _, meta_small = _apply_evaluation_split(_make_data_rows(100), spec_small)
+        train_large, _, meta_large = _apply_evaluation_split(_make_data_rows(500), spec_large)
+        # Both should drop exactly 10 bars (not 10% of n)
+        assert meta_small["purged_buffer_bars"] == 10
+        assert meta_large["purged_buffer_bars"] == 10
+        # train sizes: 80-10=70 for n=100; 400-10=390 for n=500
+        assert len(train_small) == 70
+        assert len(train_large) == 390
+
+    def test_purge_metadata_fields(self):
+        """split_meta carries boundary dates and separate purge component counts."""
         spec = self._make_spec_with_split(
-            train_ratio=0.8, test_ratio=0.2, label_horizon=1, embargo_pct=0.01,
+            train_ratio=0.8, test_ratio=0.2, label_horizon=1, purge_buffer=1,
         )
         data = _make_data_rows(100)
         _, _, meta = _apply_evaluation_split(data, spec)
-        assert "purged_count" in meta
-        assert "embargoed_count" in meta
+        assert "purged_label_bars" in meta
+        assert "purged_buffer_bars" in meta
         assert "train_boundary_date" in meta
         assert "test_boundary_date" in meta
         assert "train_rows" in meta
         assert "test_rows" in meta
 
-    def test_purge_embargo_creates_verified_gap(self):
-        """Purge+embargo must produce a genuine data gap between train-end and test-start.
+    def test_purge_creates_verified_gap_before_side_only(self):
+        """Purge produces a genuine before-side gap; test window is NOT shrunk.
 
-        Without purge/embargo, train and test are adjacent (no temporal gap).
-        With purge=label_horizon and embargo=embargo_pct*n bars on each side,
-        the gap = label_horizon + 2*embargo_bars bars, eliminating boundary leakage.
+        Without purge, train and test are adjacent (no temporal gap).
+        With label_horizon=5 and purge_buffer=4, the gap = 5 + 4 = 9 bars
+        on the before-side only (test_start stays at split_idx).
         """
         rng = np.random.default_rng(0)
         n = 200
-        # Construct data rows with a deliberate signal spike at the boundary
         data = []
         for i in range(n):
             data.append({
@@ -522,36 +542,53 @@ class TestApplyEvaluationSplit:
                 "signal": rng.normal(0, 1),
             })
 
-        # Without purge/embargo (label_horizon=0, embargo_pct=0)
+        # Without purge (label_horizon=0, purge_buffer=0)
         spec_leaky = self._make_spec_with_split(
-            train_ratio=0.8, test_ratio=0.2, label_horizon=0, embargo_pct=0.0,
+            train_ratio=0.8, test_ratio=0.2, label_horizon=0, purge_buffer=0,
         )
         train_leaky, test_leaky, _ = _apply_evaluation_split(data, spec_leaky)
 
-        # With purge+embargo
+        # With purge on before-side only
         spec_clean = self._make_spec_with_split(
-            train_ratio=0.8, test_ratio=0.2, label_horizon=5, embargo_pct=0.02,
+            train_ratio=0.8, test_ratio=0.2, label_horizon=5, purge_buffer=4,
         )
         train_clean, test_clean, meta = _apply_evaluation_split(data, spec_clean)
 
-        # The leaky split: test[0] is immediately after train[-1] (no gap)
         leaky_train_ts = {r["timestamp"] for r in train_leaky}
         leaky_test_ts = {r["timestamp"] for r in test_leaky}
-        assert leaky_train_ts.isdisjoint(leaky_test_ts)  # still disjoint in cleaned version
+        assert leaky_train_ts.isdisjoint(leaky_test_ts)
 
-        # The clean split has a verified gap between train-end and test-start
+        # Verified gap between train-end and test-start
         clean_train_last = train_clean[-1]["timestamp"]
         clean_test_first = test_clean[0]["timestamp"]
-        # Find index positions
         ts_list = [r["timestamp"] for r in data]
         idx_train_end = ts_list.index(clean_train_last)
         idx_test_start = ts_list.index(clean_test_first)
         gap = idx_test_start - idx_train_end - 1
-        # gap = label_horizon + 2*embargo_bars
-        # purge=5, embargo=floor(0.02*200)=4 → gap = 5 + 2*4 = 13
-        assert gap >= 1, f"Expected a gap between train and test, got gap={gap}"
-        assert meta["purged_count"] == 5
-        assert meta["embargoed_count"] == 4
+        # gap = label_horizon + purge_buffer = 5 + 4 = 9 (before-side only, no after-embargo)
+        assert gap == 9, f"Expected gap=9 (label_horizon=5 + purge_buffer=4), got {gap}"
+        assert meta["purged_label_bars"] == 5
+        assert meta["purged_buffer_bars"] == 4
+
+    def test_purge_buffer_defaults_to_feature_max_lookback(self):
+        """When purge_buffer=None, auto-computes from the feature set's max lookback."""
+        import research.features.ohlcv_features  # noqa: F401 — register features
+        import research.features.cross_sectional_features  # noqa: F401
+        import research.features.fundamental_features  # noqa: F401
+        import research.features.regime_features_v1  # noqa: F401
+
+        spec_data = _make_spec_dict()
+        spec_data["evaluation_split"] = {
+            "train_ratio": 0.8,
+            "test_ratio": 0.2,
+            "label_horizon": 0,
+            # purge_buffer omitted → None → auto from feature registry
+        }
+        spec = _reconstruct_spec(spec_data)
+        # core_v1 max lookback = 252 (mom_12m_excl_1m uses shift(252))
+        data = _make_data_rows(600)
+        _, _, meta = _apply_evaluation_split(data, spec)
+        assert meta["purged_buffer_bars"] == 252
 
 
 class TestNonRlNoLookahead:

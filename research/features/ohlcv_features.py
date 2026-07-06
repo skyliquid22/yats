@@ -10,46 +10,46 @@ import pandas as pd
 from research.features.feature_registry import feature
 
 
-@feature("ret_1d")
+@feature("ret_1d", lookback=1)
 def compute_ret_1d(df: pd.DataFrame) -> pd.Series:
     """log(close_t / close_{t-1}), lookback 1d."""
     return np.log(df["close"] / df["close"].shift(1))
 
 
-@feature("ret_5d")
+@feature("ret_5d", lookback=5)
 def compute_ret_5d(df: pd.DataFrame) -> pd.Series:
     """log(close_t / close_{t-5}), lookback 5d."""
     return np.log(df["close"] / df["close"].shift(5))
 
 
-@feature("ret_21d")
+@feature("ret_21d", lookback=21)
 def compute_ret_21d(df: pd.DataFrame) -> pd.Series:
     """log(close_t / close_{t-21}), lookback 21d."""
     return np.log(df["close"] / df["close"].shift(21))
 
 
-@feature("rv_21d")
+@feature("rv_21d", lookback=22)
 def compute_rv_21d(df: pd.DataFrame) -> pd.Series:
     """std(ret_1d) * sqrt(252) over 21 days."""
     ret_1d = np.log(df["close"] / df["close"].shift(1))
     return ret_1d.rolling(window=21, min_periods=21).std() * np.sqrt(252)
 
 
-@feature("rv_63d")
+@feature("rv_63d", lookback=64)
 def compute_rv_63d(df: pd.DataFrame) -> pd.Series:
     """std(ret_1d) * sqrt(252) over 63 days."""
     ret_1d = np.log(df["close"] / df["close"].shift(1))
     return ret_1d.rolling(window=63, min_periods=63).std() * np.sqrt(252)
 
 
-@feature("dist_20d_high")
+@feature("dist_20d_high", lookback=20)
 def compute_dist_20d_high(df: pd.DataFrame) -> pd.Series:
     """(close - max(close, 20d)) / max(close, 20d)."""
     rolling_high = df["close"].rolling(window=20, min_periods=20).max()
     return (df["close"] - rolling_high) / rolling_high
 
 
-@feature("dist_20d_low")
+@feature("dist_20d_low", lookback=20)
 def compute_dist_20d_low(df: pd.DataFrame) -> pd.Series:
     """(close - min(close, 20d)) / min(close, 20d)."""
     rolling_low = df["close"].rolling(window=20, min_periods=20).min()

@@ -56,16 +56,54 @@ class FeatureRegistry:
 
     def __init__(self):
         self._implementations: dict[str, Callable] = {}
+        self._lookbacks: dict[str, int] = {}
         self._configs_dir = Path(__file__).resolve().parents[2] / "configs" / "feature_sets"
 
-    def register(self, name: str, fn: Callable) -> None:
+    def register(self, name: str, fn: Callable, lookback: int = 0) -> None:
         self._implementations[name] = fn
+        self._lookbacks[name] = lookback
 
     def get(self, name: str) -> Callable:
         if name not in self._implementations:
             raise KeyError(f"Feature '{name}' not registered. "
                            f"Available: {sorted(self._implementations.keys())}")
         return self._implementations[name]
+
+    def feature_lookback(self, name: str) -> int:
+        """Return the lookback (in bars) for a registered feature, or 0 if unknown."""
+        return self._lookbacks.get(name, 0)
+
+    def max_lookback(self, feature_set_name: str) -> int:
+        """Return the maximum lookback (in bars) across all features in the given feature set.
+
+        Reads the feature set YAML without requiring feature implementations to be
+        registered — falls back to 0 for any feature not in the lookback registry.
+
+        Raises RuntimeError if all features resolve to lookback=0, which indicates
+        the feature modules have not been imported (and thus not registered their lookbacks).
+        Callers must import the feature modules before calling this method.
+        """
+        path = self._configs_dir / f"{feature_set_name}.yml"
+        if not path.exists():
+            raise FileNotFoundError(f"Feature set config not found: {path}")
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        all_names = (
+            data.get("ohlcv", [])
+            + data.get("cross_sectional", [])
+            + data.get("fundamental", [])
+            + data.get("regime", [])
+        )
+        result = max((self._lookbacks.get(n, 0) for n in all_names), default=0)
+        if result == 0 and all_names:
+            unregistered = [n for n in all_names if n not in self._lookbacks]
+            raise RuntimeError(
+                f"max_lookback('{feature_set_name}') returned 0: no lookbacks registered "
+                f"for any of {len(all_names)} features "
+                f"(unregistered: {unregistered[:5]}...). "
+                "Import the feature modules before calling max_lookback()."
+            )
+        return result
 
     def load_feature_set(self, name: str) -> FeatureSet:
         """Load a feature set from YAML config."""
@@ -103,9 +141,9 @@ class FeatureRegistry:
 registry = FeatureRegistry()
 
 
-def feature(name: str):
-    """Decorator to register a feature implementation."""
+def feature(name: str, lookback: int = 0):
+    """Decorator to register a feature implementation with its lookback in bars."""
     def decorator(fn: Callable) -> Callable:
-        registry.register(name, fn)
+        registry.register(name, fn, lookback=lookback)
         return fn
     return decorator
