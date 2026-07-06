@@ -13,7 +13,9 @@ from yats_pipelines.jobs.canonicalize import (
     _canonicalize_equity_ohlcv,
     _canonicalize_financial_metrics,
     _canonicalize_fundamentals,
+    _canonicalize_option_eod,
     _load_fundamentals_weighted_shares,
+    _pick_latest_eod_per_contract,
     _run_already_written,
     _validate_ohlcv_row,
 )
@@ -552,3 +554,258 @@ class TestSharesOutstandingEnrichment:
         ]
         assert metrics_calls
         assert metrics_calls[0][1]["columns"]["shares_outstanding"] == pytest.approx(2_000_000.0)
+
+
+# ---------------------------------------------------------------------------
+# _pick_latest_eod_per_contract
+# ---------------------------------------------------------------------------
+
+
+def _make_eod_row(
+    underlying: str,
+    strike: float,
+    right: str,
+    quote_date: datetime,
+    ingested_at: datetime,
+    iv: float | None = None,
+    open_interest: int | None = None,
+    gamma: float | None = None,
+) -> dict:
+    return {
+        "underlying": underlying,
+        "expiry": datetime(2026, 8, 15, tzinfo=timezone.utc),
+        "strike": strike,
+        "right": right,
+        "quote_date": quote_date,
+        "ingested_at": ingested_at,
+        "open": 1.0,
+        "high": 1.5,
+        "low": 0.9,
+        "close": 1.1,
+        "bid": 1.0,
+        "ask": 1.2,
+        "volume": 100,
+        "trade_count": 5,
+        "iv": iv,
+        "delta": 0.5 if iv is not None else None,
+        "theta": -0.01 if iv is not None else None,
+        "vega": 0.1 if iv is not None else None,
+        "rho": 0.05 if iv is not None else None,
+        "gamma": gamma,
+        "open_interest": open_interest,
+    }
+
+
+class TestPickLatestEodPerContract:
+    def test_single_row_returned(self):
+        qd = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        rows = [_make_eod_row("AAPL", 200.0, "C", qd, qd)]
+        result = _pick_latest_eod_per_contract(rows)
+        assert len(result) == 1
+
+    def test_latest_ingested_wins(self):
+        qd = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        early = _make_eod_row(
+            "AAPL", 200.0, "C", qd,
+            ingested_at=datetime(2026, 6, 15, 9, tzinfo=timezone.utc),
+            iv=0.25,
+        )
+        late = _make_eod_row(
+            "AAPL", 200.0, "C", qd,
+            ingested_at=datetime(2026, 6, 15, 18, tzinfo=timezone.utc),
+            iv=0.30,
+        )
+        result = _pick_latest_eod_per_contract([early, late])
+        assert len(result) == 1
+        assert result[0]["iv"] == pytest.approx(0.30)
+
+    def test_different_strike_kept_separately(self):
+        qd = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        rows = [
+            _make_eod_row("AAPL", 190.0, "C", qd, qd),
+            _make_eod_row("AAPL", 200.0, "C", qd, qd),
+        ]
+        result = _pick_latest_eod_per_contract(rows)
+        assert len(result) == 2
+
+    def test_different_dates_kept_separately(self):
+        rows = [
+            _make_eod_row("AAPL", 200.0, "C",
+                          datetime(2026, 6, 15, tzinfo=timezone.utc),
+                          datetime(2026, 6, 15, tzinfo=timezone.utc)),
+            _make_eod_row("AAPL", 200.0, "C",
+                          datetime(2026, 6, 16, tzinfo=timezone.utc),
+                          datetime(2026, 6, 16, tzinfo=timezone.utc)),
+        ]
+        result = _pick_latest_eod_per_contract(rows)
+        assert len(result) == 2
+
+    def test_greek_preserved_when_later_row_has_none(self):
+        """iv from an earlier ingest survives when a later ingest has iv=None."""
+        qd = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        early = _make_eod_row(
+            "AAPL", 200.0, "C", qd,
+            ingested_at=datetime(2026, 6, 15, 9, tzinfo=timezone.utc),
+            iv=0.28,
+        )
+        late = _make_eod_row(
+            "AAPL", 200.0, "C", qd,
+            ingested_at=datetime(2026, 6, 15, 18, tzinfo=timezone.utc),
+            iv=None,
+        )
+        result = _pick_latest_eod_per_contract([early, late])
+        assert result[0]["iv"] == pytest.approx(0.28)
+
+    def test_none_quote_date_row_skipped(self):
+        row = {"underlying": "AAPL", "strike": 200.0, "right": "C", "quote_date": None}
+        result = _pick_latest_eod_per_contract([row])
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# _canonicalize_option_eod
+# ---------------------------------------------------------------------------
+
+
+def _make_eod_conn(rows: list[dict]):
+    """Mock connection for _canonicalize_option_eod.
+
+    First cursor: dedup check returns 0 (not yet written).
+    Second cursor: returns the raw EOD rows.
+    """
+    if not rows:
+        columns = []
+        raw_rows = []
+    else:
+        columns = list(rows[0].keys())
+        raw_rows = [tuple(r.get(c) for c in columns) for r in rows]
+
+    call_count = [0]
+
+    def cursor_factory():
+        call_count[0] += 1
+        cur = MagicMock()
+        if call_count[0] == 1:
+            cur.fetchone.return_value = (0,)
+        else:
+            cur.description = [(col, None, None, None, None, None, None) for col in columns]
+            cur.fetchall.return_value = raw_rows
+        return cur
+
+    conn = MagicMock()
+    conn.cursor.side_effect = cursor_factory
+    return conn
+
+
+class TestCanonicalizeOptionEod:
+    def _config(self, **kwargs) -> CanonicalizeConfig:
+        return CanonicalizeConfig(domains=["option_eod"], **kwargs)
+
+    def test_empty_rows_returns_zero(self):
+        conn = _make_eod_conn([])
+        sender = MagicMock()
+        now = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_option_eod(conn, sender, self._config(), now, "run-1", log)
+
+        assert count == 0
+        sender.row.assert_not_called()
+
+    def test_dedup_skips_on_second_run(self):
+        cur = MagicMock()
+        cur.fetchone.return_value = (1,)
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        sender = MagicMock()
+        now = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_option_eod(conn, sender, self._config(), now, "run-dup", log)
+
+        assert count == 0
+        sender.row.assert_not_called()
+
+    def test_writes_canonical_and_reconciliation_rows(self):
+        qd = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        rows = [_make_eod_row("AAPL", 200.0, "C", qd, qd, iv=0.25, open_interest=500)]
+        conn = _make_eod_conn(rows)
+        sender = MagicMock()
+        now = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_option_eod(conn, sender, self._config(), now, "run-2", log)
+
+        assert count == 1
+        assert sender.row.call_count == 2  # canonical + reconciliation_log
+
+    def test_source_vendor_is_thetadata_eod(self):
+        qd = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        rows = [_make_eod_row("AAPL", 200.0, "C", qd, qd)]
+        conn = _make_eod_conn(rows)
+        sender = MagicMock()
+        now = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        _canonicalize_option_eod(conn, sender, self._config(), now, "run-3", log)
+
+        canonical_call = sender.row.call_args_list[0]
+        assert canonical_call[1]["symbols"]["source_vendor"] == "thetadata_eod"
+        assert canonical_call[1]["symbols"]["reconcile_method"] == "eod_latest"
+
+    def test_close_mapped_to_last(self):
+        qd = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        rows = [_make_eod_row("AAPL", 200.0, "C", qd, qd)]
+        rows[0]["close"] = 2.5
+        conn = _make_eod_conn(rows)
+        sender = MagicMock()
+        now = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        _canonicalize_option_eod(conn, sender, self._config(), now, "run-4", log)
+
+        canonical_call = sender.row.call_args_list[0]
+        assert canonical_call[1]["columns"].get("last") == pytest.approx(2.5)
+
+    def test_right_normalized_to_short_form(self):
+        qd = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        row = _make_eod_row("AAPL", 200.0, "CALL", qd, qd)
+        conn = _make_eod_conn([row])
+        sender = MagicMock()
+        now = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        _canonicalize_option_eod(conn, sender, self._config(), now, "run-5", log)
+
+        canonical_call = sender.row.call_args_list[0]
+        assert canonical_call[1]["symbols"]["right"] == "C"
+
+    def test_null_greeks_not_written(self):
+        """When iv=None (historical endpoint unavailable), the column is omitted."""
+        qd = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        rows = [_make_eod_row("AAPL", 200.0, "C", qd, qd, iv=None)]
+        conn = _make_eod_conn(rows)
+        sender = MagicMock()
+        now = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        _canonicalize_option_eod(conn, sender, self._config(), now, "run-6", log)
+
+        canonical_call = sender.row.call_args_list[0]
+        assert "iv" not in canonical_call[1]["columns"]
+
+    def test_greeks_written_when_available(self):
+        qd = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        rows = [_make_eod_row("AAPL", 200.0, "C", qd, qd, iv=0.30, open_interest=1000, gamma=0.005)]
+        conn = _make_eod_conn(rows)
+        sender = MagicMock()
+        now = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        _canonicalize_option_eod(conn, sender, self._config(), now, "run-7", log)
+
+        canonical_call = sender.row.call_args_list[0]
+        cols = canonical_call[1]["columns"]
+        assert cols.get("iv") == pytest.approx(0.30)
+        assert cols.get("open_interest") == 1000
+        assert cols.get("gamma") == pytest.approx(0.005)
