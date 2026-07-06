@@ -18,7 +18,7 @@ from research.training.reward_registry import RewardAdapterEnv
 # ---------------------------------------------------------------------------
 
 def _install_gymnasium_mock():
-    """Install a mock gymnasium module with spaces.Box."""
+    """Install a mock gymnasium module with spaces.Box and Env base class."""
     gym_mod = ModuleType("gymnasium")
     spaces_mod = ModuleType("gymnasium.spaces")
 
@@ -37,8 +37,22 @@ def _install_gymnasium_mock():
         def contains(self, x):
             return True
 
+    class MockEnv:
+        def reset(self, *, seed=None, options=None):
+            pass
+
+        def step(self, action):
+            raise NotImplementedError
+
+        def render(self):
+            pass
+
+        def close(self):
+            pass
+
     spaces_mod.Box = MockBox
     gym_mod.spaces = spaces_mod
+    gym_mod.Env = MockEnv
     sys.modules["gymnasium"] = gym_mod
     sys.modules["gymnasium.spaces"] = spaces_mod
 
