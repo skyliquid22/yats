@@ -100,9 +100,14 @@ class TestConstruction:
         assert "close" in src._observation_columns
         assert src._observation_columns[0] == "close"
 
-    def test_no_regime_columns_without_regime_feature_set(self):
+    def test_regime_columns_always_loaded_from_yaml(self):
+        # Regime cols come from the feature set YAML, not gated on regime_feature_set.
+        # This ensures shadow replay matches the training observation contract.
         src = _make_source(regime_feature_set=None)
-        assert src._regime_columns == ()
+        assert "market_vol_20d" in src._regime_columns
+        assert "market_trend_20d" in src._regime_columns
+        assert "dispersion_20d" in src._regime_columns
+        assert "corr_mean_20d" in src._regime_columns
 
     def test_regime_columns_with_regime_feature_set(self):
         src = _make_source(regime_feature_set="core_v1")
@@ -278,7 +283,8 @@ class TestBuildSnapshots:
             "dispersion_20d", "corr_mean_20d",
         )
 
-    def test_no_regime_features(self):
+    def test_regime_features_zero_when_data_missing(self):
+        # Regime cols are always loaded from YAML; missing __regime__ data → zeros.
         src = _make_source(regime_feature_set=None)
         canonical = {
             "2023-01-03": {"AAPL": {"close": 131.0}, "MSFT": {"close": 241.0}},
@@ -288,8 +294,13 @@ class TestBuildSnapshots:
         }
 
         snapshots = src._build_snapshots(canonical, features)
-        assert snapshots[0].regime_features == ()
-        assert snapshots[0].regime_feature_names == ()
+        snap = snapshots[0]
+        # Regime feature names are loaded from YAML; values default to 0.0
+        assert len(snap.regime_features) == 4
+        assert all(v == 0.0 for v in snap.regime_features)
+        assert snap.regime_feature_names == (
+            "market_vol_20d", "market_trend_20d", "dispersion_20d", "corr_mean_20d",
+        )
 
     def test_missing_symbol_in_features(self):
         """Symbols missing from features get empty feature dicts."""
