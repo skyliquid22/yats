@@ -34,10 +34,11 @@ class FeatureSet:
     cross_sectional: list[str] = field(default_factory=list)
     fundamental: list[str] = field(default_factory=list)
     regime: list[str] = field(default_factory=list)
+    options: list[str] = field(default_factory=list)
 
     @property
     def all_features(self) -> list[str]:
-        return self.ohlcv + self.cross_sectional + self.fundamental + self.regime
+        return self.ohlcv + self.cross_sectional + self.fundamental + self.regime + self.options
 
     def config_hash(self) -> str:
         """Deterministic hash for experiment lineage."""
@@ -47,6 +48,7 @@ class FeatureSet:
             "cross_sectional": self.cross_sectional,
             "fundamental": self.fundamental,
             "regime": self.regime,
+            "options": self.options,
         }, sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
@@ -121,6 +123,7 @@ class FeatureRegistry:
             cross_sectional=data.get("cross_sectional", []),
             fundamental=data.get("fundamental", []),
             regime=data.get("regime", []),
+            options=data.get("options", []),
         )
 
         # Validate all features have implementations
