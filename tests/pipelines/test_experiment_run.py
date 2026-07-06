@@ -223,6 +223,38 @@ class TestBuildReturnsDf:
         df = _build_returns_df([], ["AAPL"])
         assert len(df) == 0
 
+    def test_missing_close_is_nan_not_minus_100pct(self):
+        # A missing close (key absent from dict) must yield NaN, not 0.0 → -100% return
+        data = [
+            {"timestamp": "2024-01-01", "close": {"AAPL": 100.0}},  # MSFT missing
+            {"timestamp": "2024-01-02", "close": {"AAPL": 101.0}},
+        ]
+        df = _build_returns_df(data, ["AAPL", "MSFT"])
+        assert pd.isna(df.iloc[0]["MSFT"]), "missing close must be NaN, not -100%"
+
+
+class TestDataframeToEnvRowsNaNHandling:
+    def test_nan_feature_excluded_not_zeroed(self):
+        # NaN feature values must be excluded from per_sym dict, not coerced to 0.0
+        df = pd.DataFrame([
+            {"timestamp": "2024-01-01", "symbol": "AAPL", "close": 100.0, "dist_20d_high": float("nan")},
+            {"timestamp": "2024-01-01", "symbol": "MSFT", "close": 200.0, "dist_20d_high": 0.5},
+        ])
+        rows = _dataframe_to_env_rows(df, ["AAPL", "MSFT"], ["close", "dist_20d_high"], [])
+        assert len(rows) == 1
+        # AAPL dist_20d_high was NaN — should be absent from the dict, not 0.0
+        assert "AAPL" not in rows[0].get("dist_20d_high", {}), "NaN must not be coerced to 0.0"
+        assert rows[0]["dist_20d_high"]["MSFT"] == pytest.approx(0.5)
+
+    def test_nan_regime_col_excluded(self):
+        # NaN regime feature must be absent from row, not coerced to 0.0
+        df = pd.DataFrame([
+            {"timestamp": "2024-01-01", "symbol": "AAPL", "close": 100.0, "market_vol_20d": float("nan")},
+        ])
+        rows = _dataframe_to_env_rows(df, ["AAPL"], ["close"], ["market_vol_20d"])
+        assert len(rows) == 1
+        assert "market_vol_20d" not in rows[0], "NaN regime col must not appear in row"
+
 
 class TestDataframeToEnvRows:
     def test_basic_conversion(self):

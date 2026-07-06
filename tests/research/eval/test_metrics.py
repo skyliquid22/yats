@@ -74,6 +74,20 @@ class TestSortino:
     def test_empty_returns_zero(self):
         assert compute_sortino(pd.Series(dtype=float)) == 0.0
 
+    def test_formula_sqrt_mean_min_sq(self):
+        # Verify formula: sqrt(mean(min(r,0)^2)) not std of negative-only subset
+        returns = pd.Series([0.01, -0.02, 0.03, -0.01, 0.005])
+        downside_sq = np.minimum(returns.values, 0.0) ** 2
+        expected_dev = np.sqrt(np.mean(downside_sq))
+        expected_sortino = returns.mean() / expected_dev * np.sqrt(ANNUALIZATION_FACTOR)
+        assert compute_sortino(returns) == pytest.approx(expected_sortino)
+
+    def test_zero_mean_with_downside(self):
+        returns = pd.Series([-0.01, 0.01, -0.02, 0.02])
+        sortino = compute_sortino(returns)
+        # mean=0, so sortino=0
+        assert sortino == pytest.approx(0.0)
+
 
 # ---------------------------------------------------------------------------
 # Max drawdown
@@ -135,6 +149,18 @@ class TestReturns:
         expected = (1.44 ** 0.5) - 1.0
         assert abs(ann - expected) < 1e-10
 
+    def test_annualized_return_total_wipeout(self):
+        # total_return == -1.0 → exact -1.0 (no NaN)
+        ann = compute_annualized_return(-1.0, 252)
+        assert ann == -1.0
+        assert not np.isnan(ann)
+
+    def test_annualized_return_worse_than_wipeout(self):
+        # total_return < -1 is floored at -1.0, not NaN
+        ann = compute_annualized_return(-1.5, 252)
+        assert ann == -1.0
+        assert not np.isnan(ann)
+
 
 # ---------------------------------------------------------------------------
 # Performance metrics (combined)
@@ -165,10 +191,12 @@ class TestTradingMetrics:
             "B": [0.5, 0.4, 0.6, 0.5],
         })
         turnover = compute_turnover(weights)
-        # Day 1→2: |0.1|+|0.1| = 0.2; Day 2→3: 0.4; Day 3→4: 0.2
-        assert len(turnover) == 3
-        assert turnover.iloc[0] == pytest.approx(0.2)
-        assert turnover.iloc[1] == pytest.approx(0.4)
+        # Row 0: establishment from zero → |0.5|+|0.5| = 1.0
+        # Row 1→2: |0.1|+|0.1| = 0.2; Row 2→3: 0.4; Row 3→4: 0.2
+        assert len(turnover) == 4
+        assert turnover.iloc[0] == pytest.approx(1.0)
+        assert turnover.iloc[1] == pytest.approx(0.2)
+        assert turnover.iloc[2] == pytest.approx(0.4)
 
     def test_win_rate(self):
         pnl = pd.Series([0.01, -0.005, 0.02, -0.01, 0.015])
