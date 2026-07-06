@@ -254,14 +254,17 @@ class ThetaDataResource:
                 "quote_date": _parse_iso_timestamp(row.get("last_trade")),
             })
 
-        logger.info(
-            "Fetched %d EOD rows for %s exp=%s (%s to %s)",
-            len(rows),
-            root,
-            exp,
-            start_date,
-            end_date,
-        )
+        if rows:
+            logger.info(
+                "Fetched %d EOD rows for %s exp=%s (%s to %s)",
+                len(rows), root, exp, start_date, end_date,
+            )
+        else:
+            logger.warning(
+                "EOD fetch returned 0 rows for %s exp=%s (%s to %s)"
+                " — 472 (no data) or empty response",
+                root, exp, start_date, end_date,
+            )
         return rows
 
     def normalize_chain_snapshot(
