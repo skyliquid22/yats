@@ -56,13 +56,14 @@ def check_order(
         })
         decision = "reject"
 
+    is_buy = side == "buy"
+
     # Max symbol weight
     max_weight = config.get("max_symbol_weight", 0.20)
-    # Compute current weight for this symbol
     current_symbol_value = sum(
         abs(p.get("market_value", 0)) for p in positions if p.get("symbol") == symbol
     )
-    new_symbol_value = current_symbol_value + notional
+    new_symbol_value = (current_symbol_value + notional) if is_buy else max(current_symbol_value - notional, 0.0)
     new_weight = new_symbol_value / nav if nav > 0 else 0
     if new_weight > max_weight:
         reasons.append({
@@ -72,10 +73,10 @@ def check_order(
         })
         decision = "reject"
 
-    # Max active positions
+    # Max active positions — only applies to new buys that add a new symbol
     max_positions = config.get("max_active_positions", 50)
     current_symbols = {p.get("symbol") for p in positions if p.get("qty", 0) > 0}
-    if symbol not in current_symbols and len(current_symbols) >= max_positions:
+    if is_buy and symbol not in current_symbols and len(current_symbols) >= max_positions:
         reasons.append({
             "rule": "max_active_positions",
             "message": f"Would exceed max {max_positions} active positions (currently {len(current_symbols)})",
@@ -83,10 +84,10 @@ def check_order(
         })
         decision = "reject"
 
-    # Gross exposure check
+    # Gross exposure check — sells reduce gross exposure
     max_gross = config.get("max_gross_exposure", 1.0)
     current_gross = sum(abs(p.get("market_value", 0)) for p in positions)
-    new_gross = (current_gross + notional) / nav if nav > 0 else 0
+    new_gross = (current_gross + notional) / nav if is_buy else (current_gross - notional) / nav
     if new_gross > max_gross:
         reasons.append({
             "rule": "max_gross_exposure",
@@ -95,10 +96,9 @@ def check_order(
         })
         decision = "reject"
 
-    # Min cash check
+    # Min cash check — sells free up cash
     min_cash = config.get("min_cash", 0.02)
-    # Approximate: assume cash = nav - gross
-    approx_cash_after = nav - current_gross - notional
+    approx_cash_after = (nav - current_gross - notional) if is_buy else (nav - current_gross + notional)
     cash_pct = approx_cash_after / nav if nav > 0 else 0
     if cash_pct < min_cash:
         reasons.append({
