@@ -4,7 +4,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 
@@ -139,7 +139,7 @@ class AlpacaResource:
         Returns list of dicts with keys matching raw_alpaca_equity_ohlcv columns:
         timestamp, symbol, open, high, low, close, volume, vwap, trade_count, ingested_at.
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         rows: list[dict] = []
         for symbol, bars in raw_bars.items():
             for bar in bars:

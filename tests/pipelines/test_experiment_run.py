@@ -631,7 +631,7 @@ class TestFetchFeaturesLiveDB:
         )
 
         context = build_op_context()
-        config = ExperimentRunConfig(experiment_id="live_integration_test")
+        config = ExperimentRunConfig(experiment_id="live_integration_test", allow_empty_data=True)
         spec_data = {
             "symbols": ["AAPL", "MSFT"],
             "start_date": "2024-01-01",

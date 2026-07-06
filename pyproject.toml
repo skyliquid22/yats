@@ -7,20 +7,21 @@ name = "yats"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "dagster",
-    "dagster-graphql",
+    "dagster>=1.12,<2.0",
+    "dagster-graphql>=1.12,<2.0",
     "psycopg2-binary",
     "questdb",
     "alpaca-py",
     "requests",
-    "numpy",
-    "pandas",
+    "numpy>=2.4,<3.0",
+    "pandas>=3.0,<4.0",
     "scipy",
     "statsmodels",
-    "gymnasium",
-    "torch",
-    "stable-baselines3",
+    "gymnasium>=1.2,<2.0",
+    "torch>=2.10,<3.0",
+    "stable-baselines3>=2.7,<3.0",
     "pyyaml",
+    "websockets>=16.0",
 ]
 
 [tool.setuptools.packages.find]

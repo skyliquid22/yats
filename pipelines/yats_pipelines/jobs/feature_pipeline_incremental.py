@@ -173,17 +173,18 @@ def _load_ohlcv_from(
     conn, tickers: list[str], start_date: str, ts_col: str = "timestamp",
 ) -> pd.DataFrame:
     """Load canonical OHLCV data from start_date forward."""
-    ticker_list = ",".join(f"'{t}'" for t in tickers)
-    where = f" WHERE symbol IN ({ticker_list})"
+    params: list = [tuple(tickers)]
+    where = " WHERE symbol IN %s"
     if start_date:
-        where += f" AND {ts_col} >= '{start_date}T00:00:00.000000Z'"
+        where += f" AND {ts_col} >= %s"
+        params.append(f"{start_date}T00:00:00.000000Z")
 
     query = (
-        f"SELECT timestamp, symbol, open, high, low, close, volume "
+        "SELECT timestamp, symbol, open, high, low, close, volume "
         f"FROM canonical_equity_ohlcv{where} ORDER BY symbol, timestamp"
     )
     cur = conn.cursor()
-    cur.execute(query)
+    cur.execute(query, params)
     columns = [desc[0] for desc in cur.description]
     rows = cur.fetchall()
     cur.close()
@@ -201,10 +202,11 @@ def _load_financial_metrics_from(
     conn, tickers: list[str], start_date: str,
 ) -> pd.DataFrame:
     """Load canonical financial metrics from start_date forward."""
-    ticker_list = ",".join(f"'{t}'" for t in tickers)
-    where = f" WHERE symbol IN ({ticker_list})"
+    params: list = [tuple(tickers)]
+    where = " WHERE symbol IN %s"
     if start_date:
-        where += f" AND timestamp >= '{start_date}T00:00:00.000000Z'"
+        where += " AND timestamp >= %s"
+        params.append(f"{start_date}T00:00:00.000000Z")
 
     fields = [
         "timestamp", "symbol", "pe_ratio", "ps_ratio", "pb_ratio",
@@ -215,10 +217,10 @@ def _load_financial_metrics_from(
     field_str = ", ".join(fields)
     query = (
         f"SELECT {field_str} FROM canonical_financial_metrics{where} "
-        f"ORDER BY symbol, timestamp"
+        "ORDER BY symbol, timestamp"
     )
     cur = conn.cursor()
-    cur.execute(query)
+    cur.execute(query, params)
     columns = [desc[0] for desc in cur.description]
     rows = cur.fetchall()
     cur.close()
@@ -291,6 +293,7 @@ def _write_features(
 ) -> int:
     """Write feature rows to QuestDB via ILP."""
     written = 0
+    skipped_all_nan = 0
     for i, ts in enumerate(timestamps):
         if pd.isna(ts):
             continue
@@ -309,6 +312,7 @@ def _write_features(
                     has_any = True
 
         if not has_any:
+            skipped_all_nan += 1
             continue
 
         columns["computed_at"] = _ts_nanos(now)
@@ -327,6 +331,11 @@ def _write_features(
         )
         written += 1
 
+    if skipped_all_nan > 0:
+        logger.debug(
+            "_write_features: skipped %d all-NaN rows for symbol %s (feature_set=%s)",
+            skipped_all_nan, symbol, feature_set,
+        )
     return written
 
 
@@ -388,6 +397,7 @@ def _compute_per_symbol_incremental(
                 ohlcv_feats[fname] = _winsorize(result)
 
             # Compute fundamental features
+            metrics_df = pd.DataFrame()
             fund_feats: dict[str, pd.Series] = {}
             if fs.fundamental:
                 metrics_df = _load_financial_metrics_from(conn, [symbol], lookback_start)
@@ -432,19 +442,32 @@ def _compute_per_symbol_incremental(
             )
             total_written += written
 
-            # Update watermark to latest date we computed
-            if written > 0:
-                latest_date = new_timestamps.max()
-                _write_watermark(
-                    sender, symbol, feature_set, feature_set_version,
-                    latest_date, now,
-                )
+            # Advance watermark to max PROCESSED date (not written-only).
+            # This prevents perpetual reprocessing when all rows are all-NaN skips.
+            # Exception: cap at the last fundamentals date when fundamentals are in the
+            # feature set and metrics lag behind, so those dates get reprocessed once
+            # fundamentals arrive (avoids permanent gaps).
+            max_processed = new_timestamps.max()
+            new_watermark = max_processed
+
+            if fs.fundamental and not metrics_df.empty:
+                max_metrics_date = metrics_df["timestamp"].max()
+                if pd.notna(max_metrics_date) and max_metrics_date < max_processed:
+                    new_watermark = max_metrics_date
+                    context.log.debug(
+                        "%s: fundamental lag — watermark capped at %s (processed to %s)",
+                        symbol, new_watermark.isoformat(), max_processed.isoformat(),
+                    )
+
+            _write_watermark(
+                sender, symbol, feature_set, feature_set_version, new_watermark, now,
+            )
 
             context.log.debug(
-                "%s: %d new rows (watermark: %s → %s)",
+                "%s: %d new rows written (watermark: %s → %s)",
                 symbol, written,
                 wm.isoformat() if wm else "none",
-                new_timestamps.max().isoformat() if written > 0 else "unchanged",
+                new_watermark.isoformat(),
             )
 
         sender.flush()

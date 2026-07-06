@@ -83,9 +83,11 @@ def _ingest_fundamentals(fd: FinancialDatasetsResource, sender, tickers: list[st
             except Exception:
                 logger.warning("Failed fundamentals %s/%s", ticker, period, exc_info=True)
                 continue
+            skipped = 0
             for rec in records:
                 report_date = _ts(rec.get("report_period"))
                 if not report_date:
+                    skipped += 1
                     continue
                 _row(sender, "raw_fd_fundamentals",
                      symbols={
@@ -113,6 +115,11 @@ def _ingest_fundamentals(fd: FinancialDatasetsResource, sender, tickers: list[st
                      },
                      at=report_date)
                 rows += 1
+            if skipped:
+                logger.warning(
+                    "Skipped %d/%d fundamentals records for %s/%s — missing report_period",
+                    skipped, len(records), ticker, period,
+                )
     return rows
 
 
@@ -125,9 +132,11 @@ def _ingest_metrics(fd: FinancialDatasetsResource, sender, tickers: list[str], n
             except Exception:
                 logger.warning("Failed metrics %s/%s", ticker, period, exc_info=True)
                 continue
+            skipped = 0
             for rec in records:
                 ts = _ts(rec.get("report_period")) or _ts(rec.get("period_end_date"))
                 if not ts:
+                    skipped += 1
                     continue
                 _row(sender, "raw_fd_financial_metrics",
                      symbols={"symbol": ticker},
@@ -153,6 +162,11 @@ def _ingest_metrics(fd: FinancialDatasetsResource, sender, tickers: list[str], n
                      },
                      at=ts)
                 rows += 1
+            if skipped:
+                logger.warning(
+                    "Skipped %d/%d metrics records for %s/%s — missing report_period/period_end_date",
+                    skipped, len(records), ticker, period,
+                )
     return rows
 
 
@@ -164,9 +178,11 @@ def _ingest_earnings(fd: FinancialDatasetsResource, sender, tickers: list[str], 
         except Exception:
             logger.warning("Failed earnings %s", ticker, exc_info=True)
             continue
+        skipped = 0
         for rec in records:
             report_date = _ts(rec.get("report_period"))
             if not report_date:
+                skipped += 1
                 continue
             _row(sender, "raw_fd_earnings",
                  symbols={
@@ -184,6 +200,11 @@ def _ingest_earnings(fd: FinancialDatasetsResource, sender, tickers: list[str], 
                  },
                  at=report_date)
             rows += 1
+        if skipped:
+            logger.warning(
+                "Skipped %d/%d earnings records for %s — missing report_period",
+                skipped, len(records), ticker,
+            )
     return rows
 
 
@@ -195,9 +216,11 @@ def _ingest_insider_trades(fd: FinancialDatasetsResource, sender, tickers: list[
         except Exception:
             logger.warning("Failed insider_trades %s", ticker, exc_info=True)
             continue
+        skipped = 0
         for rec in records:
             filed_at = _ts(rec.get("transaction_date"))
             if not filed_at:
+                skipped += 1
                 continue
             _row(sender, "raw_fd_insider_trades",
                  symbols={
@@ -215,6 +238,11 @@ def _ingest_insider_trades(fd: FinancialDatasetsResource, sender, tickers: list[
                  },
                  at=filed_at)
             rows += 1
+        if skipped:
+            logger.warning(
+                "Skipped %d/%d insider_trades records for %s — missing transaction_date",
+                skipped, len(records), ticker,
+            )
     return rows
 
 
@@ -227,9 +255,11 @@ def _ingest_analyst_estimates(fd: FinancialDatasetsResource, sender, tickers: li
             except Exception:
                 logger.warning("Failed analyst_estimates %s/%s", ticker, period, exc_info=True)
                 continue
+            skipped = 0
             for rec in records:
                 ts = _ts(rec.get("report_period")) or _ts(rec.get("period_end_date"))
                 if not ts:
+                    skipped += 1
                     continue
                 num = rec.get("number_of_analysts")
                 _row(sender, "raw_fd_analyst_estimates",
@@ -249,6 +279,11 @@ def _ingest_analyst_estimates(fd: FinancialDatasetsResource, sender, tickers: li
                      },
                      at=ts)
                 rows += 1
+            if skipped:
+                logger.warning(
+                    "Skipped %d/%d analyst_estimates records for %s/%s — missing report_period/period_end_date",
+                    skipped, len(records), ticker, period,
+                )
     return rows
 
 
