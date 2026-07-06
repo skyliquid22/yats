@@ -18,6 +18,7 @@ from research.promotion.criteria import (
     evaluate_artifact_gates,
     evaluate_constraint_gates,
     evaluate_regression_gates,
+    evaluate_sweep_dsr_gate,
 )
 from research.promotion.execution_criteria import (
     evaluate_execution_hard_gates,
@@ -396,8 +397,22 @@ def run_qualification(
     logger.info("Step 5: Artifact presence")
     all_gates.extend(evaluate_artifact_gates(experiment_path))
 
-    # --- Step 6: Sweep robustness (optional, skip) ---
-    logger.info("Step 6: Sweep robustness (skipped)")
+    # --- Step 6: Sweep DSR gate (sweep-originated candidates only) ---
+    logger.info("Step 6: Sweep DSR gate")
+    sweep_dsr_gates = evaluate_sweep_dsr_gate(candidate_metrics)
+    all_gates.extend(sweep_dsr_gates)
+    if sweep_dsr_gates:
+        gate = sweep_dsr_gates[0]
+        if not gate.passed:
+            warnings.append(f"sweep_dsr_below_threshold: {gate.value:.4f} < {gate.threshold}")
+            logger.warning(
+                "Sweep DSR gate failed for %s: DSR=%.4f < threshold=%.4f",
+                candidate_id, gate.value, gate.threshold,
+            )
+        else:
+            logger.info("Sweep DSR gate passed: DSR=%.4f", gate.value)
+    else:
+        logger.info("Sweep DSR gate skipped (not a sweep-originated candidate)")
 
     # --- Step 7: Execution evidence ---
     logger.info("Step 7: Execution evidence")

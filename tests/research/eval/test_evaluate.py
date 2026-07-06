@@ -330,6 +330,7 @@ class TestProbabilisticSharpe:
 
         result = probabilistic_sharpe_ratio(
             observed_sharpe=observed_sharpe,
+            benchmark_sharpe=0.0,
             n_observations=n,
             returns_skewness=skew,
             returns_kurtosis=kurt,
@@ -341,5 +342,5 @@ class TestProbabilisticSharpe:
         expected_z = sr_daily / np.sqrt(variance)
         expected_psr = float(sp_stats.norm.cdf(expected_z))
 
-        assert abs(result["psr"] - expected_psr) < 1e-10
+        assert abs(result["dsr"] - expected_psr) < 1e-10
         assert abs(result["z_score"] - expected_z) < 1e-10

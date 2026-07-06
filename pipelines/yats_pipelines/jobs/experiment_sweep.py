@@ -158,6 +158,110 @@ def run_sweep_experiments(
     return results
 
 
+def _compute_sweep_dsr_for_results(
+    results: list[dict],
+    data_root: Path,
+) -> list[dict]:
+    """Pure-function core: attach DSR to sweep results that have oos_sharpe.
+
+    Returns a new list; inputs are not mutated.
+    """
+    from compute.stats.deflated_sharpe import compute_sweep_dsr
+
+    completed: list[tuple[int, dict]] = [
+        (i, r) for i, r in enumerate(results)
+        if r.get("oos_sharpe") is not None
+    ]
+
+    augmented = list(results)
+
+    if len(completed) < 2:
+        for idx, _ in enumerate(augmented):
+            if augmented[idx].get("dsr") is None:
+                augmented[idx] = {**augmented[idx], "dsr": None}
+        return augmented
+
+    configs = [
+        {
+            "sharpe": float(r["oos_sharpe"]),
+            "skewness": float(r.get("oos_skewness", 0.0)),
+            "kurtosis": float(r.get("oos_kurtosis", 3.0)),
+            "n_obs": int(r.get("oos_n_obs", 252)),
+        }
+        for _, r in completed
+    ]
+
+    dsr_results = compute_sweep_dsr(configs)
+
+    for (idx, _orig), dsr_info in zip(completed, dsr_results):
+        augmented[idx] = {**augmented[idx], **{
+            "dsr": dsr_info["dsr"],
+            "dsr_p_value": dsr_info["p_value"],
+            "dsr_is_significant": dsr_info["is_significant"],
+            "sweep_benchmark_sr": dsr_info["benchmark_sharpe"],
+        }}
+
+    # Persist sweep DSR summary artifact
+    sweep_dir = data_root / "sweeps"
+    sweep_dir.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "n_configs": len(results),
+        "n_with_oos_sharpe": len(completed),
+        "sweep_benchmark_sr": dsr_results[0]["benchmark_sharpe"],
+        "configs": [
+            {
+                "experiment_id": augmented[idx].get("experiment_id"),
+                "oos_sharpe": r["oos_sharpe"],
+                "dsr": augmented[idx].get("dsr"),
+                "dsr_is_significant": augmented[idx].get("dsr_is_significant"),
+            }
+            for idx, r in completed
+        ],
+    }
+    sweep_key = augmented[completed[0][0]].get("experiment_id", "unknown")
+    summary_path = sweep_dir / f"{sweep_key}_dsr.json"
+    summary_path.write_text(json.dumps(summary, indent=2))
+
+    return augmented
+
+
+@op(ins={"results": In(list)}, out=Out(list))
+def aggregate_sweep_dsr(
+    context: OpExecutionContext,
+    config: ExperimentSweepConfig,
+    results: list[dict],
+) -> list[dict]:
+    """Compute Deflated Sharpe Ratio at sweep level from per-config OOS results.
+
+    Collects OOS Sharpe ratios from completed experiments, computes the
+    sweep-level DSR benchmark SR0, and attaches per-config DSR to each result.
+
+    Results that lack 'oos_sharpe' are passed through unchanged (DSR is skipped
+    until the experiment pipeline populates OOS metrics).
+
+    PRD Stage 1b (ya-cnac1): DSR at sweep-aggregation level.
+    """
+    data_root = Path(config.data_root)
+    augmented = _compute_sweep_dsr_for_results(results, data_root)
+
+    completed_count = sum(1 for r in augmented if r.get("dsr") is not None)
+    if completed_count < 2:
+        context.log.info(
+            "Sweep DSR skipped: only %d/%d configs have OOS Sharpe data (need ≥2)",
+            completed_count, len(results),
+        )
+    else:
+        sr0 = next((r.get("sweep_benchmark_sr") for r in augmented if r.get("sweep_benchmark_sr") is not None), 0.0)
+        n_significant = sum(1 for r in augmented if r.get("dsr_is_significant"))
+        context.log.info(
+            "Sweep DSR: N=%d configs with OOS data, SR0=%.4f, %d significant",
+            completed_count, sr0, n_significant,
+        )
+        context.log.info("Sweep DSR summary written to %s/sweeps/", config.data_root)
+
+    return augmented
+
+
 # ---------------------------------------------------------------------------
 # Job
 # ---------------------------------------------------------------------------
@@ -165,11 +269,12 @@ def run_sweep_experiments(
 
 @job(tags={"yats/concurrency_pool": "sweep", "dagster/priority": "30"})
 def experiment_sweep():
-    """Run a parameter sweep: guard → load config → create experiments → run each."""
+    """Run a parameter sweep: guard → load config → create experiments → run each → aggregate DSR."""
     guard = check_experiment_explosion_guard()
     specs = load_sweep_config(guard)
     experiment_ids = create_sweep_experiments(specs)
-    run_sweep_experiments(experiment_ids)
+    sweep_results = run_sweep_experiments(experiment_ids)
+    aggregate_sweep_dsr(sweep_results)
 
 
 # ---------------------------------------------------------------------------

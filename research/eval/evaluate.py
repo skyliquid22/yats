@@ -84,6 +84,7 @@ def evaluate(
 
     psr_result = probabilistic_sharpe_ratio(
         observed_sharpe=perf.sharpe,
+        benchmark_sharpe=0.0,
         n_observations=len(portfolio_returns),
         returns_skewness=skew,
         returns_kurtosis=kurt,
@@ -141,7 +142,7 @@ def evaluate(
     data_range = _data_range(portfolio_returns)
 
     perf_dict = asdict(perf)
-    perf_dict["psr"] = psr_result["psr"]
+    perf_dict["psr"] = psr_result["dsr"]
     perf_dict["psr_z_score"] = psr_result["z_score"]
     perf_dict["deflated_sharpe"] = (
         dsr_result["deflated_sharpe_ratio"] if dsr_result is not None else None

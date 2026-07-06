@@ -69,6 +69,7 @@ _install_mocks()
 from pipelines.yats_pipelines.jobs.experiment_sweep import (
     _expand_grid,
     _set_nested,
+    _compute_sweep_dsr_for_results,
 )
 
 
@@ -225,3 +226,68 @@ class TestSweepConfigParsing:
         specs = _expand_grid(loaded["base_spec"], loaded["grid"])
 
         assert len(specs) == 3
+
+
+# ---------------------------------------------------------------------------
+# _compute_sweep_dsr_for_results
+# ---------------------------------------------------------------------------
+
+
+def _sweep_result(exp_id: str, sharpe: float | None = None, **kwargs) -> dict:
+    r = {"experiment_id": exp_id, "status": "created"}
+    if sharpe is not None:
+        r["oos_sharpe"] = sharpe
+        r.setdefault("oos_skewness", 0.0)
+        r.setdefault("oos_kurtosis", 3.0)
+        r.setdefault("oos_n_obs", 252)
+    r.update(kwargs)
+    return r
+
+
+class TestComputeSweepDsrForResults:
+    def test_no_oos_sharpe_returns_dsr_none(self, tmp_path):
+        results = [_sweep_result("exp1"), _sweep_result("exp2"), _sweep_result("exp3")]
+        out = _compute_sweep_dsr_for_results(results, tmp_path)
+        assert all(r.get("dsr") is None for r in out)
+
+    def test_one_oos_sharpe_skips_dsr(self, tmp_path):
+        results = [_sweep_result("exp1", sharpe=1.5), _sweep_result("exp2")]
+        out = _compute_sweep_dsr_for_results(results, tmp_path)
+        assert all(r.get("dsr") is None for r in out)
+
+    def test_dsr_computed_when_enough_data(self, tmp_path):
+        results = [
+            _sweep_result("exp1", sharpe=0.5),
+            _sweep_result("exp2", sharpe=1.0),
+            _sweep_result("exp3", sharpe=1.5),
+        ]
+        out = _compute_sweep_dsr_for_results(results, tmp_path)
+        assert all(r["dsr"] is not None for r in out)
+        # DSR increases with observed sharpe
+        dsrs = [r["dsr"] for r in out]
+        assert dsrs[0] < dsrs[1] < dsrs[2]
+
+    def test_summary_artifact_written(self, tmp_path):
+        results = [
+            _sweep_result("expA", sharpe=1.0),
+            _sweep_result("expB", sharpe=2.0),
+        ]
+        _compute_sweep_dsr_for_results(results, tmp_path)
+
+        sweep_files = list((tmp_path / "sweeps").glob("*_dsr.json"))
+        assert len(sweep_files) == 1
+        summary = json.loads(sweep_files[0].read_text())
+        assert summary["n_configs"] == 2
+        assert summary["n_with_oos_sharpe"] == 2
+        assert summary["sweep_benchmark_sr"] is not None
+
+    def test_result_without_oos_sharpe_gets_dsr_none(self, tmp_path):
+        results = [
+            _sweep_result("expA", sharpe=1.0),
+            _sweep_result("expB", sharpe=2.0),
+            _sweep_result("expC"),  # no OOS sharpe
+        ]
+        out = _compute_sweep_dsr_for_results(results, tmp_path)
+        assert out[0]["dsr"] is not None
+        assert out[1]["dsr"] is not None
+        assert out[2].get("dsr") is None
