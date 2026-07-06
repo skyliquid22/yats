@@ -25,3 +25,8 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 include = ["pipelines*", "research*", "compute*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "live_db: requires a live QuestDB instance on localhost:8812",
+]

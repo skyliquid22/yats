@@ -317,6 +317,7 @@ class TestCheckImmutability:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.live_db
 class TestPromoteIntegration:
     @patch("research.promotion.promote.write_promotions_row")
     @patch("research.promotion.promote.update_experiment_index_tier")
