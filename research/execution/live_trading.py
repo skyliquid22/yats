@@ -654,13 +654,19 @@ class LiveTradingLoop:
                 result = self._broker.get_order_status(order_id)
 
                 if result.status == OrderStatus.FILLED:
-                    # Remove from pending first so a non-BrokerError inside
+                    # Mark complete before applying so a non-BrokerError inside
                     # _handle_fill cannot cause a retry that double-applies
                     # the fill (Fix A: idempotent fill application).
                     completed.append(order_id)
                     if result.order_id not in self._applied_fills:
                         self._applied_fills.add(result.order_id)  # write-ahead
-                        self._handle_fill(result)
+                        try:
+                            self._handle_fill(result)
+                        except Exception as fill_exc:
+                            logger.error(
+                                "Fill processing failed for order %s (marked applied, removed from pending): %s",
+                                result.order_id, fill_exc, exc_info=True,
+                            )
 
                 elif result.status == OrderStatus.PARTIALLY_FILLED:
                     # Order still live — write ledger update, leave in pending
@@ -683,7 +689,13 @@ class LiveTradingLoop:
                         # Write with FILLED status so position reconstruction
                         # includes this fill during crash recovery.
                         self._applied_fills.add(result.order_id)  # write-ahead
-                        self._handle_fill(_dc_replace(result, status=OrderStatus.FILLED))
+                        try:
+                            self._handle_fill(_dc_replace(result, status=OrderStatus.FILLED))
+                        except Exception as fill_exc:
+                            logger.error(
+                                "Partial fill processing failed for order %s (marked applied, removed from pending): %s",
+                                result.order_id, fill_exc, exc_info=True,
+                            )
                     else:
                         self._order_writer.write_order(result)
                     logger.info(

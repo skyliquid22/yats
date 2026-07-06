@@ -441,3 +441,326 @@ class TestDailyPnlAndKillSwitch:
         assert loop._compute_daily_pnl(100_000.0) == 0.0
         assert abs(loop._compute_daily_pnl(105_000.0) - 0.05) < 1e-10
         assert abs(loop._compute_daily_pnl(97_000.0) - (-0.03)) < 1e-10
+
+
+# ---------------------------------------------------------------------------
+# Fix A: Idempotent fill application (no double-apply on writer failure)
+# ---------------------------------------------------------------------------
+
+
+class TestIdempotentFillApplication:
+    """Fill is applied exactly once even if _handle_fill raises a non-BrokerError."""
+
+    @patch("research.execution.paper_trading.load_production_risk_config")
+    @patch("research.execution.paper_trading.AlpacaBrokerAdapter")
+    @patch("research.execution.paper_trading.AlpacaBrokerConfig.from_env")
+    def test_fill_not_reapplied_after_writer_failure(
+        self, mock_from_env, mock_broker_cls, mock_risk, config
+    ):
+        """If _handle_fill raises, order is removed from pending and fill not retried."""
+        mock_risk.return_value = MagicMock()
+        mock_broker = MagicMock()
+        mock_broker_cls.return_value = mock_broker
+
+        loop = PaperTradingLoop(config)
+        loop._position_writer = MagicMock()
+        loop._position_writer.positions = {}
+        loop._order_writer = MagicMock()
+
+        filled_result = OrderResult(
+            order_id="order-dup",
+            client_order_id="client-dup",
+            symbol="AAPL",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            submitted_at=datetime(2024, 6, 15, tzinfo=timezone.utc),
+            filled_qty=10.0,
+            filled_avg_price=185.0,
+            filled_at=datetime(2024, 6, 15, 0, 1, tzinfo=timezone.utc),
+        )
+        mock_broker.get_order_status.return_value = filled_result
+
+        loop._pending_orders["order-dup"] = filled_result
+
+        # Simulate QuestDB write failure inside _handle_fill
+        call_count = 0
+
+        def failing_handle_fill(result):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("QuestDB sender failure")
+
+        loop._handle_fill = failing_handle_fill
+
+        # First poll — _handle_fill raises, but order is removed from pending
+        loop._poll_pending_orders()
+        assert "order-dup" not in loop._pending_orders
+        assert "order-dup" in loop._applied_fills
+        assert call_count == 1
+
+        # Re-add the order to pending (simulates a race/retry scenario)
+        loop._pending_orders["order-dup"] = filled_result
+        loop._poll_pending_orders()
+
+        # _handle_fill must NOT be called again (idempotency check)
+        assert call_count == 1
+        assert "order-dup" not in loop._pending_orders
+
+    @patch("research.execution.paper_trading.load_production_risk_config")
+    @patch("research.execution.paper_trading.AlpacaBrokerAdapter")
+    @patch("research.execution.paper_trading.AlpacaBrokerConfig.from_env")
+    def test_fill_applied_once_on_success(
+        self, mock_from_env, mock_broker_cls, mock_risk, config
+    ):
+        """Successful fill is applied once and order removed from pending."""
+        mock_risk.return_value = MagicMock()
+        mock_broker = MagicMock()
+        mock_broker_cls.return_value = mock_broker
+
+        loop = PaperTradingLoop(config)
+        loop._position_writer = MagicMock()
+        loop._position_writer.positions = {}
+        loop._order_writer = MagicMock()
+
+        filled_result = OrderResult(
+            order_id="order-ok",
+            client_order_id="client-ok",
+            symbol="AAPL",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            submitted_at=datetime(2024, 6, 15, tzinfo=timezone.utc),
+            filled_qty=5.0,
+            filled_avg_price=100.0,
+            filled_at=datetime(2024, 6, 15, 0, 1, tzinfo=timezone.utc),
+        )
+        mock_broker.get_order_status.return_value = filled_result
+        loop._pending_orders["order-ok"] = filled_result
+
+        loop._poll_pending_orders()
+
+        assert "order-ok" not in loop._pending_orders
+        assert "order-ok" in loop._applied_fills
+        loop._position_writer.apply_fill.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Fix B: Offline fills applied during recovery
+# ---------------------------------------------------------------------------
+
+
+class TestOfflineFillRecovery:
+    """Fills that occurred while offline are applied during crash recovery."""
+
+    @patch("research.execution.paper_trading.load_production_risk_config")
+    @patch("research.execution.paper_trading.AlpacaBrokerAdapter")
+    @patch("research.execution.paper_trading.AlpacaBrokerConfig.from_env")
+    @patch("research.execution.paper_trading.recover_state")
+    def test_offline_fills_applied_during_recover_state(
+        self, mock_recover, mock_from_env, mock_broker_cls, mock_risk, config
+    ):
+        """_recover_state applies filled_offline orders to positions and cash."""
+        from research.execution.recovery import RecoveryResult
+        from research.execution.state import PortfolioSnapshot
+
+        mock_risk.return_value = MagicMock()
+        mock_broker_cls.return_value = MagicMock()
+
+        loop = PaperTradingLoop(config)
+        loop._position_writer = MagicMock()
+        loop._position_writer.positions = {}
+        loop._order_writer = MagicMock()
+
+        offline_fill = OrderResult(
+            order_id="offline-order-1",
+            client_order_id="client-offline-1",
+            symbol="AAPL",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            submitted_at=datetime(2024, 6, 15, tzinfo=timezone.utc),
+            filled_qty=10.0,
+            filled_avg_price=150.0,
+            filled_at=datetime(2024, 6, 15, 0, 5, tzinfo=timezone.utc),
+        )
+
+        mock_recover.return_value = RecoveryResult(
+            positions={},
+            portfolio=PortfolioSnapshot(nav=0.0, cash=0.0),
+            pending_orders=[],
+            filled_offline=[offline_fill],
+        )
+
+        loop._recover_state()
+
+        # The offline fill should have been applied — cash decremented
+        assert loop.cash == 100_000.0 - (10.0 * 150.0)
+        # Position writer should have been called
+        loop._position_writer.apply_fill.assert_called_once()
+        # Order ID marked as applied so it won't double-apply
+        assert "offline-order-1" in loop._applied_fills
+
+    @patch("research.execution.paper_trading.load_production_risk_config")
+    @patch("research.execution.paper_trading.AlpacaBrokerAdapter")
+    @patch("research.execution.paper_trading.AlpacaBrokerConfig.from_env")
+    @patch("research.execution.paper_trading.recover_state")
+    def test_offline_fill_writer_error_does_not_abort_recovery(
+        self, mock_recover, mock_from_env, mock_broker_cls, mock_risk, config
+    ):
+        """A write failure for one offline fill doesn't crash the whole recovery."""
+        from research.execution.recovery import RecoveryResult
+        from research.execution.state import PortfolioSnapshot
+
+        mock_risk.return_value = MagicMock()
+        mock_broker_cls.return_value = MagicMock()
+
+        loop = PaperTradingLoop(config)
+        loop._position_writer = MagicMock()
+        loop._position_writer.apply_fill.side_effect = RuntimeError("QuestDB down")
+        loop._position_writer.positions = {}
+        loop._order_writer = MagicMock()
+
+        offline_fill = OrderResult(
+            order_id="offline-fail",
+            client_order_id="client-offline-fail",
+            symbol="MSFT",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            submitted_at=datetime(2024, 6, 15, tzinfo=timezone.utc),
+            filled_qty=5.0,
+            filled_avg_price=300.0,
+        )
+
+        mock_recover.return_value = RecoveryResult(
+            positions={},
+            portfolio=PortfolioSnapshot(nav=0.0, cash=0.0),
+            pending_orders=[],
+            filled_offline=[offline_fill],
+        )
+
+        # Should not raise — recovery continues despite writer failure
+        loop._recover_state()
+
+
+# ---------------------------------------------------------------------------
+# Fix C: Partial fills on terminal orders and PARTIALLY_FILLED handling
+# ---------------------------------------------------------------------------
+
+
+class TestPartialFillHandling:
+    """Partial fills on terminal/partial orders are correctly applied."""
+
+    @patch("research.execution.paper_trading.load_production_risk_config")
+    @patch("research.execution.paper_trading.AlpacaBrokerAdapter")
+    @patch("research.execution.paper_trading.AlpacaBrokerConfig.from_env")
+    def test_cancelled_order_with_partial_fill_applies_fill(
+        self, mock_from_env, mock_broker_cls, mock_risk, config
+    ):
+        """A CANCELLED order with filled_qty > 0 applies the partial fill."""
+        mock_risk.return_value = MagicMock()
+        mock_broker = MagicMock()
+        mock_broker_cls.return_value = mock_broker
+
+        loop = PaperTradingLoop(config)
+        loop._position_writer = MagicMock()
+        loop._position_writer.positions = {}
+        loop._order_writer = MagicMock()
+
+        cancelled_partial = OrderResult(
+            order_id="order-partial",
+            client_order_id="client-partial",
+            symbol="AAPL",
+            side=OrderSide.BUY,
+            status=OrderStatus.CANCELLED,
+            submitted_at=datetime(2024, 6, 15, tzinfo=timezone.utc),
+            filled_qty=3.0,  # partial fill before cancellation
+            filled_avg_price=180.0,
+            filled_at=datetime(2024, 6, 15, 0, 1, tzinfo=timezone.utc),
+        )
+        mock_broker.get_order_status.return_value = cancelled_partial
+        loop._pending_orders["order-partial"] = cancelled_partial
+
+        loop._poll_pending_orders()
+
+        # Order removed from pending
+        assert "order-partial" not in loop._pending_orders
+        # Partial fill was applied to positions
+        loop._position_writer.apply_fill.assert_called_once()
+        # Cash decreased by partial fill value
+        assert loop.cash == pytest.approx(100_000.0 - 3.0 * 180.0)
+        # The fill was written with FILLED status (for position reconstruction)
+        write_fill_call = loop._order_writer.write_fill.call_args
+        applied_result = write_fill_call.args[0]
+        assert applied_result.status == OrderStatus.FILLED
+
+    @patch("research.execution.paper_trading.load_production_risk_config")
+    @patch("research.execution.paper_trading.AlpacaBrokerAdapter")
+    @patch("research.execution.paper_trading.AlpacaBrokerConfig.from_env")
+    def test_cancelled_order_with_no_fill_writes_terminal_row(
+        self, mock_from_env, mock_broker_cls, mock_risk, config
+    ):
+        """A CANCELLED order with filled_qty == 0 writes terminal status, no fill."""
+        mock_risk.return_value = MagicMock()
+        mock_broker = MagicMock()
+        mock_broker_cls.return_value = mock_broker
+
+        loop = PaperTradingLoop(config)
+        loop._position_writer = MagicMock()
+        loop._position_writer.positions = {}
+        loop._order_writer = MagicMock()
+
+        cancelled_clean = OrderResult(
+            order_id="order-cancelled-clean",
+            client_order_id="client-cancelled-clean",
+            symbol="AAPL",
+            side=OrderSide.BUY,
+            status=OrderStatus.CANCELLED,
+            submitted_at=datetime(2024, 6, 15, tzinfo=timezone.utc),
+            filled_qty=0.0,
+        )
+        mock_broker.get_order_status.return_value = cancelled_clean
+        loop._pending_orders["order-cancelled-clean"] = cancelled_clean
+
+        loop._poll_pending_orders()
+
+        assert "order-cancelled-clean" not in loop._pending_orders
+        loop._position_writer.apply_fill.assert_not_called()
+        loop._order_writer.write_order.assert_called_once()
+        assert loop.cash == 100_000.0  # unchanged
+
+    @patch("research.execution.paper_trading.load_production_risk_config")
+    @patch("research.execution.paper_trading.AlpacaBrokerAdapter")
+    @patch("research.execution.paper_trading.AlpacaBrokerConfig.from_env")
+    def test_partially_filled_writes_ledger_stays_in_pending(
+        self, mock_from_env, mock_broker_cls, mock_risk, config
+    ):
+        """PARTIALLY_FILLED orders write a ledger row but remain in _pending_orders."""
+        mock_risk.return_value = MagicMock()
+        mock_broker = MagicMock()
+        mock_broker_cls.return_value = mock_broker
+
+        loop = PaperTradingLoop(config)
+        loop._position_writer = MagicMock()
+        loop._position_writer.positions = {}
+        loop._order_writer = MagicMock()
+
+        partial_result = OrderResult(
+            order_id="order-partial-live",
+            client_order_id="client-partial-live",
+            symbol="MSFT",
+            side=OrderSide.BUY,
+            status=OrderStatus.PARTIALLY_FILLED,
+            submitted_at=datetime(2024, 6, 15, tzinfo=timezone.utc),
+            filled_qty=2.0,
+            filled_avg_price=300.0,
+        )
+        mock_broker.get_order_status.return_value = partial_result
+        loop._pending_orders["order-partial-live"] = partial_result
+
+        loop._poll_pending_orders()
+
+        # Order must still be in pending (not yet complete)
+        assert "order-partial-live" in loop._pending_orders
+        # No position update yet
+        loop._position_writer.apply_fill.assert_not_called()
+        # Ledger updated
+        loop._order_writer.write_order.assert_called_once()
