@@ -162,11 +162,20 @@ def train_policy(context: OpExecutionContext, config: ExperimentRunConfig, spec_
     obs_cols = features["observation_columns"]
     regime_cols = features["regime_feature_names"]
 
+    # Honor evaluation_split: train only on the training partition.
+    train_data, _ = _apply_evaluation_split(data, spec)
+    if len(train_data) < 2:
+        context.log.warning("Training partition too small (%d rows) — skipping training", len(train_data))
+        return {"trained": False, "checkpoint_path": None}
+    context.log.info(
+        "Evaluation split: training on %d/%d rows", len(train_data), len(data)
+    )
+
     if policy == "ppo":
         from research.training.ppo_trainer import train_ppo
 
         result = train_ppo(
-            spec, data, output_dir,
+            spec, train_data, output_dir,
             observation_columns=obs_cols,
             regime_feature_names=regime_cols or None,
         )
@@ -176,7 +185,7 @@ def train_policy(context: OpExecutionContext, config: ExperimentRunConfig, spec_
         from research.training.sac_trainer import train_sac
 
         result = train_sac(
-            spec, data, output_dir,
+            spec, train_data, output_dir,
             observation_columns=obs_cols,
             regime_feature_names=regime_cols or None,
         )
@@ -205,13 +214,34 @@ def evaluate_experiment(
     eval_dir = data_root / "experiments" / config.experiment_id / "evaluation"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
+    # Honor evaluation_split: evaluate ONLY on the held-out test partition.
+    _, eval_data = _apply_evaluation_split(data, spec)
+    split_meta: dict[str, Any] = {}
+    if spec.evaluation_split is not None:
+        split_meta = {
+            "evaluation_split": {
+                "train_rows": len(data) - len(eval_data) + 1,  # +1 for overlap bar
+                "test_rows": len(eval_data),
+                "train_start": data[0].get("timestamp"),
+                "train_end": data[len(data) - len(eval_data)].get("timestamp"),
+                "test_start": eval_data[0].get("timestamp"),
+                "test_end": eval_data[-1].get("timestamp"),
+            }
+        }
+        context.log.info(
+            "Evaluation split: evaluating on %d/%d rows (test window: %s to %s)",
+            len(eval_data), len(data),
+            split_meta["evaluation_split"]["test_start"],
+            split_meta["evaluation_split"]["test_end"],
+        )
+
     # Generate weights based on policy type
     policy = spec_data.get("policy", "")
     symbols = sorted(spec_data.get("symbols", []))
     n_symbols = len(symbols)
 
     if train_result.get("trained") and train_result.get("checkpoint_path"):
-        # Roll out trained RL policy
+        # Roll out trained RL policy on the evaluation partition
         checkpoint = Path(train_result["checkpoint_path"])
         obs_cols = features["observation_columns"]
         regime_cols = features["regime_feature_names"]
@@ -219,29 +249,29 @@ def evaluate_experiment(
         if policy == "ppo":
             from research.training.ppo_trainer import rollout_ppo
             weights_list, _, _ = rollout_ppo(
-                spec, data, checkpoint,
+                spec, eval_data, checkpoint,
                 observation_columns=obs_cols,
                 regime_feature_names=regime_cols or None,
             )
         else:
             from research.training.sac_trainer import rollout_sac
             weights_list, _, _ = rollout_sac(
-                spec, data, checkpoint,
+                spec, eval_data, checkpoint,
                 observation_columns=obs_cols,
                 regime_feature_names=regime_cols or None,
             )
 
         # Build DataFrames
-        dates = [row.get("timestamp", f"t{i}") for i, row in enumerate(data[1:])]  # Skip first row (reset)
+        dates = [row.get("timestamp", f"t{i}") for i, row in enumerate(eval_data[1:])]  # Skip first row (reset)
         weights_df = pd.DataFrame(weights_list, index=dates[:len(weights_list)], columns=symbols)
     else:
         # Non-RL policy: run real rollout (raises for unsupported types)
-        weights_list = _rollout_non_rl_policy(policy, data, symbols, spec_data)
-        dates = [row.get("timestamp", f"t{i}") for i, row in enumerate(data[1:])]
+        weights_list = _rollout_non_rl_policy(policy, eval_data, symbols, spec_data)
+        dates = [row.get("timestamp", f"t{i}") for i, row in enumerate(eval_data[1:])]
         weights_df = pd.DataFrame(weights_list, index=dates[:len(weights_list)], columns=symbols)
 
-    # Build returns DataFrame from data
-    returns_df = _build_returns_df(data, symbols)
+    # Build returns DataFrame from eval partition
+    returns_df = _build_returns_df(eval_data, symbols)
 
     # Align DataFrames
     common_idx = weights_df.index.intersection(returns_df.index)
@@ -255,7 +285,7 @@ def evaluate_experiment(
     regime_df = None
     regime_cols = features.get("regime_feature_names", [])
     if regime_cols and spec.regime_labeling:
-        regime_df = _build_regime_df(data, regime_cols)
+        regime_df = _build_regime_df(eval_data, regime_cols)
         if regime_df is not None:
             regime_df = regime_df.loc[regime_df.index.intersection(common_idx)]
 
@@ -266,6 +296,12 @@ def evaluate_experiment(
         regime_features=regime_df,
         data_hash=features.get("data_hash"),
     )
+
+    # Record split boundaries in metrics metadata
+    if split_meta:
+        if "metadata" not in metrics:
+            metrics["metadata"] = {}
+        metrics["metadata"].update(split_meta)
 
     # Write run artifacts per PRD §8.2
     _write_run_artifacts(
@@ -340,6 +376,40 @@ def experiment_run():
 # ---------------------------------------------------------------------------
 
 
+def _apply_evaluation_split(
+    data: list[dict[str, Any]],
+    spec: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split data into (train_data, test_data) per spec.evaluation_split.
+
+    Returns (full_data, full_data) when evaluation_split is None — preserving
+    the existing behavior where both training and eval see the full window.
+
+    When a split is configured:
+    - train_data = data[:split_idx]
+    - test_data  = data[split_idx-1:]  (one overlap bar anchors the first test return)
+
+    The overlap bar is necessary because _build_returns_df (and the env reset)
+    consume data[0] as a price anchor and produce returns starting at data[1].
+    """
+    split = spec.evaluation_split
+    if split is None:
+        return data, data
+
+    n = len(data)
+    if split.test_window_months is not None:
+        # Approximate 21 trading days per month; clamp so each partition has ≥2 bars.
+        test_size = min(split.test_window_months * 21, n - 2)
+        split_idx = max(2, n - test_size)
+    else:
+        split_idx = max(2, int(n * split.train_ratio))
+
+    train_data = data[:split_idx]
+    # One overlap bar so the first test return can be anchored at the split boundary.
+    test_data = data[split_idx - 1:]
+    return train_data, test_data
+
+
 def _rollout_non_rl_policy(
     policy_name: str,
     data: list[dict[str, Any]],
@@ -373,8 +443,10 @@ def _rollout_non_rl_policy(
     if hasattr(policy, "reset"):
         policy.reset()
 
+    # Iterate data[:-1]: weight at bar t uses close[t] and earns r(t→t+1).
+    # Iterating data[1:] would use close[t+1] to earn r(t→t+1) — one-bar lookahead.
     weights_list: list[np.ndarray] = []
-    for row in data[1:]:  # Skip first row (env reset step, matches RL rollout convention)
+    for row in data[:-1]:
         close = row.get("close", {})
         if isinstance(close, dict):
             prices = np.array([close.get(s, 0.0) for s in symbols], dtype=np.float64)

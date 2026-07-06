@@ -89,6 +89,7 @@ def _install_mocks():
 _install_mocks()
 
 from pipelines.yats_pipelines.jobs.experiment_run import (
+    _apply_evaluation_split,
     _build_returns_df,
     _merge_closes_into_features,
     _reconstruct_spec,
@@ -331,6 +332,117 @@ class TestRolloutNonRlPolicy:
         weights = _rollout_non_rl_policy("sma", data, symbols, {})
         for w in weights:
             assert abs(w.sum() - 1.0) < 1e-9, f"Weights must sum to 1, got {w.sum()}"
+
+
+class TestApplyEvaluationSplit:
+    def _make_spec(self, **overrides):
+        from research.experiments.spec import EvaluationSplitConfig
+        spec_data = _make_spec_dict(**overrides)
+        return _reconstruct_spec(spec_data)
+
+    def _make_spec_with_split(self, train_ratio=0.8, test_ratio=0.2, test_window_months=None):
+        spec_data = _make_spec_dict()
+        spec_data["evaluation_split"] = {
+            "train_ratio": train_ratio,
+            "test_ratio": test_ratio,
+            **({"test_window_months": test_window_months} if test_window_months else {}),
+        }
+        return _reconstruct_spec(spec_data)
+
+    def test_no_split_returns_full_data_for_both(self):
+        spec = self._make_spec()
+        data = _make_data_rows(20)
+        train, test = _apply_evaluation_split(data, spec)
+        assert train is data
+        assert test is data
+
+    def test_ratio_split_sizes(self):
+        spec = self._make_spec_with_split(train_ratio=0.8, test_ratio=0.2)
+        data = _make_data_rows(100)
+        train, test = _apply_evaluation_split(data, spec)
+        # train = data[:80], test = data[79:] (one overlap bar)
+        assert len(train) == 80
+        assert len(test) == 21  # 100 - 80 + 1 = 21
+
+    def test_train_and_test_cover_all_data(self):
+        spec = self._make_spec_with_split(train_ratio=0.7, test_ratio=0.3)
+        data = _make_data_rows(50)
+        train, test = _apply_evaluation_split(data, spec)
+        # Overlap bar: train[-1] == test[0]
+        assert train[-1] is test[0]
+        # All data covered
+        assert train[0] is data[0]
+        assert test[-1] is data[-1]
+
+    def test_test_window_months_overrides_ratio(self):
+        spec = self._make_spec_with_split(train_ratio=0.8, test_ratio=0.2, test_window_months=3)
+        data = _make_data_rows(200)
+        train, test = _apply_evaluation_split(data, spec)
+        # 3 months * 21 days = 63 test bars; train = 200 - 63 = 137, test = 64 (with overlap)
+        assert len(test) == 64
+
+    def test_very_small_data_clamps_split_idx(self):
+        spec = self._make_spec_with_split(train_ratio=0.8, test_ratio=0.2)
+        data = _make_data_rows(4)
+        train, test = _apply_evaluation_split(data, spec)
+        # split_idx = max(2, int(4 * 0.8)) = max(2, 3) = 3
+        assert len(train) >= 2
+        assert len(test) >= 2
+
+    def test_split_enforced_train_does_not_contain_test_bars(self):
+        spec = self._make_spec_with_split(train_ratio=0.6, test_ratio=0.4)
+        data = _make_data_rows(20)
+        train, test = _apply_evaluation_split(data, spec)
+        # All test bars (after overlap) should be absent from train
+        test_timestamps = {r["timestamp"] for r in test[1:]}
+        train_timestamps = {r["timestamp"] for r in train}
+        assert test_timestamps.isdisjoint(train_timestamps), (
+            "Test bars (beyond overlap) must not appear in training data"
+        )
+
+
+class TestNonRlNoLookahead:
+    """Verify _rollout_non_rl_policy uses close[t] to decide weight for r(t→t+1)."""
+
+    def test_weight_uses_prior_bar_close(self):
+        """weights[i] must use close from data[i], not data[i+1]."""
+        # Construct data where close at bar i equals float(i+1) (distinct values).
+        symbols = ["AAPL"]
+        data = [
+            {"timestamp": f"t{i}", "close": {"AAPL": float(i + 1)}}
+            for i in range(5)
+        ]
+
+        recorded_prices: list[float] = []
+
+        # Patch EqualWeightPolicy to record the prices passed to act().
+        import research.policies.equal_weight_policy as ew_mod
+        original_class = ew_mod.EqualWeightPolicy
+
+        class PriceRecordingPolicy:
+            def __init__(self, n):
+                pass
+            def reset(self):
+                pass
+            def act(self, prices, info):
+                recorded_prices.append(float(prices[0]))
+                return np.array([1.0])
+
+        ew_mod.EqualWeightPolicy = PriceRecordingPolicy
+        try:
+            _rollout_non_rl_policy("equal_weight", data, symbols, {})
+        finally:
+            ew_mod.EqualWeightPolicy = original_class
+
+        # With the fix (data[:-1] iteration):
+        #   first call sees data[0].close = 1.0
+        # With the bug (data[1:] iteration):
+        #   first call sees data[1].close = 2.0
+        assert recorded_prices[0] == pytest.approx(1.0), (
+            f"Expected first weight from data[0].close=1.0, got {recorded_prices[0]:.1f}. "
+            "This indicates the lookahead bug (data[1:] iteration) is still present."
+        )
+        assert len(recorded_prices) == len(data) - 1  # N-1 weights for N bars
 
 
 class TestWriteRunArtifacts:

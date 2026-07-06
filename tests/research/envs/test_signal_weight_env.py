@@ -356,3 +356,107 @@ class TestFullEpisode:
                 break
 
         assert info["portfolio_value"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Reward–eval alignment (bug C regression guard)
+# ---------------------------------------------------------------------------
+
+class TestEnvRewardAlignment:
+    """Assert env cumulative reward aligns with eval PnL for a deterministic policy.
+
+    The env reward at step t must equal log(1 + dot(w_t, r(t→t+1))) where w_t is
+    the weight decided from the observation at bar t and r(t→t+1) is the next-bar
+    return.  Without the fix (using self._weights instead of target_weights), the
+    reward uses stale weights and diverges from the eval PnL convention.
+    """
+
+    def _make_synthetic_data(self, n_rows: int = 10) -> list[dict]:
+        """Synthetic data with deterministic, strictly positive prices."""
+        symbols = ["AAPL", "MSFT"]
+        rows = []
+        for i in range(n_rows):
+            rows.append({
+                "timestamp": f"2024-01-{i+1:02d}",
+                "close": {
+                    "AAPL": 100.0 * (1.01 ** i),
+                    "MSFT": 200.0 * (1.005 ** i),
+                },
+            })
+        return rows
+
+    def test_env_portfolio_value_matches_eval_pnl(self):
+        """env final portfolio value == product(1 + dot(w_t, r(t→t+1))) per step."""
+        symbols = ["AAPL", "MSFT"]
+        data = self._make_synthetic_data(10)
+
+        # Fixed deterministic weights (always 50/50, no risk projection needed)
+        fixed_weights = np.array([0.5, 0.5])
+
+        # Run environment
+        cfg = SignalWeightEnvConfig(
+            symbols=symbols,
+            observation_columns=["close"],
+            transaction_cost_bp=0.0,  # No costs — isolate the reward alignment
+        )
+        env = SignalWeightEnv(cfg)
+        env.reset(data=data)
+
+        collected_target_weights: list[np.ndarray] = []
+        done = False
+        while not done:
+            obs, reward, done, info = env.step(fixed_weights.copy())
+            collected_target_weights.append(info["weight_realized"].copy())
+
+        env_final_value = info["portfolio_value"]
+
+        # Compute expected portfolio value via simple PnL (eval convention).
+        # weights[i] (decided from data[i]) earns r(i→i+1) = returns_df row i.
+        # _build_returns_df(data) produces returns indexed from data[1:].
+        import pandas as pd
+        closes = pd.DataFrame(
+            {s: [r["close"][s] for r in data] for s in symbols},
+            index=[r["timestamp"] for r in data],
+        )
+        returns = closes.pct_change().iloc[1:]  # indexed from data[1]
+
+        # weights[i] is aligned with returns[i]: both correspond to period t→t+1.
+        expected_value = 1.0
+        for i, (w, (_, ret_row)) in enumerate(zip(collected_target_weights, returns.iterrows())):
+            port_ret = float(np.dot(w, ret_row.values))
+            expected_value *= (1.0 + port_ret)
+
+        assert env_final_value == pytest.approx(expected_value, rel=1e-9), (
+            f"Env final portfolio value {env_final_value:.8f} != "
+            f"eval PnL product {expected_value:.8f}. "
+            "This indicates the reward offset bug (using self._weights instead of target_weights)."
+        )
+
+    def test_env_step_reward_equals_log_of_next_bar_return(self):
+        """Each step's reward == log(1 + dot(target_w, r(t→t+1)))."""
+        symbols = ["AAPL", "MSFT"]
+        data = self._make_synthetic_data(5)
+
+        cfg = SignalWeightEnvConfig(
+            symbols=symbols,
+            observation_columns=["close"],
+            transaction_cost_bp=0.0,
+        )
+        env = SignalWeightEnv(cfg)
+        env.reset(data=data)
+
+        fixed_w = np.array([0.6, 0.4])
+        step = 0
+        done = False
+        while not done:
+            obs, reward, done, info = env.step(fixed_w.copy())
+            # Manually compute expected reward for this step.
+            # data[step] → data[step+1] return
+            prev_closes = np.array([data[step]["close"][s] for s in sorted(symbols)])
+            curr_closes = np.array([data[step + 1]["close"][s] for s in sorted(symbols)])
+            r = (curr_closes - prev_closes) / prev_closes
+            expected_reward = math.log(1.0 + float(np.dot(fixed_w, r)))
+            assert reward == pytest.approx(expected_reward, rel=1e-9), (
+                f"Step {step}: reward={reward:.8f} != expected={expected_reward:.8f}"
+            )
+            step += 1
