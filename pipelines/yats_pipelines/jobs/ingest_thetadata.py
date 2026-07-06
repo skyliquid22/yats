@@ -9,11 +9,17 @@ from questdb.ingress import Protocol, Sender, TimestampNanos
 
 from yats_pipelines.resources.questdb import QuestDBResource
 from yats_pipelines.resources.thetadata import ThetaDataResource
+from yats_pipelines.utils.schema_guard import assert_table_schema
 
 logger = logging.getLogger(__name__)
 
 # IV values above this threshold are rejected as unreliable data
 IV_MAX = 20.0
+
+# Columns that must exist in each target table (designated-timestamp name is critical)
+_CHAIN_REQUIRED_COLS = ["quote_ts", "underlying", "strike", "right"]
+_EOD_REQUIRED_COLS = ["quote_date", "underlying", "strike", "right"]
+_CANONICAL_REQUIRED_COLS = ["quote_date", "underlying", "strike", "right"]
 
 
 class IngestThetadataConfig(Config):
@@ -223,6 +229,11 @@ def write_raw_thetadata(
     eod_written = 0
 
     try:
+        if chain_rows:
+            assert_table_schema(conn, "raw_thetadata_options_chain", _CHAIN_REQUIRED_COLS)
+        if eod_rows:
+            assert_table_schema(conn, "raw_thetadata_options_eod", _EOD_REQUIRED_COLS)
+
         # --- Chain snapshot ---
         if chain_rows and _run_already_written(conn, run_id, "raw_thetadata_options_chain"):
             context.log.info(
@@ -340,6 +351,8 @@ def canonicalize_options(
     conn.autocommit = True
 
     try:
+        assert_table_schema(conn, "canonical_options_chain", _CANONICAL_REQUIRED_COLS)
+
         if _run_already_written(conn, run_id, "canonical_options_chain"):
             context.log.info(
                 "canonical_options_chain: run %s already written — skipping (idempotent)",
