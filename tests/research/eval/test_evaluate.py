@@ -297,7 +297,7 @@ class TestProbabilisticSharpe:
         )
 
     def test_split_metadata_embedded_in_metrics(self):
-        """split_metadata fields must appear in the metadata section."""
+        """split_metadata fields must appear in the metadata section without clobbering canonical keys."""
         spec = _make_spec()
         weights, returns = _make_test_data()
         meta = {"purged_count": 3, "embargoed_count": 2, "train_boundary_date": "2023-09-01"}
@@ -306,6 +306,13 @@ class TestProbabilisticSharpe:
             assert result["metadata"].get(key) == val, (
                 f"metadata.{key} missing or wrong: expected {val!r}"
             )
+        # Canonical keys must not be clobbered even if split_metadata contains them
+        meta_with_clash = {"experiment_id": "FAKE_ID", "purged_count": 1}
+        result2 = evaluate(spec, weights, returns, split_metadata=meta_with_clash)
+        assert result2["metadata"]["experiment_id"] == spec.experiment_id, (
+            "split_metadata must not overwrite canonical experiment_id"
+        )
+        assert result2["metadata"]["purged_count"] == 1
 
     def test_psr_fixture_value(self):
         """PSR on a fixed fixture must match the analytical formula."""
