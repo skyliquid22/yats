@@ -503,12 +503,12 @@ def test_live_list_expirations():
 @_skip_if_no_theta
 def test_live_open_interest_snapshot():
     """Verify get_option_chain_snapshot returns OI rows against the live terminal."""
-    import datetime as dt
+    from datetime import date
     td = ThetaDataResource()
     exps = td.list_expirations("AAPL")
     assert exps, "Need at least one expiration to test OI snapshot"
     # Pick the first future expiration (at least 1 day out) so greeks/first_order has data
-    today = dt.date.today().strftime("%Y%m%d")
+    today = date.today().strftime("%Y%m%d")
     future_exps = [e for e in exps if e >= today]
     assert future_exps, "No future AAPL expirations found"
     exp = future_exps[0]
