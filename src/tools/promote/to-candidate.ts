@@ -46,7 +46,7 @@ export const promoteToCandidate: ToolDef = {
             },
           },
         },
-      });
+      }, promotedBy);
       return ok({ run_id: runId, experiment_id: experimentId, tier: "candidate", job: "promote" });
     } catch (e) {
       return err(`Failed to promote to candidate: ${e instanceof Error ? e.message : String(e)}`);

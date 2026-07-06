@@ -33,7 +33,7 @@ export const promoteToResearch: ToolDef = {
             },
           },
         },
-      });
+      }, promotedBy);
       return ok({ run_id: runId, experiment_id: experimentId, tier: "research", job: "promote" });
     } catch (e) {
       return err(`Failed to promote to research: ${e instanceof Error ? e.message : String(e)}`);

@@ -56,7 +56,7 @@ export const promoteToProduction: ToolDef = {
             },
           },
         },
-      });
+      }, promotedBy);
       return ok({ run_id: runId, experiment_id: experimentId, tier: "production", job: "promote" });
     } catch (e) {
       return err(`Failed to promote to production: ${e instanceof Error ? e.message : String(e)}`);
