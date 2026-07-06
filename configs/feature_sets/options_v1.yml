@@ -1,0 +1,9 @@
+name: options_v1
+description: Options-implied feature set v1 — ATM IV, skew, term slope, OI ratio, GEX
+
+options:
+  - atm_iv
+  - skew_25d
+  - iv_term_slope
+  - put_call_oi_ratio
+  - net_gamma_exposure

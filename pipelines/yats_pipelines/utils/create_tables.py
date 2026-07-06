@@ -297,6 +297,11 @@ CREATE TABLE IF NOT EXISTS features (
     market_trend_20d DOUBLE,
     dispersion_20d DOUBLE,
     corr_mean_20d DOUBLE,
+    atm_iv DOUBLE,
+    skew_25d DOUBLE,
+    iv_term_slope DOUBLE,
+    put_call_oi_ratio DOUBLE,
+    net_gamma_exposure DOUBLE,
     computed_at TIMESTAMP,
     dagster_run_id STRING
 ) TIMESTAMP(timestamp) PARTITION BY MONTH;

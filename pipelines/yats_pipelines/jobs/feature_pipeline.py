@@ -25,11 +25,13 @@ import research.features.ohlcv_features  # noqa: F401
 import research.features.cross_sectional_features  # noqa: F401
 import research.features.fundamental_features  # noqa: F401
 import research.features.regime_features_v1  # noqa: F401
+import research.features.options_features_v1  # noqa: F401
 from research.features.feature_registry import registry
 from research.features.regime_features_v1 import (
     DEFAULT_REGIME_UNIVERSE,
     compute_regime_features,
 )
+from research.features.options_features_v1 import compute_options_features
 
 logger = logging.getLogger(__name__)
 
@@ -339,6 +341,97 @@ def _compute_regime_features_pipeline(
     return regime_df
 
 
+def _load_options_chain(
+    conn, tickers: list[str], start_date: str, end_date: str
+) -> pd.DataFrame:
+    """Load canonical options chain for given underlyings and date range."""
+    where, params = _date_clause(start_date, end_date, ts_col="quote_date")
+    if where:
+        where += " AND underlying IN %s"
+    else:
+        where = " WHERE underlying IN %s"
+    params.append(tuple(tickers))
+
+    fields = [
+        "quote_date", "underlying", "expiry", "strike", "right",
+        "iv", "delta", "gamma", "open_interest",
+    ]
+    field_str = ", ".join(fields)
+    query = (
+        f"SELECT {field_str} FROM canonical_options_chain{where} "
+        f"ORDER BY underlying, quote_date, expiry, strike, right"
+    )
+
+    cur = conn.cursor()
+    cur.execute(query, params)
+    columns = [desc[0] for desc in cur.description]
+    rows = cur.fetchall()
+    cur.close()
+
+    if not rows:
+        return pd.DataFrame(columns=fields)
+
+    df = pd.DataFrame(rows, columns=columns)
+    df["quote_date"] = pd.to_datetime(df["quote_date"], utc=True)
+    df["expiry"] = pd.to_datetime(df["expiry"], utc=True)
+    return df
+
+
+def _compute_options_features_pipeline(
+    options_df: pd.DataFrame,
+    ohlcv_by_symbol: dict[str, pd.DataFrame],
+    feature_names: list[str],
+) -> dict[str, pd.DataFrame]:
+    """Compute options features per (underlying, date).
+
+    Returns dict: symbol → DataFrame with timestamp index and options feature columns.
+    """
+    results: dict[str, pd.DataFrame] = {}
+
+    if options_df.empty:
+        return results
+
+    grouped = options_df.groupby("underlying")
+    for symbol, chain_df in grouped:
+        ohlcv_df = ohlcv_by_symbol.get(symbol)
+        if ohlcv_df is None or ohlcv_df.empty:
+            continue
+
+        # Map close prices to dates for spot lookup
+        spot_by_date = dict(
+            zip(
+                ohlcv_df["timestamp"].dt.normalize(),
+                ohlcv_df["close"],
+            )
+        )
+
+        rows = []
+        for quote_date, day_chain in chain_df.groupby("quote_date"):
+            spot = spot_by_date.get(pd.Timestamp(quote_date).normalize(), float("nan"))
+            feats = compute_options_features(
+                day_chain, float(spot), pd.Timestamp(quote_date), underlying=symbol
+            )
+            feats["timestamp"] = quote_date
+            rows.append(feats)
+
+        if not rows:
+            continue
+
+        feat_df = pd.DataFrame(rows).set_index(
+            pd.RangeIndex(len(rows))
+        )
+        feat_df["timestamp"] = pd.to_datetime(feat_df["timestamp"], utc=True)
+
+        # Winsorize each options feature per underlying
+        for fname in feature_names:
+            if fname in feat_df.columns:
+                feat_df[fname] = _winsorize(feat_df[fname])
+
+        results[symbol] = feat_df
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # ILP writing
 # ---------------------------------------------------------------------------
@@ -352,6 +445,7 @@ _FEATURE_COLUMNS = [
     "operating_margin", "fcf_margin", "debt_equity", "eps_growth_1y",
     "revenue_growth_1y",
     "market_vol_20d", "market_trend_20d", "dispersion_20d", "corr_mean_20d",
+    "atm_iv", "skew_25d", "iv_term_slope", "put_call_oi_ratio", "net_gamma_exposure",
 ]
 
 
@@ -429,10 +523,10 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
     fs = registry.load_feature_set(config.feature_set)
     context.log.info(
         "Feature set '%s': %d features (%d ohlcv, %d cross-sectional, "
-        "%d fundamental, %d regime)",
+        "%d fundamental, %d regime, %d options)",
         fs.name, len(fs.all_features),
         len(fs.ohlcv), len(fs.cross_sectional),
-        len(fs.fundamental), len(fs.regime),
+        len(fs.fundamental), len(fs.regime), len(fs.options),
     )
 
     # Load universe
@@ -505,6 +599,19 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
             )
             context.log.info("Computed regime features: %d rows", len(regime_df))
 
+        # Compute options features
+        options_features: dict[str, pd.DataFrame] = {}
+        if fs.options:
+            context.log.info("Loading canonical options chain...")
+            options_df = _load_options_chain(conn, tickers, config.start_date, config.end_date)
+            context.log.info("Loaded %d options chain rows", len(options_df))
+            options_features = _compute_options_features_pipeline(
+                options_df, ohlcv_by_symbol, fs.options
+            )
+            context.log.info(
+                "Computed options features for %d underlyings", len(options_features)
+            )
+
         # Write all features to QuestDB
         context.log.info("Writing features to QuestDB...")
         total_written = 0
@@ -540,6 +647,23 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
                                 sym_ts, method="ffill"
                             )
                             all_features[fname] = regime_aligned
+
+                # Options (per-symbol, join by timestamp)
+                if symbol in options_features:
+                    opt_df = options_features[symbol]
+                    sym_ts = ohlcv_df_sym["timestamp"].reset_index(drop=True)
+                    opt_ts = opt_df["timestamp"].reset_index(drop=True)
+                    # Align options timestamps to OHLCV timestamps via merge
+                    aligned = pd.merge_asof(
+                        pd.DataFrame({"timestamp": sym_ts}),
+                        opt_df.sort_values("timestamp"),
+                        on="timestamp",
+                        direction="nearest",
+                        tolerance=pd.Timedelta("1d"),
+                    )
+                    for fname in fs.options:
+                        if fname in aligned.columns:
+                            all_features[fname] = aligned[fname].reset_index(drop=True)
 
                 written = _write_features(
                     sender, symbol, ohlcv_df_sym["timestamp"],
