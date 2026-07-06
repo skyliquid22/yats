@@ -5,11 +5,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, call, patch
 
+import numpy as np
 import pytest
 
 from research.shadow.questdb_writer import (
     ExecutionTableWriter,
     QuestDBWriterConfig,
+    _coerce_columns,
 )
 
 
@@ -396,3 +398,95 @@ class TestEngineQuestDBIntegration:
         assert "sharpe" in summary
         # With steadily rising prices and no costs, Sharpe should be positive
         assert summary["sharpe"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Numpy coercion tests
+# ---------------------------------------------------------------------------
+
+
+class TestNumpyCoercion:
+    """Writer must accept numpy scalars and coerce them to native Python types."""
+
+    def test_coerce_columns_float64(self):
+        result = _coerce_columns({"x": np.float64(1.5), "y": np.float64(0.0)})
+        assert result == {"x": 1.5, "y": 0.0}
+        assert type(result["x"]) is float
+        assert type(result["y"]) is float
+
+    def test_coerce_columns_int64(self):
+        result = _coerce_columns({"n": np.int64(42)})
+        assert result == {"n": 42}
+        assert type(result["n"]) is int
+
+    def test_coerce_columns_nan_dropped(self):
+        result = _coerce_columns({"good": np.float64(1.0), "bad": np.float64(np.nan)})
+        assert "good" in result
+        assert "bad" not in result
+
+    def test_coerce_columns_passthrough_native(self):
+        result = _coerce_columns({"s": "hello", "b": True, "i": 3, "f": 2.5})
+        assert result == {"s": "hello", "b": True, "i": 3, "f": 2.5}
+
+    def test_write_step_accepts_numpy_scalars(self, writer, mock_sender):
+        ts = datetime(2023, 6, 15, tzinfo=timezone.utc)
+        writer.write_step(
+            timestamp=ts,
+            step=np.int64(1),
+            symbols=("AAPL",),
+            target_weights=[np.float64(0.5)],
+            realized_weights=[np.float64(0.48)],
+            fill_prices=[np.float64(150.0)],
+            slippage_bps=[np.float64(2.5)],
+            fees_per_symbol=[np.float64(0.001)],
+            rejected=[False],
+            reject_reasons=[""],
+            portfolio_value=np.float64(1_000_000.0),
+            cash=np.float64(40_000.0),
+            regime_bucket="normal",
+        )
+
+        first_call = mock_sender.row.call_args_list[0]
+        cols = first_call[1]["columns"]
+        assert type(cols["step"]) is int
+        assert type(cols["target_weight"]) is float
+        assert type(cols["portfolio_value"]) is float
+        assert type(cols["slippage_bps"]) is float
+
+    def test_write_step_drops_nan_column(self, writer, mock_sender):
+        ts = datetime(2023, 6, 15, tzinfo=timezone.utc)
+        writer.write_step(
+            timestamp=ts,
+            step=1,
+            symbols=("AAPL",),
+            target_weights=[np.float64(0.5)],
+            realized_weights=[np.float64(np.nan)],
+            fill_prices=[np.float64(150.0)],
+            slippage_bps=[np.float64(0.0)],
+            fees_per_symbol=[np.float64(0.001)],
+            rejected=[False],
+            reject_reasons=[""],
+            portfolio_value=np.float64(1_000_000.0),
+            cash=np.float64(40_000.0),
+            regime_bucket="normal",
+        )
+
+        first_call = mock_sender.row.call_args_list[0]
+        cols = first_call[1]["columns"]
+        # NaN realized_weight must be dropped from columns
+        assert "realized_weight" not in cols
+
+    def test_write_metrics_accepts_numpy_scalars(self, writer, mock_sender):
+        ts = datetime(2023, 6, 15, tzinfo=timezone.utc)
+        writer.write_metrics(
+            timestamp=ts,
+            sharpe=np.float64(1.5),
+            max_drawdown=np.float64(-0.05),
+            total_return=np.float64(0.12),
+        )
+
+        row_call = mock_sender.row.call_args
+        cols = row_call[1]["columns"]
+        assert type(cols["sharpe"]) is float
+        assert cols["sharpe"] == pytest.approx(1.5)
+        assert type(cols["total_return"]) is float
