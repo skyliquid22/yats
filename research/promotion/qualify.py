@@ -234,6 +234,7 @@ def trigger_qualification_replay(
             output_dir=output_dir,
             initial_value=1_000_000.0,
             qualification_replay=True,
+            execution_mode="sim",
         )
 
         policy = load_policy(spec)

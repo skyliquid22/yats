@@ -11,6 +11,7 @@ import pytest
 from research.promotion.promote import (
     PromotionError,
     PromotionRecord,
+    _hash_file,
     check_baseline_integrity,
     check_data_drift,
     check_immutability,
@@ -276,13 +277,26 @@ class TestCheckImmutability:
 
     def test_same_content_idempotent(self, tmp_path):
         exp_root = tmp_path / "experiments" / "exp1"
+        qual_file = exp_root / "promotion" / "qualification_report.json"
+        spec_file = exp_root / "spec" / "experiment_spec.json"
+        metrics_file = exp_root / "evaluation" / "metrics.json"
+        qual_file.parent.mkdir(parents=True, exist_ok=True)
+        spec_file.parent.mkdir(parents=True, exist_ok=True)
+        metrics_file.parent.mkdir(parents=True, exist_ok=True)
+        qual_file.write_text('{"passed": true}')
+        spec_file.write_text('{"policy": "equal_weight"}')
+        metrics_file.write_text('{"sharpe": 1.5}')
+
         record = PromotionRecord(
             experiment_id="exp1", tier="research",
-            qualification_report_path=str(exp_root / "promotion" / "qualification_report.json"),
-            spec_path=str(exp_root / "spec" / "experiment_spec.json"),
-            metrics_path=str(exp_root / "evaluation" / "metrics.json"),
+            qualification_report_path=str(qual_file),
+            spec_path=str(spec_file),
+            metrics_path=str(metrics_file),
             promotion_reason="test", promoted_at="now",
             promoted_by="test", dagster_run_id="run1",
+            qualification_report_hash=_hash_file(qual_file),
+            spec_hash=_hash_file(spec_file),
+            metrics_hash=_hash_file(metrics_file),
         )
         write_promotion_record(record, data_root=tmp_path)
         # Same content should not raise
@@ -290,23 +304,42 @@ class TestCheckImmutability:
 
     def test_different_content_errors(self, tmp_path):
         exp_root = tmp_path / "experiments" / "exp1"
+        qual_file = exp_root / "promotion" / "qualification_report.json"
+        spec_file = exp_root / "spec" / "experiment_spec.json"
+        metrics_file = exp_root / "evaluation" / "metrics.json"
+        qual_file.parent.mkdir(parents=True, exist_ok=True)
+        spec_file.parent.mkdir(parents=True, exist_ok=True)
+        metrics_file.parent.mkdir(parents=True, exist_ok=True)
+        qual_file.write_text('{"passed": true, "version": "v1"}')
+        spec_file.write_text('{"policy": "equal_weight"}')
+        metrics_file.write_text('{"sharpe": 1.5}')
+
         record1 = PromotionRecord(
             experiment_id="exp1", tier="research",
-            qualification_report_path=str(exp_root / "promotion" / "qualification_report.json"),
-            spec_path=str(exp_root / "spec" / "experiment_spec.json"),
-            metrics_path=str(exp_root / "evaluation" / "metrics.json"),
+            qualification_report_path=str(qual_file),
+            spec_path=str(spec_file),
+            metrics_path=str(metrics_file),
             promotion_reason="test", promoted_at="now",
             promoted_by="test", dagster_run_id="run1",
+            qualification_report_hash=_hash_file(qual_file),
+            spec_hash=_hash_file(spec_file),
+            metrics_hash=_hash_file(metrics_file),
         )
         write_promotion_record(record1, data_root=tmp_path)
 
+        # Overwrite qualification report with different content
+        qual_file.write_text('{"passed": true, "version": "v2_tampered"}')
+
         record2 = PromotionRecord(
             experiment_id="exp1", tier="research",
-            qualification_report_path="different_path.json",
-            spec_path=str(exp_root / "spec" / "experiment_spec.json"),
-            metrics_path=str(exp_root / "evaluation" / "metrics.json"),
+            qualification_report_path=str(qual_file),
+            spec_path=str(spec_file),
+            metrics_path=str(metrics_file),
             promotion_reason="test", promoted_at="later",
             promoted_by="test", dagster_run_id="run2",
+            qualification_report_hash=_hash_file(qual_file),
+            spec_hash=_hash_file(spec_file),
+            metrics_hash=_hash_file(metrics_file),
         )
         with pytest.raises(PromotionError, match="Immutability violation"):
             check_immutability(record2, data_root=tmp_path)
