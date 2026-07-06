@@ -14,6 +14,8 @@ from typing import Any, Sequence
 
 import yaml
 
+from research.features.columns import load_feature_columns
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,24 +80,10 @@ class ReplayMarketDataSource:
             configs_dir = Path(__file__).resolve().parents[2] / "configs"
         self._configs_dir = configs_dir
 
-        # Resolve feature columns from YAML config
-        fs_path = self._configs_dir / "feature_sets" / f"{feature_set}.yml"
-        if fs_path.exists():
-            with open(fs_path) as f:
-                fs_config = yaml.safe_load(f)
-        else:
-            fs_config = {"ohlcv": [], "cross_sectional": [], "fundamental": [], "regime": []}
-
-        ohlcv_cols = fs_config.get("ohlcv", [])
-        cs_cols = fs_config.get("cross_sectional", [])
-        fund_cols = fs_config.get("fundamental", [])
-        regime_cols = fs_config.get("regime", [])
-
-        all_feature_cols = ohlcv_cols + cs_cols + fund_cols
-        self._observation_columns = tuple(
-            ["close"] + [c for c in all_feature_cols if c != "close"]
-        )
-        self._regime_columns = tuple(regime_cols) if regime_feature_set else ()
+        # Use shared loader — same contract as training (experiment_run.fetch_features)
+        observation_columns, regime_cols = load_feature_columns(feature_set, self._configs_dir)
+        self._observation_columns = tuple(observation_columns)
+        self._regime_columns = tuple(regime_cols)
 
     @classmethod
     def from_experiment_spec(

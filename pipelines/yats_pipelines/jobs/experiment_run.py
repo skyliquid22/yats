@@ -57,8 +57,8 @@ def fetch_features(context: OpExecutionContext, config: ExperimentRunConfig, spe
     'observation_columns', 'regime_feature_names', and 'data_hash'.
     """
     import psycopg2
-    import yaml
 
+    from research.features.columns import load_feature_columns
     from yats_pipelines.resources.questdb import QuestDBResource
 
     symbols = sorted(spec_data.get("symbols", []))
@@ -66,22 +66,9 @@ def fetch_features(context: OpExecutionContext, config: ExperimentRunConfig, spe
     end_date = spec_data.get("end_date", "")
     feature_set_name = spec_data.get("feature_set", "core_v1")
 
-    # Load feature set config
+    # Load column lists via shared helper — same contract as ReplayMarketDataSource
     configs_dir = Path(__file__).resolve().parents[3] / "configs"
-    fs_path = configs_dir / "feature_sets" / f"{feature_set_name}.yml"
-    if fs_path.exists():
-        with open(fs_path) as f:
-            fs_config = yaml.safe_load(f)
-    else:
-        fs_config = {"ohlcv": [], "cross_sectional": [], "fundamental": [], "regime": []}
-
-    # Build column lists
-    ohlcv_cols = fs_config.get("ohlcv", [])
-    cs_cols = fs_config.get("cross_sectional", [])
-    fund_cols = fs_config.get("fundamental", [])
-    regime_cols = fs_config.get("regime", [])
-    all_feature_cols = ohlcv_cols + cs_cols + fund_cols
-    observation_columns = ["close"] + [c for c in all_feature_cols if c != "close"]
+    observation_columns, regime_cols = load_feature_columns(feature_set_name, configs_dir)
 
     # Query features from QuestDB
     qdb = QuestDBResource()

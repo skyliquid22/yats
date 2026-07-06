@@ -10,6 +10,7 @@ from typing import Any, Mapping
 import numpy as np
 import pytest
 
+from research.envs.signal_weight_env import SignalWeightEnv, SignalWeightEnvConfig
 from research.experiments.spec import CostConfig, ExperimentSpec, RiskConfig
 from research.shadow.data_source import Snapshot
 from research.shadow.engine import (
@@ -525,3 +526,92 @@ class TestShadowArtifacts:
         assert "sharpe" in data
         assert "max_drawdown" in data
         assert "total_return" in data
+
+
+# ---------------------------------------------------------------------------
+# Observation shape parity — ShadowEngine vs SignalWeightEnv (ya-jl1k9)
+# ---------------------------------------------------------------------------
+
+
+def _make_snapshots_with_regime(
+    n: int = 5,
+    symbols: tuple[str, ...] = ("AAPL", "MSFT"),
+    obs_cols: tuple[str, ...] = ("close", "ret_1d"),
+    regime_cols: tuple[str, ...] = (
+        "market_vol_20d", "market_trend_20d", "dispersion_20d", "corr_mean_20d"
+    ),
+) -> list[Snapshot]:
+    """Snapshots that include regime features — matches training data shape."""
+    snapshots = []
+    for i in range(n):
+        panel = {
+            sym: {"close": 100.0 + i, "ret_1d": 0.01}
+            for sym in symbols
+        }
+        snapshots.append(Snapshot(
+            as_of=datetime(2023, 1, 3 + i),
+            symbols=symbols,
+            panel=panel,
+            regime_features=tuple(0.1 * (j + 1) for j in range(len(regime_cols))),
+            regime_feature_names=regime_cols,
+            observation_columns=obs_cols,
+        ))
+    return snapshots
+
+
+
+class TestObservationShapeParity:
+    """ShadowEngine and SignalWeightEnv must produce the same obs dimension.
+
+    Regression test for ya-jl1k9: shadow replay was building 200-dim obs
+    while trained PPO expected 204-dim (4 regime features missing).
+    """
+
+    SYMBOLS = ("AAPL", "MSFT")
+    OBS_COLS = ("close", "ret_1d")
+    REGIME_COLS = (
+        "market_vol_20d", "market_trend_20d", "dispersion_20d", "corr_mean_20d"
+    )
+
+    def test_obs_dim_matches_signal_weight_env(self, tmp_path: Path):
+        """ShadowEngine obs dim == SignalWeightEnv obs dim for same spec/data."""
+        # --- SignalWeightEnv obs dim ---
+        env_config = SignalWeightEnvConfig(
+            symbols=list(self.SYMBOLS),
+            observation_columns=list(self.OBS_COLS),
+            regime_feature_names=list(self.REGIME_COLS),
+        )
+        env = SignalWeightEnv(env_config)
+        env_obs_len = env.observation_length
+
+        # --- ShadowEngine obs dim (from first step) ---
+        spec = _make_spec()
+        snapshots = _make_snapshots_with_regime(
+            n=3, symbols=self.SYMBOLS,
+            obs_cols=self.OBS_COLS, regime_cols=self.REGIME_COLS,
+        )
+        config = ShadowRunConfig(
+            experiment_id="parity_test",
+            run_id="r1",
+            output_dir=tmp_path / "parity_test" / "r1",
+        )
+
+        obs_dims: list[int] = []
+
+        class CapturingPolicy:
+            def act(self, obs: np.ndarray, context: Any = None) -> np.ndarray:
+                obs_dims.append(len(obs))
+                return np.array([0.5, 0.5])
+
+        engine = ShadowEngine(spec, CapturingPolicy(), snapshots, config)
+        engine.run()
+
+        assert obs_dims, "Policy was never called"
+        shadow_obs_len = obs_dims[0]
+
+        assert shadow_obs_len == env_obs_len, (
+            f"Observation shape mismatch: ShadowEngine={shadow_obs_len}, "
+            f"SignalWeightEnv={env_obs_len}. "
+            f"Likely cause: regime features not included in shadow obs."
+        )
+
