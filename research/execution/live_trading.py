@@ -18,7 +18,7 @@ import logging
 import signal
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -177,6 +177,9 @@ class LiveTradingLoop:
         # Pending orders tracking
         self._pending_orders: dict[str, OrderResult] = {}
 
+        # Idempotency: broker order IDs whose fills have been applied (Fix A)
+        self._applied_fills: set[str] = set()
+
         # Portfolio state
         self._cash = config.initial_cash
         self._last_snapshot_time = datetime.now(timezone.utc)
@@ -267,6 +270,23 @@ class LiveTradingLoop:
                     self._pending_orders[order.order_id] = order
                 logger.info(
                     "Recovered %d pending orders", len(result.pending_orders),
+                )
+
+            # Apply fills that occurred while offline — write fill rows and
+            # update in-memory positions/cash so state is consistent (Fix B)
+            if result.filled_offline:
+                for order_result in result.filled_offline:
+                    if order_result.order_id not in self._applied_fills:
+                        self._applied_fills.add(order_result.order_id)
+                        try:
+                            self._handle_fill(order_result)
+                        except Exception as exc:
+                            logger.error(
+                                "Failed to apply offline fill for order %s: %s",
+                                order_result.order_id, exc,
+                            )
+                logger.info(
+                    "Applied %d offline fills", len(result.filled_offline),
                 )
 
             if result.warnings:
@@ -634,20 +654,42 @@ class LiveTradingLoop:
                 result = self._broker.get_order_status(order_id)
 
                 if result.status == OrderStatus.FILLED:
-                    self._handle_fill(result)
+                    # Remove from pending first so a non-BrokerError inside
+                    # _handle_fill cannot cause a retry that double-applies
+                    # the fill (Fix A: idempotent fill application).
                     completed.append(order_id)
+                    if result.order_id not in self._applied_fills:
+                        self._applied_fills.add(result.order_id)  # write-ahead
+                        self._handle_fill(result)
+
+                elif result.status == OrderStatus.PARTIALLY_FILLED:
+                    # Order still live — write ledger update, leave in pending
+                    # (Fix C: PARTIALLY_FILLED was previously unhandled)
+                    self._order_writer.write_order(result)
+                    logger.debug(
+                        "Order %s partially filled: qty=%.4f avg=%.4f",
+                        order_id, result.filled_qty, result.filled_avg_price,
+                    )
 
                 elif result.status in (
                     OrderStatus.CANCELLED,
                     OrderStatus.EXPIRED,
                     OrderStatus.REJECTED,
                 ):
-                    logger.info(
-                        "Order %s terminal status: %s",
-                        order_id, result.status.value,
-                    )
-                    self._order_writer.write_order(result)
                     completed.append(order_id)
+                    if result.filled_qty > 0 and result.order_id not in self._applied_fills:
+                        # Apply the executed partial quantity before closing out
+                        # (Fix C: partial fills on terminal orders were dropped).
+                        # Write with FILLED status so position reconstruction
+                        # includes this fill during crash recovery.
+                        self._applied_fills.add(result.order_id)  # write-ahead
+                        self._handle_fill(_dc_replace(result, status=OrderStatus.FILLED))
+                    else:
+                        self._order_writer.write_order(result)
+                    logger.info(
+                        "Order %s terminal: %s filled_qty=%.4f",
+                        order_id, result.status.value, result.filled_qty,
+                    )
 
                 elif result.status == OrderStatus.PENDING:
                     elapsed = (
