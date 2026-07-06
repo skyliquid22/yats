@@ -410,16 +410,28 @@ class PaperTradingLoop:
                 latest_by_symbol[sig.symbol] = sig
         netted = list(latest_by_symbol.values())
 
-        # Build target weight array and prev weight array for risk engine
-        syms = [s.symbol for s in netted]
-        target_weights = np.array([s.target_position_pct for s in netted])
-        prev_weights = np.array([
-            positions[sym].notional(
-                current_prices.get(sym, positions[sym].avg_entry_price)
-            ) / nav
-            if sym in positions else 0.0
-            for sym in syms
+        # Build full portfolio universe: signal symbols + existing holdings with no
+        # new signal.  Holdings-only symbols get target == prev (unchanged) so the
+        # risk engine evaluates portfolio-wide constraints (gross exposure, leverage,
+        # max-active-positions, concentration) over the *complete* book, not just
+        # the batch.  Netted symbols are placed first so risk_result.weights[i]
+        # still maps 1-to-1 with netted[i] below.
+        def _pos_weight(sym: str) -> float:
+            if sym in positions:
+                return positions[sym].notional(
+                    current_prices.get(sym, positions[sym].avg_entry_price)
+                ) / nav
+            return 0.0
+
+        signal_by_sym = {s.symbol: s for s in netted}
+        holding_only_syms = [sym for sym in positions if sym not in signal_by_sym]
+        all_syms = [s.symbol for s in netted] + holding_only_syms
+
+        target_weights = np.array([
+            signal_by_sym[sym].target_position_pct if sym in signal_by_sym else _pos_weight(sym)
+            for sym in all_syms
         ])
+        prev_weights = np.array([_pos_weight(sym) for sym in all_syms])
 
         # --- Pre-order risk gate: full 15-constraint engine ---
         try:
