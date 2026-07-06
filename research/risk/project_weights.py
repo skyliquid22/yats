@@ -363,20 +363,32 @@ def project_weights_full(
     # --- 9. ADV participation: cap per-symbol weight by ADV ---
     if adv_shares is not None and nav is not None and nav > 0:
         adv = np.asarray(adv_shares, dtype=np.float64)
-        capped = False
-        for i in range(n):
-            if adv[i] > 0:
-                # Max weight = (max_adv_pct * adv_notional) / nav
-                # For weight-based: approximate with adv weight fraction
-                max_w = risk_config.max_adv_pct * adv[i] / nav
-                if w[i] > max_w:
-                    w[i] = max_w
-                    capped = True
-        decisions.append(RiskDecision(
-            rule_id="max_adv_pct",
-            decision=Decision.SIZE_REDUCE if capped else Decision.PASS,
-            details={"max_adv_pct": risk_config.max_adv_pct},
-        ))
+        if prices is None:
+            # Cannot compute ADV notional without prices — skip and warn.
+            logger.warning(
+                "max_adv_pct constraint skipped: adv_shares provided but prices is None; "
+                "pass prices= (latest closes) to enable ADV capping"
+            )
+            decisions.append(RiskDecision(
+                rule_id="max_adv_pct",
+                decision=Decision.PASS,
+                details={"max_adv_pct": risk_config.max_adv_pct, "skipped": "prices_missing"},
+            ))
+        else:
+            px = np.asarray(prices, dtype=np.float64)
+            capped = False
+            for i in range(n):
+                if adv[i] > 0 and px[i] > 0:
+                    # max_w = max_adv_pct * (adv_shares * price) / nav
+                    max_w = risk_config.max_adv_pct * adv[i] * px[i] / nav
+                    if w[i] > max_w:
+                        w[i] = max_w
+                        capped = True
+            decisions.append(RiskDecision(
+                rule_id="max_adv_pct",
+                decision=Decision.SIZE_REDUCE if capped else Decision.PASS,
+                details={"max_adv_pct": risk_config.max_adv_pct},
+            ))
     else:
         decisions.append(RiskDecision(
             rule_id="max_adv_pct",
@@ -418,7 +430,9 @@ def project_weights_full(
                 and prev_weights[i] > 0
                 and w[i] < prev_weights[i]
             ):
-                w[i] = prev_weights[i]
+                # Clamp to eff_max_symbol_weight — prev may have been set under
+                # a less restrictive vol regime than today's.
+                w[i] = min(prev_weights[i], eff_max_symbol_weight)
                 blocked = True
         decisions.append(RiskDecision(
             rule_id="min_holding_period",
@@ -437,8 +451,8 @@ def project_weights_full(
         for i in range(n):
             delta = abs(w[i] - prev_weights[i])
             if delta > 0 and delta < min_thresh and w[i] > 0:
-                # Change too small — revert to prev weight
-                w[i] = prev_weights[i]
+                # Clamp to eff_max_symbol_weight — prev may exceed today's limit.
+                w[i] = min(prev_weights[i], eff_max_symbol_weight)
     decisions.append(RiskDecision(
         rule_id="minimum_order_threshold",
         decision=Decision.PASS,
@@ -465,5 +479,43 @@ def project_weights_full(
             decision=Decision.PASS,
             details={"cash_available": float(cash_available)},
         ))
+
+    # --- 14. Final validation: re-enforce hard caps broken by later soft constraints ---
+    # Soft constraints (steps 7-13) can reopen exposure capped in steps 2-4:
+    # concentration / ADV / min_cash rescale the whole portfolio; holding-period
+    # and min-order reverts restore prev_weights that may individually exceed
+    # eff_max_symbol_weight.  Re-apply the two hard caps here so the output
+    # always satisfies them.  Turnover is not re-capped because forced holds and
+    # min-order reverts legitimately increase the L1 delta; log a warning instead.
+    w_before_val = w.copy()
+    np.minimum(w, eff_max_symbol_weight, out=w)
+    sym_capped = not np.array_equal(w_before_val, w)
+
+    total_final = w.sum()
+    gross_capped = False
+    if total_final > max_exposure and total_final > 0:
+        w *= max_exposure / total_final
+        gross_capped = True
+
+    if prev_weights is not None and risk_config.max_daily_turnover < 2.0:
+        final_l1 = float(np.abs(w - prev_weights).sum())
+        if final_l1 > risk_config.max_daily_turnover + 1e-9:
+            logger.warning(
+                "max_daily_turnover cap conflict: final L1 delta %.4f exceeds limit %.4f "
+                "(caused by forced holds / min-order reverts — not reversed)",
+                final_l1,
+                risk_config.max_daily_turnover,
+            )
+
+    decisions.append(RiskDecision(
+        rule_id="final_validation",
+        decision=Decision.SIZE_REDUCE if (sym_capped or gross_capped) else Decision.PASS,
+        details={
+            "eff_max_symbol_weight": eff_max_symbol_weight,
+            "eff_max_gross_exposure": eff_max_gross_exposure,
+            "sym_weight_recapped": sym_capped,
+            "gross_exposure_recapped": gross_capped,
+        },
+    ))
 
     return RiskResult(weights=w, decisions=decisions)
