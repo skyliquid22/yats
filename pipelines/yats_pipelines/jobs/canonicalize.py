@@ -374,6 +374,39 @@ def _canonicalize_fundamentals(
 # ---------------------------------------------------------------------------
 
 
+def _load_fundamentals_weighted_shares(conn) -> dict[str, list[tuple]]:
+    """Load per-symbol weighted_average_shares from raw_fd_fundamentals.
+
+    Returns {symbol: [(date, shares), ...]} sorted by date ascending.
+    Used to enrich canonical_financial_metrics.shares_outstanding when the
+    financial-metrics API does not return it.
+    """
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT symbol, timestamp, weighted_average_shares "
+            "FROM raw_fd_fundamentals "
+            "ORDER BY symbol, timestamp"
+        )
+        rows = cur.fetchall()
+        cur.close()
+    except Exception:
+        logger.warning("Failed to load fundamentals weighted_average_shares — shares_outstanding enrichment disabled", exc_info=True)
+        return {}
+
+    # De-duplicate per (symbol, date) — later write wins
+    by_symbol: dict[str, dict] = defaultdict(dict)
+    for symbol, ts, shares in rows:
+        if shares is None:
+            continue
+        if isinstance(ts, str):
+            ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        d = ts.date() if hasattr(ts, "date") else ts
+        by_symbol[str(symbol)][d] = float(shares)
+
+    return {sym: sorted(date_shares.items()) for sym, date_shares in by_symbol.items()}
+
+
 def _canonicalize_financial_metrics(
     conn, sender, config: CanonicalizeConfig, now: datetime, run_id: str, log
 ) -> int:
@@ -424,6 +457,9 @@ def _canonicalize_financial_metrics(
     vendor = "financialdatasets"
     written = 0
 
+    # Load shares_outstanding fallback from income statement data
+    fund_shares = _load_fundamentals_weighted_shares(conn)
+
     for symbol, rows in by_symbol.items():
         rows.sort(key=lambda r: r["timestamp"])
 
@@ -445,8 +481,16 @@ def _canonicalize_financial_metrics(
 
         # Forward-fill: iterate day by day
         current_values: dict | None = None
+        sym_fund_timeline = fund_shares.get(str(symbol), [])
+        fund_idx = 0
+        current_fund_shares: float | None = None
         d = first_date
         while d <= last_date:
+            # Advance fundamentals shares pointer (as-of semantics)
+            while fund_idx < len(sym_fund_timeline) and sym_fund_timeline[fund_idx][0] <= d:
+                current_fund_shares = sym_fund_timeline[fund_idx][1]
+                fund_idx += 1
+
             if d in observations:
                 current_values = observations[d]
 
@@ -455,6 +499,10 @@ def _canonicalize_financial_metrics(
                 cols = {}
                 for f in metric_fields:
                     cols[f] = current_values.get(f)
+
+                # Enrich shares_outstanding from income statements when metrics API lacks it
+                if cols.get("shares_outstanding") is None and current_fund_shares is not None:
+                    cols["shares_outstanding"] = current_fund_shares
 
                 cols["canonicalized_at"] = _ts_nanos(now)
 

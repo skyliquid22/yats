@@ -63,6 +63,31 @@ class TestLogMktCap:
         # Double shares → log_mkt_cap increases by log(2)
         assert pytest.approx(result.iloc[1] - result.iloc[0], rel=1e-6) == np.log(2.0)
 
+    def test_none_shares_outstanding_returns_nan_not_crash(self):
+        """compute_log_mkt_cap must return NaN (not crash) when shares_outstanding is None."""
+        df = _make_df(shares_outstanding=[None], close=[100.0])
+        result = compute_log_mkt_cap(df)
+        assert result.isna().all()
+
+    def test_object_dtype_all_none_returns_all_nan(self):
+        """Object-dtype shares_outstanding column with all-None values returns all NaN."""
+        df = pd.DataFrame({
+            "shares_outstanding": pd.array([None, None], dtype=object),
+            "close": [100.0, 200.0],
+        })
+        result = compute_log_mkt_cap(df)
+        assert result.isna().all()
+
+    def test_mixed_none_and_valid_shares_partial_nan(self):
+        """Valid rows compute correctly; None rows return NaN — no crash."""
+        df = pd.DataFrame({
+            "shares_outstanding": pd.array([1_000_000.0, None], dtype=object),
+            "close": [100.0, 200.0],
+        })
+        result = compute_log_mkt_cap(df)
+        assert pytest.approx(result.iloc[0], rel=1e-6) == np.log(1_000_000.0 * 100.0)
+        assert np.isnan(result.iloc[1])
+
 
 class TestSizeRank:
     def test_percentile_rank_ascending(self):

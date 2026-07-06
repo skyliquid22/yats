@@ -8,6 +8,7 @@ import pytest
 
 from yats_pipelines.jobs.feature_pipeline import (
     _compute_cross_sectional_features,
+    _compute_fundamental_features,
     _write_features,
 )
 
@@ -208,3 +209,60 @@ class TestTzNaiveFilteringPath:
         assert len(aligned) == 2
         assert aligned.iloc[0] == pytest.approx(0.20)  # Jan 3 ffill from Jan 2
         assert aligned.iloc[1] == pytest.approx(0.25)  # Jan 4 exact match
+
+
+class TestLogMktCapNullShares:
+    """Regression tests for ya-balr8: log_mkt_cap crash when shares_outstanding is None/object-dtype."""
+
+    DATES = ["2024-01-02", "2024-01-03", "2024-01-04"]
+
+    def test_cs_features_complete_with_null_shares_outstanding(self):
+        """_compute_cross_sectional_features completes without error when shares_outstanding is None.
+
+        Before fix: np.log(object_series_with_None) raised "'float' object has no attribute 'log'",
+        killing the entire feature pipeline before any features were written.
+        After fix: log_mkt_cap is NaN for all rows; pipeline continues normally.
+        """
+        ohlcv = _make_ohlcv(self.DATES)
+        ohlcv_by_symbol = {"AAPL": ohlcv.reset_index(drop=True)}
+
+        # shares_outstanding column is object-dtype with all-None — the exact failure case
+        metrics = pd.DataFrame({
+            "timestamp": pd.to_datetime(["2024-01-02"], utc=True),
+            "shares_outstanding": pd.array([None], dtype=object),
+            "pe_ratio": [20.0],
+        })
+        metrics_by_symbol = {"AAPL": metrics}
+
+        result = _compute_cross_sectional_features(
+            ohlcv_by_symbol, metrics_by_symbol, ["log_mkt_cap"]
+        )
+
+        assert "AAPL" in result
+        assert result["AAPL"]["log_mkt_cap"].isna().all()
+
+    def test_six_fundamental_features_non_null_when_shares_absent(self):
+        """The 6 working fundamental features must produce non-null values even when
+        shares_outstanding is missing — verifying the pipeline is not killed by the crash."""
+        ohlcv = _make_ohlcv(self.DATES)
+        ohlcv_by_symbol = {"AAPL": ohlcv.reset_index(drop=True)}
+
+        metrics = pd.DataFrame({
+            "timestamp": pd.to_datetime(["2024-01-02"], utc=True),
+            "shares_outstanding": pd.array([None], dtype=object),
+            "pe_ratio": [20.0],
+            "roe": [0.15],
+            "gross_margin": [0.40],
+            "debt_to_equity": [0.50],
+            "eps_growth_yoy": [0.10],
+            "revenue_growth_yoy": [0.08],
+        })
+        metrics_by_symbol = {"AAPL": metrics}
+
+        six_features = ["pe_ttm", "roe", "gross_margin", "debt_equity", "eps_growth_1y", "revenue_growth_1y"]
+        result = _compute_fundamental_features(ohlcv_by_symbol, metrics_by_symbol, six_features)
+
+        feat_df = result["AAPL"]
+        for fname in six_features:
+            non_null_count = feat_df[fname].dropna().shape[0]
+            assert non_null_count > 0, f"Expected non-null {fname} values, got all NaN"
