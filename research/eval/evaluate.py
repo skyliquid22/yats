@@ -154,7 +154,11 @@ def evaluate(
         "feature_set_version": spec.feature_set,
     }
     if split_metadata:
-        metadata.update(split_metadata)
+        # Merge split metadata without clobbering canonical fields
+        _reserved = {"experiment_id", "spec_path", "data_range", "feature_set_version"}
+        for k, v in split_metadata.items():
+            if k not in _reserved:
+                metadata[k] = v
 
     result: dict[str, Any] = {
         "metadata": metadata,

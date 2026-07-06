@@ -504,15 +504,12 @@ class TestApplyEvaluationSplit:
         assert "train_rows" in meta
         assert "test_rows" in meta
 
-    def test_boundary_leak_inflates_oos_sharpe_without_purge(self):
-        """Synthetic: training data leaking into test via overlap inflates OOS Sharpe.
+    def test_purge_embargo_creates_verified_gap(self):
+        """Purge+embargo must produce a genuine data gap between train-end and test-start.
 
-        We construct a dataset where bar[split_idx-1] carries a high-signal return
-        that should be purely in the test set. Without purge/embargo the training
-        set sees this bar and can overfit to it, making OOS Sharpe artificially high.
-
-        This test asserts the key structural property: with purge+embargo, the train
-        and test sets have a genuine gap with no shared bars, preventing leakage.
+        Without purge/embargo, train and test are adjacent (no temporal gap).
+        With purge=label_horizon and embargo=embargo_pct*n bars on each side,
+        the gap = label_horizon + 2*embargo_bars bars, eliminating boundary leakage.
         """
         rng = np.random.default_rng(0)
         n = 200
@@ -550,8 +547,8 @@ class TestApplyEvaluationSplit:
         idx_train_end = ts_list.index(clean_train_last)
         idx_test_start = ts_list.index(clean_test_first)
         gap = idx_test_start - idx_train_end - 1
-        # gap = label_horizon + embargo_bars - 1 (at minimum)
-        # purge=5, embargo=floor(0.02*200)=4 → gap = 5+4-1 = 8 at minimum
+        # gap = label_horizon + 2*embargo_bars
+        # purge=5, embargo=floor(0.02*200)=4 → gap = 5 + 2*4 = 13
         assert gap >= 1, f"Expected a gap between train and test, got gap={gap}"
         assert meta["purged_count"] == 5
         assert meta["embargoed_count"] == 4
