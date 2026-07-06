@@ -86,7 +86,7 @@ class TestParseThetadataDatetime:
 
 class TestNormalizeChainSnapshot:
     def test_adds_metadata(self):
-        td = ThetaDataResource(api_key="test")
+        td = ThetaDataResource()
         raw_rows = [
             {"root": "AAPL", "exp": "20240119", "strike": 150.0, "right": "C"}
         ]
@@ -99,14 +99,14 @@ class TestNormalizeChainSnapshot:
         assert result[0]["root"] == "AAPL"
 
     def test_empty_input(self):
-        td = ThetaDataResource(api_key="test")
+        td = ThetaDataResource()
         now = datetime(2026, 1, 5, tzinfo=timezone.utc)
         assert td.normalize_chain_snapshot([], now, "run-1") == []
 
 
 class TestNormalizeEod:
     def test_adds_metadata(self):
-        td = ThetaDataResource(api_key="test")
+        td = ThetaDataResource()
         raw_rows = [
             {"root": "SPY", "exp": "20240119", "strike": 450.0, "right": "P",
              "open": 2.0, "high": 2.5, "low": 1.8, "close": 2.2, "volume": 100, "trade_count": 5}

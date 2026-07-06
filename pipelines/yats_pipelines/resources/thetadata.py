@@ -11,34 +11,31 @@ import requests
 logger = logging.getLogger(__name__)
 
 RETRY_DELAYS = [1, 5, 30]  # seconds — exponential backoff
-BASE_URL = "https://api.thetadata.us/v2"
+# ThetaData v2 REST is served by the local Theta Terminal process.
+# Override with THETADATA_BASE_URL env var if the terminal runs on a non-default port.
+BASE_URL = os.environ.get("THETADATA_BASE_URL", "http://127.0.0.1:25510/v2")
 
 
 @dataclass
 class ThetaDataResource:
-    """ThetaData REST API v2 resource — API key from environment.
+    """ThetaData REST API v2 resource — proxied through local Theta Terminal.
 
-    Auth uses Bearer token in Authorization header.
+    The Theta Terminal must be running at base_url before any calls are made.
+    No auth headers are sent; the terminal authenticates upstream at launch.
     Strikes are in milli-dollars (ThetaData internal) — divide by 1000 for USD.
     """
 
-    api_key: str = field(
-        default_factory=lambda: os.environ.get("THETADATA_API_KEY", "")
+    base_url: str = field(
+        default_factory=lambda: os.environ.get("THETADATA_BASE_URL", "http://127.0.0.1:25510/v2")
     )
-    base_url: str = BASE_URL
     request_delay: float = 0.3  # seconds between requests for rate limiting
-
-    def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.api_key}"}
 
     def _request_with_retry(self, url: str, params: dict) -> dict:
         """Execute GET request with exponential backoff retry (3 attempts)."""
         last_exc: Exception | None = None
         for attempt, delay in enumerate(RETRY_DELAYS):
             try:
-                resp = requests.get(
-                    url, headers=self._headers(), params=params, timeout=30
-                )
+                resp = requests.get(url, params=params, timeout=30)
                 if resp.status_code == 429:
                     retry_after = int(resp.headers.get("Retry-After", delay))
                     logger.warning(
@@ -51,6 +48,10 @@ class ThetaDataResource:
                     continue
                 resp.raise_for_status()
                 return resp.json()
+            except requests.exceptions.ConnectionError as exc:
+                raise RuntimeError(
+                    "Theta Terminal not running — start it with your ThetaData credentials; see README"
+                ) from exc
             except requests.RequestException as exc:
                 last_exc = exc
                 if attempt < len(RETRY_DELAYS) - 1:
@@ -63,7 +64,7 @@ class ThetaDataResource:
                     )
                     time.sleep(delay)
         raise RuntimeError(
-            f"ThetaData API request failed after {len(RETRY_DELAYS)} attempts: {last_exc}"
+            f"ThetaData request failed after {len(RETRY_DELAYS)} attempts: {last_exc}"
         ) from last_exc
 
     @staticmethod
