@@ -5,6 +5,8 @@ Verifies without mocking the risk engine that:
 2. risk_decisions rows are written when violations occur
 3. Live trading loop also has the risk engine wired (project_weights_full called)
 4. Post-fill constraint verification runs after each fill
+5. Portfolio-level clamps are applied even when a signal batch covers only a subset
+   of the portfolio (existing holdings are included in the risk engine input)
 
 A tight risk config (max_gross_exposure=0.50) makes violations easy to trigger.
 """
@@ -19,6 +21,7 @@ import pytest
 from research.execution.paper_trading import PaperTradingConfig, PaperTradingLoop
 from research.execution.live_trading import LiveTradingConfig, LiveTradingLoop
 from research.execution.signal import Signal
+from research.execution.state import Position
 from research.experiments.spec import RiskConfig
 from research.risk.project_weights import Decision, project_weights_full
 
@@ -233,3 +236,72 @@ class TestPostFillVerification:
         loop._handle_fill(fill_result)
 
         loop._verify_post_fill_constraints.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Portfolio-wide pre-order clamp tests (ya-hxc7f)
+# ---------------------------------------------------------------------------
+# Risk engine input must cover the UNION of signal-batch symbols and existing
+# holdings.  Without this fix, holdings-only symbols are invisible to the risk
+# engine, so gross-exposure / leverage / concentration constraints only account
+# for the batch — existing positions can push the real portfolio far past limits.
+
+_BOOK_RISK = RiskConfig(
+    max_gross_exposure=0.85,
+    max_symbol_weight=0.40,
+    min_cash=0.01,
+    minimum_order_threshold=0.001,
+    max_daily_turnover=2.0,
+    daily_loss_limit=-1.0,
+    trailing_drawdown_limit=-1.0,
+)
+
+
+def _book_loop(positions_qty: dict[str, float]) -> PaperTradingLoop:
+    """Paper loop seeded with real Position objects (all priced at $100, NAV $100 K)."""
+    loop = _make_paper_loop(_BOOK_RISK)
+    loop._position_writer.positions = {
+        sym: Position(symbol=sym, quantity=qty, avg_entry_price=100.0)
+        for sym, qty in positions_qty.items()
+    }
+    all_syms = list(positions_qty) + [s for s in ("TSLA",) if s not in positions_qty]
+    loop._get_current_prices = MagicMock(return_value={s: 100.0 for s in all_syms})
+    loop._compute_nav = MagicMock(return_value=100_000.0)
+    return loop
+
+
+class TestPortfolioWideClamp:
+    """Risk engine sees full book, not just the signal batch."""
+
+    def test_new_symbol_signal_capped_by_existing_holdings(self):
+        """Signal for a new symbol (TSLA) is size-reduced because A+B+C holdings
+        already consume 80% gross; adding 30% would push to 110% > 0.85 limit."""
+        # Holdings: AAPL=0.27, MSFT=0.27, GOOG=0.26 (total 0.80 gross)
+        loop = _book_loop({"AAPL": 270.0, "MSFT": 270.0, "GOOG": 260.0})
+        loop.add_signals([_signal("TSLA", 0.30)])
+        loop._process_signals()
+
+        calls = loop._broker.submit_order.call_args_list
+        assert len(calls) == 1, "Expected exactly one TSLA order"
+        tsla_notional = calls[0][0][0].notional
+        # Uncapped: 0.30 * 100_000 = 30_000; capped: ≈ 0.2318 * 100_000 = 23_180
+        assert tsla_notional < 30_000.0, (
+            f"TSLA order not size-reduced by full-book gross cap: {tsla_notional:.0f}"
+        )
+
+    def test_add_signal_on_existing_holding_capped_by_full_book(self):
+        """Increasing an existing AAPL position is capped because total portfolio
+        exposure after the add (0.35+0.27+0.26 = 0.88) exceeds the 0.85 limit."""
+        # Holdings: AAPL=0.27, MSFT=0.27, GOOG=0.26 (total 0.80 gross)
+        loop = _book_loop({"AAPL": 270.0, "MSFT": 270.0, "GOOG": 260.0})
+        loop.add_signals([_signal("AAPL", 0.35)])
+        loop._process_signals()
+
+        calls = loop._broker.submit_order.call_args_list
+        assert len(calls) == 1, "Expected exactly one AAPL order"
+        aapl_notional = calls[0][0][0].notional
+        # Uncapped delta: (0.35 - 0.27) * 100_000 = 8_000
+        # Capped: AAPL projected ≈ 0.35 * (0.85/0.88) ≈ 0.338; delta ≈ 6_820
+        assert aapl_notional < 8_000.0, (
+            f"AAPL order not capped by full-book gross exposure: {aapl_notional:.0f}"
+        )
