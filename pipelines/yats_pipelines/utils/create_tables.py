@@ -159,6 +159,15 @@ CREATE TABLE IF NOT EXISTS raw_thetadata_options_eod (
     close DOUBLE,
     volume LONG,
     trade_count LONG,
+    bid DOUBLE,
+    ask DOUBLE,
+    iv DOUBLE,
+    delta DOUBLE,
+    gamma DOUBLE,
+    theta DOUBLE,
+    vega DOUBLE,
+    rho DOUBLE,
+    open_interest LONG,
     ingested_at TIMESTAMP,
     dagster_run_id STRING
 ) TIMESTAMP(quote_date) PARTITION BY MONTH;

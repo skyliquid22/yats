@@ -26,7 +26,7 @@ from yats_pipelines.resources.questdb import QuestDBResource
 
 logger = logging.getLogger(__name__)
 
-ALL_DOMAINS = ("equity_ohlcv", "fundamentals", "financial_metrics")
+ALL_DOMAINS = ("equity_ohlcv", "fundamentals", "financial_metrics", "option_eod")
 
 
 class CanonicalizeConfig(Config):
@@ -536,6 +536,173 @@ def _canonicalize_financial_metrics(
 
 
 # ---------------------------------------------------------------------------
+# Options EOD canonicalization
+# ---------------------------------------------------------------------------
+
+# EOD endpoint only has OHLCV + bid/ask.
+# Historical greeks/OI are fetched separately during ingest.
+# Fields available: close→last, bid, ask, volume, iv, delta, gamma, theta, vega, rho, open_interest.
+# Fields not available historically: none explicitly excluded — all come from enriched ingest.
+_EOD_GREEK_FIELDS = ("iv", "delta", "gamma", "theta", "vega", "rho")
+
+
+def _pick_latest_eod_per_contract(rows: list[dict]) -> list[dict]:
+    """Dedup EOD rows: latest-ingested wins per (underlying, expiry, strike, right, quote_date)."""
+    by_key: dict[tuple, dict] = {}
+    for row in rows:
+        qd = row.get("quote_date")
+        if qd is None:
+            continue
+        quote_day = qd.date() if hasattr(qd, "date") else None
+        if quote_day is None:
+            continue
+        expiry_raw = row.get("expiry")
+        expiry_str = str(expiry_raw) if expiry_raw is not None else ""
+        key = (
+            row.get("underlying", ""),
+            expiry_str,
+            row.get("strike"),
+            row.get("right", ""),
+            quote_day,
+        )
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = row
+        else:
+            # Latest ingested_at wins; preserve non-None greek values from earlier ingests
+            ia_new = row.get("ingested_at")
+            ia_old = existing.get("ingested_at")
+            newer = (
+                ia_new is not None and (ia_old is None or ia_new > ia_old)
+            )
+            if newer:
+                merged = dict(row)
+                for field in _EOD_GREEK_FIELDS + ("open_interest",):
+                    if merged.get(field) is None and existing.get(field) is not None:
+                        merged[field] = existing[field]
+                by_key[key] = merged
+    return list(by_key.values())
+
+
+def _canonicalize_option_eod(
+    conn, sender, config: CanonicalizeConfig, now: datetime, run_id: str, log
+) -> int:
+    """Canonicalize raw_thetadata_options_eod → canonical_options_chain.
+
+    Dedup: latest-per-(underlying, expiry, strike, right, quote_date).
+    Source tag: source_vendor=thetadata_eod, reconcile_method=eod_latest.
+    Coexists with snapshot rows (different source_vendor) in canonical_options_chain.
+
+    Greek availability depends on subscription and enrichment at ingest time:
+    - Always available: close (→last), bid, ask, volume
+    - Available when ThetaData historical greeks endpoint is accessible:
+      iv, delta, theta, vega, rho, open_interest
+    - Available with PRO historical subscription: gamma
+    """
+    if _run_already_written(conn, run_id, "option_eod"):
+        log.info("option_eod: run %s already written — skipping (idempotent)", run_id)
+        return 0
+
+    where, params = _date_clause(config.start_date, config.end_date, ts_col="quote_date")
+    query = f"SELECT * FROM raw_thetadata_options_eod{where} ORDER BY quote_date"
+
+    cur = conn.cursor()
+    cur.execute(query, params)
+    columns = [desc[0] for desc in cur.description]
+    raw_rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+    cur.close()
+
+    if not raw_rows:
+        log.info("option_eod: no raw EOD rows found")
+        return 0
+
+    log.info("option_eod: read %d raw EOD rows", len(raw_rows))
+
+    # Parse timestamps
+    for row in raw_rows:
+        for ts_col in ("quote_date", "expiry", "ingested_at"):
+            val = row.get(ts_col)
+            if isinstance(val, str):
+                row[ts_col] = datetime.fromisoformat(val.replace("Z", "+00:00"))
+
+    deduped = _pick_latest_eod_per_contract(raw_rows)
+    log.info("option_eod: %d rows after dedup", len(deduped))
+
+    # Tally greek availability for documentation
+    has_iv = sum(1 for r in deduped if r.get("iv") is not None)
+    has_oi = sum(1 for r in deduped if r.get("open_interest") is not None)
+    has_gamma = sum(1 for r in deduped if r.get("gamma") is not None)
+    log.info(
+        "option_eod: greek availability — iv=%d/%d, open_interest=%d/%d, gamma=%d/%d",
+        has_iv, len(deduped), has_oi, len(deduped), has_gamma, len(deduped),
+    )
+
+    written = 0
+    for row in deduped:
+        qd = row.get("quote_date")
+        if qd is None:
+            continue
+        quote_date_dt = datetime(
+            qd.date().year, qd.date().month, qd.date().day, tzinfo=timezone.utc
+        ) if hasattr(qd, "date") else now
+
+        expiry_raw = row.get("expiry")
+        expiry_dt = expiry_raw if isinstance(expiry_raw, datetime) else None
+
+        cols = {
+            "strike": row.get("strike"),
+            "bid": row.get("bid"),
+            "ask": row.get("ask"),
+            "last": row.get("close"),
+            "iv": row.get("iv"),
+            "delta": row.get("delta"),
+            "gamma": row.get("gamma"),
+            "theta": row.get("theta"),
+            "vega": row.get("vega"),
+            "rho": row.get("rho"),
+            "open_interest": row.get("open_interest"),
+            "volume": row.get("volume"),
+            "canonicalized_at": _ts_nanos(now),
+            "dagster_run_id": run_id,
+        }
+        if expiry_dt is not None:
+            cols["expiry"] = _ts_nanos(expiry_dt)
+
+        right_raw = row.get("right", "")
+        right = right_raw if right_raw in ("C", "P") else (
+            "C" if right_raw in ("CALL", "CALLS") else
+            "P" if right_raw in ("PUT", "PUTS") else right_raw
+        )
+
+        _row(sender, "canonical_options_chain",
+             symbols={
+                 "underlying": row.get("underlying", ""),
+                 "right": right,
+                 "source_vendor": "thetadata_eod",
+                 "reconcile_method": "eod_latest",
+             },
+             columns={k: v for k, v in cols.items() if v is not None},
+             at=quote_date_dt)
+
+        _row(sender, "reconciliation_log",
+             symbols={
+                 "domain": "option_eod",
+                 "symbol": row.get("underlying", ""),
+                 "primary_vendor": "thetadata_eod",
+             },
+             columns={
+                 "fallback_used": False,
+                 "validation_warnings": "[]",
+                 "dagster_run_id": run_id,
+                 "reconciled_at": _ts_nanos(now),
+             },
+             at=quote_date_dt)
+        written += 1
+
+    return written
+
+
+# ---------------------------------------------------------------------------
 # Domain dispatch
 # ---------------------------------------------------------------------------
 
@@ -543,6 +710,7 @@ _DOMAIN_FNS = {
     "equity_ohlcv": _canonicalize_equity_ohlcv,
     "fundamentals": _canonicalize_fundamentals,
     "financial_metrics": _canonicalize_financial_metrics,
+    "option_eod": _canonicalize_option_eod,
 }
 
 
