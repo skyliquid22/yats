@@ -9,6 +9,7 @@ PRD §7.1 and Appendix A.
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +32,7 @@ class SignalWeightEnvConfig:
     execution_sim: ExecutionSimConfig | None = None
     regime_feature_names: list[str] | None = None
     risk_config: RiskConfig = field(default_factory=RiskConfig)
+    seed: int | None = None
 
     def __post_init__(self):
         if "close" not in self.observation_columns:
@@ -71,10 +73,11 @@ class SignalWeightEnv:
             + self._n_symbols
         )
 
-        # Execution simulator
+        # Execution simulator — seeded from config.seed for determinism
         self._exec_sim: ExecutionSimulator | None = None
         if config.execution_sim is not None and config.execution_sim.enabled:
-            self._exec_sim = ExecutionSimulator(config.execution_sim)
+            rng = random.Random(config.seed) if config.seed is not None else random.Random()
+            self._exec_sim = ExecutionSimulator(config.execution_sim, rng=rng)
 
         # State
         self._data: list[dict[str, Any]] = []

@@ -75,6 +75,7 @@ def train_ppo(
         execution_sim=spec.execution_sim,
         regime_feature_names=regime_feature_names,
         risk_config=training_risk_config,
+        seed=spec.seed,
     )
     base_env = SignalWeightEnv(env_config)
 
@@ -198,6 +199,7 @@ def rollout_ppo(
         execution_sim=spec.execution_sim,
         regime_feature_names=regime_feature_names,
         risk_config=rollout_risk_config,
+        seed=spec.seed,
     )
     base_env = SignalWeightEnv(env_config)
     reward_env = RewardAdapterEnv(base_env, params)

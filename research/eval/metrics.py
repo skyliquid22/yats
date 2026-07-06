@@ -56,13 +56,18 @@ def compute_sharpe(returns: pd.Series) -> float:
 
 
 def compute_sortino(returns: pd.Series) -> float:
-    """Annualized Sortino ratio (downside deviation)."""
+    """Annualized Sortino ratio using standard downside deviation.
+
+    Downside deviation = sqrt(mean(min(r, 0)^2)) over all N returns,
+    not the std of negative-only returns (which is mean-centered and ddof=1).
+    """
     if len(returns) < 2:
         return 0.0
-    downside = returns[returns < 0]
-    if len(downside) == 0 or downside.std() == 0:
+    downside_sq = np.minimum(returns.values, 0.0) ** 2
+    downside_dev = float(np.sqrt(np.mean(downside_sq)))
+    if downside_dev < 1e-15:
         return float("inf") if returns.mean() > 0 else 0.0
-    return float(returns.mean() / downside.std() * np.sqrt(ANNUALIZATION_FACTOR))
+    return float(returns.mean() / downside_dev * np.sqrt(ANNUALIZATION_FACTOR))
 
 
 def compute_max_drawdown(equity_curve: pd.Series) -> tuple[float, int]:
