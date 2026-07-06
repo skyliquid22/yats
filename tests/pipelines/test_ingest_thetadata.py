@@ -10,6 +10,7 @@ import pytest
 
 from yats_pipelines.jobs.ingest_thetadata import (
     _ingested_after,
+    _normalize_right,
     _parse_exp_to_datetime,
     _pick_latest_per_contract,
     _run_already_written,
@@ -421,8 +422,9 @@ def _make_chain_row(
     ingested_at: datetime,
     iv: float = 0.30,
     oi: int = 100,
+    gamma: float | None = None,
 ) -> dict:
-    return {
+    row = {
         "underlying": underlying,
         "expiry": datetime(2024, 1, 19, tzinfo=timezone.utc),
         "strike": strike,
@@ -434,6 +436,9 @@ def _make_chain_row(
         "bid": 1.0,
         "ask": 1.1,
     }
+    if gamma is not None:
+        row["gamma"] = gamma
+    return row
 
 
 class TestPickLatestPerContract:
@@ -479,6 +484,74 @@ class TestPickLatestPerContract:
         rows = [{"underlying": "AAPL", "strike": 150.0, "right": "C"}]
         result = _pick_latest_per_contract(rows)
         assert result == []
+
+    def test_gamma_preserved_when_later_row_has_none(self):
+        """If a later ingest run has gamma=None (second-order endpoint unavailable),
+        the gamma value from the earlier run must be preserved in the output."""
+        day = datetime(2026, 1, 5, tzinfo=timezone.utc)
+        early = _make_chain_row(
+            "AAPL", 150.0, "C",
+            quote_ts=day,
+            ingested_at=datetime(2026, 1, 5, 9, 0, tzinfo=timezone.utc),
+            gamma=0.0042,
+        )
+        late = _make_chain_row(
+            "AAPL", 150.0, "C",
+            quote_ts=day,
+            ingested_at=datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc),
+            gamma=None,   # second-order endpoint was unavailable in this run
+        )
+        result = _pick_latest_per_contract([early, late])
+        assert len(result) == 1
+        assert result[0]["gamma"] == pytest.approx(0.0042), (
+            "gamma from earlier run must survive when later run has gamma=None"
+        )
+
+    def test_gamma_updated_when_both_rows_have_gamma(self):
+        """When both rows have gamma, the newer value wins (normal latest-wins)."""
+        day = datetime(2026, 1, 5, tzinfo=timezone.utc)
+        early = _make_chain_row(
+            "AAPL", 150.0, "C", quote_ts=day,
+            ingested_at=datetime(2026, 1, 5, 9, 0, tzinfo=timezone.utc),
+            gamma=0.0042,
+        )
+        late = _make_chain_row(
+            "AAPL", 150.0, "C", quote_ts=day,
+            ingested_at=datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc),
+            gamma=0.0055,
+        )
+        result = _pick_latest_per_contract([early, late])
+        assert result[0]["gamma"] == pytest.approx(0.0055)
+
+    def test_gamma_absent_stays_absent(self):
+        """When neither row has gamma, gamma must remain absent (no phantom key)."""
+        day = datetime(2026, 1, 5, tzinfo=timezone.utc)
+        early = _make_chain_row("AAPL", 150.0, "C", quote_ts=day,
+                                ingested_at=datetime(2026, 1, 5, 9, tzinfo=timezone.utc))
+        late = _make_chain_row("AAPL", 150.0, "C", quote_ts=day,
+                               ingested_at=datetime(2026, 1, 5, 15, tzinfo=timezone.utc))
+        result = _pick_latest_per_contract([early, late])
+        assert result[0].get("gamma") is None
+
+
+class TestNormalizeRight:
+    def test_call_normalized(self):
+        assert _normalize_right("CALL") == "C"
+
+    def test_put_normalized(self):
+        assert _normalize_right("PUT") == "P"
+
+    def test_already_short_call(self):
+        assert _normalize_right("C") == "C"
+
+    def test_already_short_put(self):
+        assert _normalize_right("P") == "P"
+
+    def test_empty_passthrough(self):
+        assert _normalize_right("") == ""
+
+    def test_unknown_passthrough(self):
+        assert _normalize_right("X") == "X"
 
 
 # ---------------------------------------------------------------------------

@@ -30,7 +30,21 @@ logger = logging.getLogger(__name__)
 _TARGET_NEAR_DTE = 30
 _TARGET_FAR_DTE = 60
 _MIN_DTE = 7          # skip expiries less than a week out (distorted by pin risk)
-_TENOR_WINDOW = 15    # ±15d window around each target
+_TENOR_WINDOW = 21    # ±21d window around each target (wider to handle sparse expiry schedules)
+
+# Right-column normalization: ThetaData v3 returns "CALL"/"PUT"; canonical writes "C"/"P".
+# Normalise defensively here so compute_options_features is robust to either format.
+_RIGHT_MAP = {"CALL": "C", "PUT": "P", "CALLS": "C", "PUTS": "P"}
+
+
+def _normalize_right_col(chain: "pd.DataFrame") -> "pd.DataFrame":
+    """Return chain with right column normalised to 'C'/'P' if it isn't already."""
+    if chain.empty or "right" not in chain.columns:
+        return chain
+    if chain["right"].isin(["CALL", "PUT", "CALLS", "PUTS"]).any():
+        chain = chain.copy()
+        chain["right"] = chain["right"].map(lambda v: _RIGHT_MAP.get(v, v))
+    return chain
 
 
 def _select_expiry(chain: pd.DataFrame, quote_date: pd.Timestamp, target_dte: int) -> pd.DataFrame:
@@ -179,6 +193,8 @@ def compute_options_features(
         "put_call_oi_ratio": float("nan"),
         "net_gamma_exposure": float("nan"),
     }
+
+    chain = _normalize_right_col(chain)
 
     if chain.empty:
         logger.debug("options_features: empty chain for %s on %s", label, quote_date.date())
