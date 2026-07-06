@@ -24,6 +24,7 @@ from yats_pipelines.resources.thetadata import (
     _parse_thetadata_date,
     _parse_thetadata_datetime,
 )
+from yats_pipelines.utils.schema_guard import assert_table_schema
 
 
 def _thetadata_reachable() -> bool:
@@ -195,7 +196,8 @@ class TestGetOptionChainSnapshot:
     def test_snapshot_row_shape(self):
         td = ThetaDataResource()
         responses = [self.GREEKS_CSV, self.OI_CSV, self.OHLC_CSV]
-        with patch.object(td, "_request_with_retry", side_effect=responses):
+        with patch.object(td, "_request_with_retry", side_effect=responses), \
+             patch.object(td, "_try_get_second_order_greeks", return_value={}):
             rows = td.get_option_chain_snapshot("AAPL", "20260710")
 
         assert len(rows) == 1
@@ -208,17 +210,28 @@ class TestGetOptionChainSnapshot:
         assert row["ask"] == 0.24
         assert row["iv"] == pytest.approx(0.5999)
         assert row["delta"] == pytest.approx(0.0129)
-        assert row["gamma"] is None        # not available on STANDARD plan
+        assert row["gamma"] is None        # no second-order data (empty dict)
         assert row["open_interest"] == 38
         assert row["volume"] == 25
         assert row["last"] == pytest.approx(0.01)
         assert isinstance(row["quote_ts"], datetime)
 
+    def test_snapshot_gamma_populated_from_second_order(self):
+        td = ThetaDataResource()
+        responses = [self.GREEKS_CSV, self.OI_CSV, self.OHLC_CSV]
+        second_order_gamma = {("375.000", "CALL"): 0.0042}
+        with patch.object(td, "_request_with_retry", side_effect=responses), \
+             patch.object(td, "_try_get_second_order_greeks", return_value=second_order_gamma):
+            rows = td.get_option_chain_snapshot("AAPL", "20260710")
+
+        assert rows[0]["gamma"] == pytest.approx(0.0042)
+
     def test_missing_oi_gives_none(self):
         td = ThetaDataResource()
         empty_oi = "timestamp,symbol,expiration,strike,right,open_interest\n"
         responses = [self.GREEKS_CSV, empty_oi, self.OHLC_CSV]
-        with patch.object(td, "_request_with_retry", side_effect=responses):
+        with patch.object(td, "_request_with_retry", side_effect=responses), \
+             patch.object(td, "_try_get_second_order_greeks", return_value={}):
             rows = td.get_option_chain_snapshot("AAPL", "20260710")
 
         assert rows[0]["open_interest"] is None
@@ -476,6 +489,86 @@ class TestIngestedAfter:
         a = {"ingested_at": datetime(2026, 1, 5, tzinfo=timezone.utc)}
         b = {"ingested_at": None}
         assert _ingested_after(a, b) is True
+
+
+# ---------------------------------------------------------------------------
+# 472 handling — no-data response treated as valid empty result
+# ---------------------------------------------------------------------------
+
+
+class Test472Handling:
+    def test_472_returns_empty_string_immediately(self):
+        td = ThetaDataResource()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 472
+        mock_resp.headers = {}
+        with patch("requests.get", return_value=mock_resp) as mock_get:
+            result = td._request_with_retry("http://127.0.0.1:25503/v3/option/snapshot/greeks/first_order", {})
+        assert result == ""
+        assert mock_get.call_count == 1, "472 must not trigger retries"
+
+    def test_472_from_chain_snapshot_returns_empty_list(self):
+        td = ThetaDataResource()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 472
+        mock_resp.headers = {}
+        with patch("requests.get", return_value=mock_resp), \
+             patch.object(td, "_try_get_second_order_greeks", return_value={}):
+            rows = td.get_option_chain_snapshot("AAPL", "19990101")
+        assert rows == []
+
+    def test_5xx_still_retries(self):
+        import requests as req_module
+        td = ThetaDataResource()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.headers = {}
+        mock_resp.raise_for_status.side_effect = req_module.exceptions.HTTPError("500 Server Error")
+        with patch("requests.get", return_value=mock_resp) as mock_get, \
+             patch("time.sleep"):
+            with pytest.raises(RuntimeError):
+                td._request_with_retry("http://127.0.0.1:25503/v3/option/snapshot/greeks/first_order", {})
+        assert mock_get.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Schema guard
+# ---------------------------------------------------------------------------
+
+
+class TestAssertTableSchema:
+    def _make_conn(self, column_names: list[str]) -> MagicMock:
+        conn = MagicMock()
+        cur = MagicMock()
+        conn.cursor.return_value = cur
+        cur.fetchall.return_value = [(col,) for col in column_names]
+        return conn
+
+    def test_valid_schema_passes(self):
+        conn = self._make_conn(["quote_ts", "underlying", "strike", "right", "bid", "ask"])
+        assert_table_schema(conn, "raw_thetadata_options_chain", ["quote_ts", "underlying"])
+
+    def test_table_not_exist_raises(self):
+        conn = self._make_conn([])
+        with pytest.raises(RuntimeError, match="bootstrap_db"):
+            assert_table_schema(conn, "raw_thetadata_options_chain", ["quote_ts"])
+
+    def test_missing_column_raises(self):
+        # Table created by ILP auto-create used 'timestamp' instead of 'quote_ts'
+        conn = self._make_conn(["timestamp", "underlying", "strike", "right"])
+        with pytest.raises(RuntimeError, match="bootstrap_db"):
+            assert_table_schema(conn, "raw_thetadata_options_chain", ["quote_ts"])
+
+    def test_error_message_names_missing_columns(self):
+        conn = self._make_conn(["timestamp", "underlying"])
+        with pytest.raises(RuntimeError, match="quote_ts"):
+            assert_table_schema(conn, "raw_thetadata_options_chain", ["quote_ts", "strike"])
+
+    def test_query_exception_raises_with_instructions(self):
+        conn = MagicMock()
+        conn.cursor.side_effect = Exception("connection refused")
+        with pytest.raises(RuntimeError, match="bootstrap_db"):
+            assert_table_schema(conn, "raw_thetadata_options_chain", ["quote_ts"])
 
 
 # ---------------------------------------------------------------------------
