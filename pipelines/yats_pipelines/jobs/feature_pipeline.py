@@ -369,7 +369,7 @@ def _write_features(
         has_any = False
         for col in _FEATURE_COLUMNS:
             if col in features:
-                val = features[col].iloc[i] if hasattr(features[col], "iloc") else features[col]
+                val = features[col].iloc[i] if hasattr(features[col], "iloc") else features[col][i]
                 if isinstance(val, (float, np.floating)):
                     if not np.isnan(val):
                         columns[col] = float(val)
@@ -527,7 +527,7 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
                             regime_aligned = regime_df[fname].reindex(
                                 sym_ts, method="ffill"
                             )
-                            all_features[fname] = regime_aligned.values
+                            all_features[fname] = regime_aligned
 
                 written = _write_features(
                     sender, symbol, ohlcv_df_sym["timestamp"],
