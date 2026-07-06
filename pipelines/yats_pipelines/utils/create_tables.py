@@ -123,6 +123,47 @@ CREATE TABLE IF NOT EXISTS raw_fd_earnings (
 ) TIMESTAMP(report_date) PARTITION BY YEAR;
 """
 
+RAW_THETADATA_OPTIONS_CHAIN = """
+CREATE TABLE IF NOT EXISTS raw_thetadata_options_chain (
+    quote_ts TIMESTAMP,
+    underlying SYMBOL,
+    expiry TIMESTAMP,
+    strike DOUBLE,
+    right SYMBOL,
+    bid DOUBLE,
+    ask DOUBLE,
+    last DOUBLE,
+    iv DOUBLE,
+    delta DOUBLE,
+    gamma DOUBLE,
+    theta DOUBLE,
+    vega DOUBLE,
+    rho DOUBLE,
+    open_interest LONG,
+    volume LONG,
+    ingested_at TIMESTAMP,
+    dagster_run_id STRING
+) TIMESTAMP(quote_ts) PARTITION BY DAY;
+"""
+
+RAW_THETADATA_OPTIONS_EOD = """
+CREATE TABLE IF NOT EXISTS raw_thetadata_options_eod (
+    quote_date TIMESTAMP,
+    underlying SYMBOL,
+    expiry TIMESTAMP,
+    strike DOUBLE,
+    right SYMBOL,
+    open DOUBLE,
+    high DOUBLE,
+    low DOUBLE,
+    close DOUBLE,
+    volume LONG,
+    trade_count LONG,
+    ingested_at TIMESTAMP,
+    dagster_run_id STRING
+) TIMESTAMP(quote_date) PARTITION BY MONTH;
+"""
+
 # ---------------------------------------------------------------------------
 # Canonical tables (reconciled, downstream input)
 # ---------------------------------------------------------------------------
@@ -192,6 +233,31 @@ CREATE TABLE IF NOT EXISTS canonical_financial_metrics (
     source_vendor SYMBOL,
     canonicalized_at TIMESTAMP
 ) TIMESTAMP(timestamp) PARTITION BY YEAR;
+"""
+
+CANONICAL_OPTIONS_CHAIN = """
+CREATE TABLE IF NOT EXISTS canonical_options_chain (
+    quote_date TIMESTAMP,
+    underlying SYMBOL,
+    expiry TIMESTAMP,
+    strike DOUBLE,
+    right SYMBOL,
+    bid DOUBLE,
+    ask DOUBLE,
+    last DOUBLE,
+    iv DOUBLE,
+    delta DOUBLE,
+    gamma DOUBLE,
+    theta DOUBLE,
+    vega DOUBLE,
+    rho DOUBLE,
+    open_interest LONG,
+    volume LONG,
+    source_vendor SYMBOL,
+    reconcile_method SYMBOL,
+    canonicalized_at TIMESTAMP,
+    dagster_run_id STRING
+) TIMESTAMP(quote_date) PARTITION BY MONTH;
 """
 
 # ---------------------------------------------------------------------------
@@ -496,10 +562,13 @@ ALL_TABLES: list[str] = [
     RAW_FD_INSIDER_TRADES,
     RAW_FD_ANALYST_ESTIMATES,
     RAW_FD_EARNINGS,
+    RAW_THETADATA_OPTIONS_CHAIN,
+    RAW_THETADATA_OPTIONS_EOD,
     # Canonical
     CANONICAL_EQUITY_OHLCV,
     CANONICAL_FUNDAMENTALS,
     CANONICAL_FINANCIAL_METRICS,
+    CANONICAL_OPTIONS_CHAIN,
     # Features
     FEATURES,
     FEATURE_WATERMARKS,

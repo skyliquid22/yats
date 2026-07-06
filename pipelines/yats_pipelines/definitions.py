@@ -7,6 +7,7 @@ from yats_pipelines.jobs.feature_pipeline import feature_pipeline
 from yats_pipelines.jobs.feature_pipeline_incremental import feature_pipeline_incremental
 from yats_pipelines.jobs.ingest_alpaca import ingest_alpaca
 from yats_pipelines.jobs.ingest_financialdatasets import ingest_financialdatasets
+from yats_pipelines.jobs.ingest_thetadata import ingest_thetadata
 from yats_pipelines.jobs.live_trading import (
     live_trading_health_sensor,
     live_trading_setup,
@@ -26,6 +27,7 @@ defs = Definitions(
     jobs=[
         ingest_alpaca,
         ingest_financialdatasets,
+        ingest_thetadata,
         canonicalize,
         feature_pipeline,
         feature_pipeline_incremental,
