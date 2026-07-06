@@ -9,14 +9,32 @@ PRD §9.3 (lines 723-748) / P3.4.
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+import numpy as np
 from questdb.ingress import Protocol, Sender, TimestampNanos
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_columns(cols: dict) -> dict:
+    """Coerce numpy scalar values to native Python types; drop NaN floats."""
+    out = {}
+    for k, v in cols.items():
+        if isinstance(v, np.floating):
+            fv = float(v)
+            if math.isnan(fv):
+                continue
+            out[k] = fv
+        elif isinstance(v, np.integer):
+            out[k] = int(v)
+        else:
+            out[k] = v
+    return out
 
 
 @dataclass(frozen=True)
@@ -93,7 +111,7 @@ class ExecutionTableWriter:
                         "symbol": sym,
                         "regime_bucket": regime_bucket or "unknown",
                     },
-                    columns={
+                    columns=_coerce_columns({
                         "step": step,
                         "target_weight": target_weights[i],
                         "realized_weight": realized_weights[i],
@@ -105,7 +123,7 @@ class ExecutionTableWriter:
                         "portfolio_value": portfolio_value,
                         "cash": cash,
                         "dagster_run_id": self._dagster_run_id,
-                    },
+                    }),
                     at=ts_nanos,
                 )
             sender.flush()
@@ -154,7 +172,7 @@ class ExecutionTableWriter:
                     "run_id": self._run_id,
                     "mode": self._mode,
                 },
-                columns={
+                columns=_coerce_columns({
                     "fill_rate": fill_rate,
                     "reject_rate": reject_rate,
                     "avg_slippage_bps": avg_slippage,
@@ -166,7 +184,7 @@ class ExecutionTableWriter:
                     "max_drawdown": max_drawdown,
                     "total_return": total_return,
                     "dagster_run_id": self._dagster_run_id,
-                },
+                }),
                 at=ts_nanos,
             )
             sender.flush()

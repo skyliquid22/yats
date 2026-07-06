@@ -11,15 +11,33 @@ All writers use QuestDB ILP (InfluxDB Line Protocol) for writes.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+import numpy as np
 from questdb.ingress import Protocol, Sender, TimestampNanos
 
 from research.execution.broker_alpaca import Fill, OrderResult, OrderSide, OrderStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_columns(cols: dict) -> dict:
+    """Coerce numpy scalar values to native Python types; drop NaN floats."""
+    out = {}
+    for k, v in cols.items():
+        if isinstance(v, np.floating):
+            fv = float(v)
+            if math.isnan(fv):
+                continue
+            out[k] = fv
+        elif isinstance(v, np.integer):
+            out[k] = int(v)
+        else:
+            out[k] = v
+    return out
 
 
 @dataclass(frozen=True)
@@ -137,13 +155,13 @@ class PositionWriter:
                     "mode": self._mode,
                     "symbol": pos.symbol,
                 },
-                columns={
+                columns=_coerce_columns({
                     "quantity": pos.quantity,
                     "avg_entry_price": pos.avg_entry_price,
                     "notional": pos.notional(current_price),
                     "unrealized_pnl": pos.unrealized_pnl(current_price),
                     "realized_pnl": pos.realized_pnl,
-                },
+                }),
                 at=ts,
             )
             sender.flush()
@@ -206,7 +224,7 @@ class OrderWriter:
                     "status": status_str,
                     "risk_check_result": risk_check_result,
                 },
-                columns={
+                columns=_coerce_columns({
                     "order_id": result.client_order_id or result.order_id,
                     "quantity": quantity,
                     "fill_price": fill_price,
@@ -216,7 +234,7 @@ class OrderWriter:
                     "risk_check_details": risk_check_details,
                     "broker_order_id": result.order_id,
                     "dagster_run_id": self._dagster_run_id,
-                },
+                }),
                 at=ts,
             )
             sender.flush()
@@ -349,7 +367,7 @@ class PortfolioStateWriter:
                     "experiment_id": self._experiment_id,
                     "mode": self._mode,
                 },
-                columns={
+                columns=_coerce_columns({
                     "nav": snap.nav,
                     "cash": snap.cash,
                     "gross_exposure": snap.gross_exposure,
@@ -360,7 +378,7 @@ class PortfolioStateWriter:
                     "peak_nav": snap.peak_nav,
                     "drawdown": snap.drawdown,
                     "dagster_run_id": self._dagster_run_id,
-                },
+                }),
                 at=ts,
             )
             sender.flush()

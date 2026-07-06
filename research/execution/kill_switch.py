@@ -14,14 +14,32 @@ from __future__ import annotations
 
 import enum
 import logging
+import math
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+import numpy as np
 from questdb.ingress import Protocol, Sender, TimestampNanos
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_columns(cols: dict) -> dict:
+    """Coerce numpy scalar values to native Python types; drop NaN floats."""
+    out = {}
+    for k, v in cols.items():
+        if isinstance(v, np.floating):
+            fv = float(v)
+            if math.isnan(fv):
+                continue
+            out[k] = fv
+        elif isinstance(v, np.integer):
+            out[k] = int(v)
+        else:
+            out[k] = v
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -380,10 +398,10 @@ class KillSwitchStateMachine:
                         "action": event.action.value,
                         "triggered_by": event.triggered_by,
                     },
-                    columns={
+                    columns=_coerce_columns({
                         "details": event.details,
                         "resolved": False,
-                    },
+                    }),
                     at=ts,
                 )
                 sender.flush()
@@ -408,12 +426,12 @@ class KillSwitchStateMachine:
                         "action": "resume",
                         "triggered_by": resolved_by,
                     },
-                    columns={
+                    columns=_coerce_columns({
                         "details": '{"action": "resolved"}',
                         "resolved": True,
                         "resolved_by": resolved_by,
                         "resolved_at": TimestampNanos(int(now.timestamp() * 1_000_000_000)),
-                    },
+                    }),
                     at=ts,
                 )
                 sender.flush()
@@ -438,11 +456,11 @@ class KillSwitchStateMachine:
                         "mode": self._mode,
                         "result_status": "ok",
                     },
-                    columns={
+                    columns=_coerce_columns({
                         "parameters": details,
                         "result_summary": f"state={self._state.value}",
                         "duration_ms": 0,
-                    },
+                    }),
                     at=ts,
                 )
                 sender.flush()
