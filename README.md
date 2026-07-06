@@ -58,6 +58,44 @@ python -c "from pipelines.yats_pipelines.utils.create_tables import create_all_t
 dagster dev -m pipelines.yats_pipelines.definitions
 ```
 
+## Local Development
+
+### One-command stack
+
+```bash
+# 1. Start QuestDB (Docker Desktop must be running)
+docker compose up -d
+
+# 2. Wait for QuestDB to be ready, then create all tables
+python scripts/bootstrap_db.py
+
+# 3. Run the full test suite (13 live-DB promotion tests + 759 unit tests)
+PYTHONPATH=.:pipelines uv run --with pytest pytest tests -q
+
+# 4. Start Dagster UI (pipelines only — not containerized)
+PYTHONPATH=.:pipelines uv run dagster dev -m pipelines.yats_pipelines.definitions
+```
+
+### Ports
+
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| 9000 | HTTP | QuestDB web console |
+| 8812 | PG wire | psycopg2 reads |
+| 9009 | ILP (TCP) | questdb.ingress writes |
+
+### Test gating
+
+Tests that require a live QuestDB are marked `@pytest.mark.live_db`. They
+**skip** automatically when port 8812 is unreachable — so `pytest tests` is
+always safe to run without the stack. Bring the stack up to run them:
+
+```bash
+docker compose up -d && python scripts/bootstrap_db.py
+PYTHONPATH=.:pipelines uv run --with pytest pytest tests -q
+# → 772 passed when stack is up; 759 passed + 13 skipped when stack is down
+```
+
 ## Quickstart
 
 YATS tools are invoked via MCP. Here's the typical workflow:

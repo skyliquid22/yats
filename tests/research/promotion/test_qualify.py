@@ -38,6 +38,10 @@ def _write_metrics(exp_dir: Path, metrics: dict) -> None:
         "hierarchy_enabled": False,
     }))
 
+    logs_dir = exp_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / "run_summary.json").write_text(json.dumps({"status": "completed"}))
+
 
 def _good_metrics(sharpe=1.5, max_drawdown=-0.05, turnover=0.05):
     return {
@@ -101,6 +105,7 @@ class TestLoadMetrics:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.live_db
 class TestRunQualification:
     @patch("research.promotion.qualify.load_execution_metrics")
     def test_pass_scenario(self, mock_exec, tmp_path):
