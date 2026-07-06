@@ -283,6 +283,35 @@ def evaluate_constraint_gates(
     return results
 
 
+def evaluate_sweep_dsr_gate(
+    candidate_metrics: dict[str, Any],
+    *,
+    dsr_threshold: float = 0.05,
+) -> list[GateResult]:
+    """Evaluate sweep DSR gate for sweep-originated experiments (step 6).
+
+    If the candidate metrics include a 'sweep.dsr' field (written by the
+    sweep aggregation pipeline), gates on DSR > dsr_threshold.
+
+    Returns an empty list when the candidate did not originate from a sweep
+    (no 'sweep.dsr' in metrics).
+    """
+    sweep_dsr = _extract_metric(candidate_metrics, "sweep.dsr")
+    if sweep_dsr is None:
+        return []  # not sweep-originated; gate does not apply
+
+    passed = sweep_dsr >= dsr_threshold
+    return [GateResult(
+        name="sweep_dsr",
+        passed=passed,
+        value=sweep_dsr,
+        baseline=None,
+        threshold=dsr_threshold,
+        gate_type="soft",
+        detail=f"sweep_dsr={sweep_dsr:.4f} {'≥' if passed else '<'} threshold={dsr_threshold}",
+    )]
+
+
 def evaluate_artifact_gates(
     experiment_path: str | None,
 ) -> list[GateResult]:

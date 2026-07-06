@@ -13,6 +13,7 @@ from research.promotion.criteria import (
     evaluate_artifact_gates,
     evaluate_constraint_gates,
     evaluate_regression_gates,
+    evaluate_sweep_dsr_gate,
     _extract_metric,
 )
 
@@ -235,3 +236,41 @@ class TestArtifactGates:
         results = evaluate_artifact_gates(str(tmp_path))
         assert not results[0].passed
         assert "run_summary.json" in results[0].detail
+
+
+# ---------------------------------------------------------------------------
+# evaluate_sweep_dsr_gate
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateSweepDsrGate:
+    def test_no_sweep_field_returns_empty(self):
+        metrics = {"performance": {"sharpe": 1.5}}
+        results = evaluate_sweep_dsr_gate(metrics)
+        assert results == []
+
+    def test_sweep_dsr_above_threshold_passes(self):
+        metrics = {"sweep": {"dsr": 0.9}}
+        results = evaluate_sweep_dsr_gate(metrics)
+        assert len(results) == 1
+        assert results[0].passed
+        assert results[0].name == "sweep_dsr"
+        assert results[0].gate_type == "soft"
+
+    def test_sweep_dsr_below_threshold_fails(self):
+        metrics = {"sweep": {"dsr": 0.02}}
+        results = evaluate_sweep_dsr_gate(metrics)
+        assert len(results) == 1
+        assert not results[0].passed
+
+    def test_sweep_dsr_at_threshold_passes(self):
+        metrics = {"sweep": {"dsr": 0.05}}
+        results = evaluate_sweep_dsr_gate(metrics, dsr_threshold=0.05)
+        assert results[0].passed
+
+    def test_custom_threshold(self):
+        metrics = {"sweep": {"dsr": 0.5}}
+        high_threshold = evaluate_sweep_dsr_gate(metrics, dsr_threshold=0.8)
+        low_threshold = evaluate_sweep_dsr_gate(metrics, dsr_threshold=0.3)
+        assert not high_threshold[0].passed
+        assert low_threshold[0].passed
