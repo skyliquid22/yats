@@ -36,6 +36,8 @@ class EvaluationSplitConfig:
     train_ratio: float
     test_ratio: float
     test_window_months: int | None = None
+    label_horizon: int = 1       # bars to purge from train-end (López de Prado §5)
+    embargo_pct: float = 0.01    # fraction of n to embargo on each side of the split
 
     _VALID_WINDOWS = {1, 3, 4, 6, 12}
 
@@ -55,6 +57,10 @@ class EvaluationSplitConfig:
                 f"test_window_months must be one of {sorted(self._VALID_WINDOWS)}, "
                 f"got {self.test_window_months}"
             )
+        if self.label_horizon < 0:
+            raise ValueError("label_horizon must be >= 0")
+        if self.embargo_pct < 0:
+            raise ValueError("embargo_pct must be >= 0")
 
 
 @dataclass(frozen=True)

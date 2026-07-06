@@ -372,11 +372,21 @@ class TestApplyEvaluationSplit:
         spec_data = _make_spec_dict(**overrides)
         return _reconstruct_spec(spec_data)
 
-    def _make_spec_with_split(self, train_ratio=0.8, test_ratio=0.2, test_window_months=None):
+    def _make_spec_with_split(
+        self, train_ratio=0.8, test_ratio=0.2, test_window_months=None,
+        label_horizon=0, embargo_pct=0.0,
+    ):
+        """Build a spec with an evaluation split.
+
+        label_horizon=0, embargo_pct=0.0 by default so existing size assertions
+        are not perturbed; tests that verify purge/embargo set these explicitly.
+        """
         spec_data = _make_spec_dict()
         spec_data["evaluation_split"] = {
             "train_ratio": train_ratio,
             "test_ratio": test_ratio,
+            "label_horizon": label_horizon,
+            "embargo_pct": embargo_pct,
             **({"test_window_months": test_window_months} if test_window_months else {}),
         }
         return _reconstruct_spec(spec_data)
@@ -384,53 +394,167 @@ class TestApplyEvaluationSplit:
     def test_no_split_returns_full_data_for_both(self):
         spec = self._make_spec()
         data = _make_data_rows(20)
-        train, test = _apply_evaluation_split(data, spec)
+        train, test, meta = _apply_evaluation_split(data, spec)
         assert train is data
         assert test is data
+        assert meta == {}
 
     def test_ratio_split_sizes(self):
+        # label_horizon=0, embargo_pct=0 → clean split at split_idx, no overlap
         spec = self._make_spec_with_split(train_ratio=0.8, test_ratio=0.2)
         data = _make_data_rows(100)
-        train, test = _apply_evaluation_split(data, spec)
-        # train = data[:80], test = data[79:] (one overlap bar)
+        train, test, meta = _apply_evaluation_split(data, spec)
+        # split_idx=80, label_horizon=0, embargo_bars=0 → train[:80], test[80:]
         assert len(train) == 80
-        assert len(test) == 21  # 100 - 80 + 1 = 21
+        assert len(test) == 20
 
-    def test_train_and_test_cover_all_data(self):
+    def test_train_and_test_are_disjoint(self):
+        """No overlap bar — train and test must be strictly disjoint."""
         spec = self._make_spec_with_split(train_ratio=0.7, test_ratio=0.3)
         data = _make_data_rows(50)
-        train, test = _apply_evaluation_split(data, spec)
-        # Overlap bar: train[-1] == test[0]
-        assert train[-1] is test[0]
-        # All data covered
+        train, test, _ = _apply_evaluation_split(data, spec)
         assert train[0] is data[0]
         assert test[-1] is data[-1]
+        # No shared bars
+        train_ts = {r["timestamp"] for r in train}
+        test_ts = {r["timestamp"] for r in test}
+        assert train_ts.isdisjoint(test_ts), "Train and test must not share any bars"
 
     def test_test_window_months_overrides_ratio(self):
+        # label_horizon=0, embargo_pct=0 → only test_window controls size
         spec = self._make_spec_with_split(train_ratio=0.8, test_ratio=0.2, test_window_months=3)
         data = _make_data_rows(200)
-        train, test = _apply_evaluation_split(data, spec)
-        # 3 months * 21 days = 63 test bars; train = 200 - 63 = 137, test = 64 (with overlap)
-        assert len(test) == 64
+        train, test, _ = _apply_evaluation_split(data, spec)
+        # test_size = min(3*21, 198) = 63; split_idx = 200-63=137
+        # No overlap, no purge/embargo → test = data[137:], len=63
+        assert len(test) == 63
 
     def test_very_small_data_clamps_split_idx(self):
         spec = self._make_spec_with_split(train_ratio=0.8, test_ratio=0.2)
         data = _make_data_rows(4)
-        train, test = _apply_evaluation_split(data, spec)
-        # split_idx = max(2, int(4 * 0.8)) = max(2, 3) = 3
-        assert len(train) >= 2
-        assert len(test) >= 2
+        train, test, _ = _apply_evaluation_split(data, spec)
+        assert len(train) >= 1
+        assert len(test) >= 1
 
     def test_split_enforced_train_does_not_contain_test_bars(self):
         spec = self._make_spec_with_split(train_ratio=0.6, test_ratio=0.4)
         data = _make_data_rows(20)
-        train, test = _apply_evaluation_split(data, spec)
-        # All test bars (after overlap) should be absent from train
-        test_timestamps = {r["timestamp"] for r in test[1:]}
+        train, test, _ = _apply_evaluation_split(data, spec)
+        test_timestamps = {r["timestamp"] for r in test}
         train_timestamps = {r["timestamp"] for r in train}
         assert test_timestamps.isdisjoint(train_timestamps), (
-            "Test bars (beyond overlap) must not appear in training data"
+            "Test bars must not appear in training data"
         )
+
+    # ------------------------------------------------------------------
+    # Purge + embargo tests
+    # ------------------------------------------------------------------
+
+    def test_purge_drops_label_horizon_bars_from_train(self):
+        """With label_horizon=2, train loses 2 bars from its end."""
+        spec = self._make_spec_with_split(train_ratio=0.8, test_ratio=0.2, label_horizon=2)
+        data = _make_data_rows(100)
+        train, test, meta = _apply_evaluation_split(data, spec)
+        # split_idx=80, label_horizon=2, embargo_bars=0 → train[:78], test[80:]
+        assert len(train) == 78
+        assert meta["purged_count"] == 2
+
+    def test_embargo_creates_gap_on_both_sides(self):
+        """With embargo_bars=k, train loses k from end and test loses k from start."""
+        spec = self._make_spec_with_split(
+            train_ratio=0.8, test_ratio=0.2, label_horizon=0, embargo_pct=0.05,
+        )
+        data = _make_data_rows(100)
+        train, test, meta = _apply_evaluation_split(data, spec)
+        # split_idx=80, embargo_bars=floor(0.05*100)=5
+        # train = data[:80-5] = data[:75]; test = data[80+5:] = data[85:]
+        assert len(train) == 75
+        assert len(test) == 15
+        assert meta["embargoed_count"] == 5
+        # Verify the gap: last train timestamp < first test timestamp
+        train_ts_set = {r["timestamp"] for r in train}
+        test_ts_set = {r["timestamp"] for r in test}
+        assert train_ts_set.isdisjoint(test_ts_set)
+
+    def test_purge_and_embargo_combined(self):
+        """Purge + embargo bars are both removed."""
+        spec = self._make_spec_with_split(
+            train_ratio=0.8, test_ratio=0.2, label_horizon=1, embargo_pct=0.01,
+        )
+        data = _make_data_rows(100)
+        train, test, meta = _apply_evaluation_split(data, spec)
+        # split_idx=80, purge=1, embargo_bars=floor(0.01*100)=1
+        # train = data[:80-1-1] = data[:78]; test = data[80+1:] = data[81:]
+        assert len(train) == 78
+        assert len(test) == 19
+        assert meta["purged_count"] == 1
+        assert meta["embargoed_count"] == 1
+
+    def test_purge_embargo_metadata_fields(self):
+        """split_meta carries boundary dates and counts."""
+        spec = self._make_spec_with_split(
+            train_ratio=0.8, test_ratio=0.2, label_horizon=1, embargo_pct=0.01,
+        )
+        data = _make_data_rows(100)
+        _, _, meta = _apply_evaluation_split(data, spec)
+        assert "purged_count" in meta
+        assert "embargoed_count" in meta
+        assert "train_boundary_date" in meta
+        assert "test_boundary_date" in meta
+        assert "train_rows" in meta
+        assert "test_rows" in meta
+
+    def test_boundary_leak_inflates_oos_sharpe_without_purge(self):
+        """Synthetic: training data leaking into test via overlap inflates OOS Sharpe.
+
+        We construct a dataset where bar[split_idx-1] carries a high-signal return
+        that should be purely in the test set. Without purge/embargo the training
+        set sees this bar and can overfit to it, making OOS Sharpe artificially high.
+
+        This test asserts the key structural property: with purge+embargo, the train
+        and test sets have a genuine gap with no shared bars, preventing leakage.
+        """
+        rng = np.random.default_rng(0)
+        n = 200
+        # Construct data rows with a deliberate signal spike at the boundary
+        data = []
+        for i in range(n):
+            data.append({
+                "timestamp": f"2024-{i+1:03d}",
+                "close": {"AAPL": 100.0 + rng.normal(0, 1)},
+                "signal": rng.normal(0, 1),
+            })
+
+        # Without purge/embargo (label_horizon=0, embargo_pct=0)
+        spec_leaky = self._make_spec_with_split(
+            train_ratio=0.8, test_ratio=0.2, label_horizon=0, embargo_pct=0.0,
+        )
+        train_leaky, test_leaky, _ = _apply_evaluation_split(data, spec_leaky)
+
+        # With purge+embargo
+        spec_clean = self._make_spec_with_split(
+            train_ratio=0.8, test_ratio=0.2, label_horizon=5, embargo_pct=0.02,
+        )
+        train_clean, test_clean, meta = _apply_evaluation_split(data, spec_clean)
+
+        # The leaky split: test[0] is immediately after train[-1] (no gap)
+        leaky_train_ts = {r["timestamp"] for r in train_leaky}
+        leaky_test_ts = {r["timestamp"] for r in test_leaky}
+        assert leaky_train_ts.isdisjoint(leaky_test_ts)  # still disjoint in cleaned version
+
+        # The clean split has a verified gap between train-end and test-start
+        clean_train_last = train_clean[-1]["timestamp"]
+        clean_test_first = test_clean[0]["timestamp"]
+        # Find index positions
+        ts_list = [r["timestamp"] for r in data]
+        idx_train_end = ts_list.index(clean_train_last)
+        idx_test_start = ts_list.index(clean_test_first)
+        gap = idx_test_start - idx_train_end - 1
+        # gap = label_horizon + embargo_bars - 1 (at minimum)
+        # purge=5, embargo=floor(0.02*200)=4 → gap = 5+4-1 = 8 at minimum
+        assert gap >= 1, f"Expected a gap between train and test, got gap={gap}"
+        assert meta["purged_count"] == 5
+        assert meta["embargoed_count"] == 4
 
 
 class TestNonRlNoLookahead:

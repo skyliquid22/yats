@@ -226,3 +226,113 @@ class TestEvaluateToJson:
             assert "equity_curve" in ts
             assert "drawdown_series" in ts
             assert "weight_history" in ts
+
+
+# ---------------------------------------------------------------------------
+# PSR / DSR tests
+# ---------------------------------------------------------------------------
+
+class TestProbabilisticSharpe:
+    def test_psr_present_in_performance(self):
+        """evaluate() must include 'psr' in the performance section."""
+        spec = _make_spec()
+        weights, returns = _make_test_data()
+        result = evaluate(spec, weights, returns)
+        assert "psr" in result["performance"], "PSR must be present in performance section"
+
+    def test_psr_z_score_present(self):
+        spec = _make_spec()
+        weights, returns = _make_test_data()
+        result = evaluate(spec, weights, returns)
+        assert "psr_z_score" in result["performance"]
+
+    def test_deflated_sharpe_present_as_none_without_trials(self):
+        """Without num_trials in split_metadata, deflated_sharpe is None."""
+        spec = _make_spec()
+        weights, returns = _make_test_data()
+        result = evaluate(spec, weights, returns)
+        assert "deflated_sharpe" in result["performance"]
+        assert result["performance"]["deflated_sharpe"] is None
+
+    def test_psr_bounds(self):
+        """PSR must be in (0, 1)."""
+        spec = _make_spec()
+        weights, returns = _make_test_data()
+        result = evaluate(spec, weights, returns)
+        psr = result["performance"]["psr"]
+        assert 0.0 <= psr <= 1.0, f"PSR must be in [0, 1], got {psr}"
+
+    def test_psr_higher_for_better_returns(self):
+        """Strategy with higher returns should have higher PSR."""
+        spec = _make_spec()
+        n, n_sym = 252, 2
+        dates = pd.bdate_range("2023-01-01", periods=n)
+        syms = [f"SYM{i}" for i in range(n_sym)]
+        weights = pd.DataFrame(np.full((n, n_sym), 0.5), index=dates, columns=syms)
+
+        rng = np.random.default_rng(42)
+        # Strong positive returns
+        good_returns = pd.DataFrame(
+            rng.normal(0.003, 0.01, (n, n_sym)), index=dates, columns=syms
+        )
+        # Near-zero returns
+        weak_returns = pd.DataFrame(
+            rng.normal(0.0, 0.01, (n, n_sym)), index=dates, columns=syms
+        )
+
+        result_good = evaluate(spec, weights, good_returns)
+        result_weak = evaluate(spec, weights, weak_returns)
+
+        assert result_good["performance"]["psr"] > result_weak["performance"]["psr"], (
+            "Higher-return strategy should have higher PSR"
+        )
+
+    def test_dsr_present_when_num_trials_provided(self):
+        """When split_metadata includes num_trials, deflated_sharpe must be non-None."""
+        spec = _make_spec()
+        weights, returns = _make_test_data()
+        result = evaluate(spec, weights, returns, split_metadata={"num_trials": 10})
+        assert result["performance"]["deflated_sharpe"] is not None, (
+            "deflated_sharpe must be computed when num_trials is in split_metadata"
+        )
+
+    def test_split_metadata_embedded_in_metrics(self):
+        """split_metadata fields must appear in the metadata section."""
+        spec = _make_spec()
+        weights, returns = _make_test_data()
+        meta = {"purged_count": 3, "embargoed_count": 2, "train_boundary_date": "2023-09-01"}
+        result = evaluate(spec, weights, returns, split_metadata=meta)
+        for key, val in meta.items():
+            assert result["metadata"].get(key) == val, (
+                f"metadata.{key} missing or wrong: expected {val!r}"
+            )
+
+    def test_psr_fixture_value(self):
+        """PSR on a fixed fixture must match the analytical formula."""
+        from compute.stats.deflated_sharpe import probabilistic_sharpe_ratio
+        from scipy import stats as sp_stats
+
+        # Construct a fixture with known skew/kurt = 0 (normal returns)
+        n = 252
+        rng = np.random.default_rng(7)
+        rets = rng.normal(0.001, 0.01, n)  # known mean and std
+
+        observed_sharpe = float(rets.mean() / rets.std(ddof=1) * np.sqrt(252))
+        skew = float(sp_stats.skew(rets))
+        kurt = float(sp_stats.kurtosis(rets))
+
+        result = probabilistic_sharpe_ratio(
+            observed_sharpe=observed_sharpe,
+            n_observations=n,
+            returns_skewness=skew,
+            returns_kurtosis=kurt,
+        )
+
+        # Manual formula: de-annualize, compute SE, CDF
+        sr_daily = observed_sharpe / np.sqrt(252)
+        variance = (1 - skew * sr_daily + ((kurt - 1) / 4) * sr_daily**2) / (n - 1)
+        expected_z = sr_daily / np.sqrt(variance)
+        expected_psr = float(sp_stats.norm.cdf(expected_z))
+
+        assert abs(result["psr"] - expected_psr) < 1e-10
+        assert abs(result["z_score"] - expected_z) < 1e-10

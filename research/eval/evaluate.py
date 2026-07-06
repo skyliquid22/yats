@@ -15,7 +15,9 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy import stats as sp_stats
 
+from compute.stats.deflated_sharpe import probabilistic_sharpe_ratio
 from research.eval.metrics import (
     compute_performance_metrics,
     compute_trading_metrics,
@@ -45,6 +47,7 @@ def evaluate(
     regime_features: pd.DataFrame | None = None,
     data_hash: str | None = None,
     feature_versions: dict[str, str] | None = None,
+    split_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run deterministic evaluation pipeline.
 
@@ -55,6 +58,8 @@ def evaluate(
         regime_features: Optional DataFrame with regime feature columns (market_vol_20d, etc.).
         data_hash: Optional hash of the input data for reproducibility tracking.
         feature_versions: Optional dict of feature name → version for lineage.
+        split_metadata: Optional dict with purge/embargo metadata from _apply_evaluation_split.
+            When provided, merged into the metadata section and used for DSR (if num_trials set).
 
     Returns:
         Complete metrics dict matching PRD §8.3 schema, ready for JSON serialization.
@@ -71,6 +76,30 @@ def evaluate(
 
     # --- Performance ---
     perf = compute_performance_metrics(portfolio_returns, equity_curve)
+
+    # --- Overfitting-adjusted Sharpe (single-path PSR; optional DSR) ---
+    ret_vals = portfolio_returns.values
+    skew = float(sp_stats.skew(ret_vals)) if len(ret_vals) >= 3 else 0.0
+    kurt = float(sp_stats.kurtosis(ret_vals)) if len(ret_vals) >= 4 else 0.0  # excess
+
+    psr_result = probabilistic_sharpe_ratio(
+        observed_sharpe=perf.sharpe,
+        n_observations=len(portfolio_returns),
+        returns_skewness=skew,
+        returns_kurtosis=kurt,
+    )
+
+    num_trials = (split_metadata or {}).get("num_trials")
+    dsr_result: dict[str, Any] | None = None
+    if num_trials is not None:
+        from compute.stats.deflated_sharpe import deflated_sharpe_ratio
+        dsr_result = deflated_sharpe_ratio(
+            observed_sharpe=perf.sharpe,
+            num_trials=num_trials,
+            returns_skewness=skew,
+            returns_kurtosis=kurt,
+            n_observations=len(portfolio_returns),
+        )
 
     # --- Trading ---
     trading = compute_trading_metrics(weights, daily_pnl)
@@ -111,14 +140,25 @@ def evaluate(
     # --- Assemble output ---
     data_range = _data_range(portfolio_returns)
 
+    perf_dict = asdict(perf)
+    perf_dict["psr"] = psr_result["psr"]
+    perf_dict["psr_z_score"] = psr_result["z_score"]
+    perf_dict["deflated_sharpe"] = (
+        dsr_result["deflated_sharpe_ratio"] if dsr_result is not None else None
+    )
+
+    metadata: dict[str, Any] = {
+        "experiment_id": spec.experiment_id,
+        "spec_path": None,  # Set by caller if saving from file
+        "data_range": data_range,
+        "feature_set_version": spec.feature_set,
+    }
+    if split_metadata:
+        metadata.update(split_metadata)
+
     result: dict[str, Any] = {
-        "metadata": {
-            "experiment_id": spec.experiment_id,
-            "spec_path": None,  # Set by caller if saving from file
-            "data_range": data_range,
-            "feature_set_version": spec.feature_set,
-        },
-        "performance": asdict(perf),
+        "metadata": metadata,
+        "performance": perf_dict,
         "trading": asdict(trading),
         "safety": asdict(safety),
         "performance_by_regime": performance_by_regime,
@@ -147,12 +187,14 @@ def evaluate_to_json(
     data_hash: str | None = None,
     feature_versions: dict[str, str] | None = None,
     timeseries_path: Path | str | None = None,
+    split_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run evaluation and write metrics.json (and optionally timeseries.json).
 
     Args:
         output_path: Path to write metrics.json.
         timeseries_path: Optional path to write timeseries.json (equity, drawdown, weights).
+        split_metadata: Optional purge/embargo metadata to embed in metrics.json.
         Other args: same as evaluate().
 
     Returns:
@@ -165,6 +207,7 @@ def evaluate_to_json(
         regime_features=regime_features,
         data_hash=data_hash,
         feature_versions=feature_versions,
+        split_metadata=split_metadata,
     )
 
     output_path = Path(output_path)
