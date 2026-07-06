@@ -4,13 +4,27 @@ import { createHash } from "crypto";
 export class DagsterClient {
   constructor(private readonly url: string = "http://localhost:3000/graphql") {}
 
+  // Canonical JSON serialization: recursively sorts object keys so that
+  // {a:1,b:2} and {b:2,a:1} produce the same string. Arrays preserve order.
+  // Using Array.isArray replacer would silently drop nested keys — this is correct.
+  private static canonicalize(val: unknown): string {
+    if (val === null || typeof val !== "object" || Array.isArray(val)) {
+      return JSON.stringify(val);
+    }
+    const obj = val as Record<string, unknown>;
+    const parts = Object.keys(obj)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${DagsterClient.canonicalize(obj[k])}`);
+    return `{${parts.join(",")}}`;
+  }
+
   /**
    * Compute a deterministic run ID from job name, run config, and invoker.
    * Retrying the same call (same params) produces the same run ID, preventing
    * duplicate rows from partial-retry scenarios (PRD §20.3).
    */
   makeRunId(jobName: string, runConfig: Record<string, unknown>, invoker: string): string {
-    const stable = JSON.stringify({ jobName, runConfig, invoker }, Object.keys({ jobName, runConfig, invoker }).sort());
+    const stable = DagsterClient.canonicalize({ invoker, jobName, runConfig });
     return createHash("sha256").update(stable).digest("hex").slice(0, 32);
   }
 
@@ -111,7 +125,8 @@ export class DagsterClient {
       return (runsOrError.results as { runId: string; jobName: string }[]) ?? [];
     }
 
-    return [];
+    const errMsg = (runsOrError as { message?: string })?.message ?? `unexpected type ${runsOrError?.__typename}`;
+    throw new Error(`Dagster listSuccessRuns failed: ${errMsg}`);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -123,9 +138,13 @@ export class DagsterClient {
     });
 
     if (!res.ok) {
-      throw new Error(`Dagster GraphQL error: ${res.status} ${res.statusText}`);
+      throw new Error(`Dagster GraphQL HTTP error: ${res.status} ${res.statusText}`);
     }
 
-    return res.json() as Promise<Record<string, unknown>>;
+    const json = (await res.json()) as { data?: Record<string, unknown>; errors?: { message: string }[] };
+    if (json.errors?.length) {
+      throw new Error(`Dagster GraphQL errors: ${json.errors.map((e) => e.message).join("; ")}`);
+    }
+    return json;
   }
 }
