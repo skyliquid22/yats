@@ -233,7 +233,7 @@ def _compute_cross_sectional_features(
     # Compute per-symbol features
     for symbol, ohlcv_df in ohlcv_by_symbol.items():
         feat_df = pd.DataFrame(index=ohlcv_df.index)
-        feat_df["timestamp"] = ohlcv_df["timestamp"].values
+        feat_df["timestamp"] = ohlcv_df["timestamp"]
         feat_df["symbol"] = symbol
 
         for fname in per_symbol_cs:

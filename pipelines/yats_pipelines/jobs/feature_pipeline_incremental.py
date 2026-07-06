@@ -645,7 +645,7 @@ def _compute_regime_incremental(
             for fname in fs.regime:
                 if fname in regime_new.columns:
                     # Reindex regime to symbol timestamps with forward-fill
-                    aligned = regime_df[fname].reindex(new_ts.values, method="ffill")
+                    aligned = regime_df[fname].reindex(new_ts, method="ffill")
                     regime_features[fname] = pd.Series(aligned.values)
 
             new_ts_reset = new_ts.reset_index(drop=True)
