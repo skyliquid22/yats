@@ -20,6 +20,7 @@ import psycopg2
 from research.execution.broker_alpaca import (
     AlpacaBrokerAdapter,
     BrokerError,
+    Fill,
     OrderResult,
     OrderSide,
     OrderStatus,
@@ -94,24 +95,16 @@ def _reconstruct_positions_from_fills(
         if sym not in positions:
             positions[sym] = Position(symbol=sym)
 
-        pos = positions[sym]
         side = OrderSide.BUY if side_str == "buy" else OrderSide.SELL
-
-        if side == OrderSide.BUY:
-            new_cost = fill_qty * fill_price
-            pos.cost_basis += new_cost
-            pos.quantity += fill_qty
-            if pos.quantity > 0:
-                pos.avg_entry_price = pos.cost_basis / pos.quantity
-        else:
-            if pos.quantity > 0 and pos.avg_entry_price > 0:
-                sold_qty = min(fill_qty, pos.quantity)
-                pnl = sold_qty * (fill_price - pos.avg_entry_price)
-                pos.realized_pnl += pnl
-                pos.cost_basis -= sold_qty * pos.avg_entry_price
-            pos.quantity -= fill_qty
-
-        pos.realized_pnl -= (fees or 0.0)
+        fill = Fill(
+            symbol=sym,
+            side=side,
+            filled_qty=fill_qty,
+            filled_avg_price=fill_price,
+            filled_at=datetime(1970, 1, 1, tzinfo=timezone.utc),
+            commission=fees or 0.0,
+        )
+        positions[sym].apply_fill(fill)
 
     cur.close()
 
@@ -281,7 +274,9 @@ def reconstruct_nav(
                 cash += trade_value
             cash -= (fees or 0.0)
 
-    # Recompute gross/net exposure from authoritative positions
+    # Recompute gross/net exposure from authoritative positions.
+    # Positions are valued at avg_entry_price (market prices unavailable at
+    # recovery time); the next NAV snapshot corrects this once bars arrive.
     gross_exposure = 0.0
     net_exposure = 0.0
     for pos in positions.values():
@@ -289,7 +284,7 @@ def reconstruct_nav(
         gross_exposure += abs(notional)
         net_exposure += notional
 
-    nav = gross_exposure + cash
+    nav = net_exposure + cash
     if nav > peak_nav:
         peak_nav = nav
 
@@ -313,7 +308,10 @@ def reconstruct_nav(
 
 
 def _compute_snapshot_from_positions(positions: dict[str, Position]) -> PortfolioSnapshot:
-    """Compute a minimal snapshot from positions alone (no prior state)."""
+    """Compute a minimal snapshot from positions alone (no prior state).
+
+    Positions are valued at avg_entry_price since market prices are unavailable.
+    """
     gross_exposure = 0.0
     net_exposure = 0.0
     for pos in positions.values():
@@ -321,14 +319,15 @@ def _compute_snapshot_from_positions(positions: dict[str, Position]) -> Portfoli
         gross_exposure += abs(notional)
         net_exposure += notional
 
+    nav = net_exposure  # cash unknown; corrected on next snapshot after bars arrive
     return PortfolioSnapshot(
-        nav=gross_exposure,
+        nav=nav,
         cash=0.0,
         gross_exposure=gross_exposure,
         net_exposure=net_exposure,
-        leverage=1.0 if gross_exposure > 0 else 0.0,
+        leverage=gross_exposure / nav if nav > 0 else 0.0,
         num_positions=len(positions),
-        peak_nav=gross_exposure,
+        peak_nav=nav,
     )
 
 
