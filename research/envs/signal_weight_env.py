@@ -139,10 +139,12 @@ class SignalWeightEnv:
 
         row = self._data[min(self._step_idx, len(self._data) - 1)]
 
-        # 4. Compute portfolio value change from price changes
+        # 4. Compute portfolio value change from price changes.
+        # Use target_weights (the action decided THIS step from the current observation)
+        # so training reward matches the eval PnL convention: weight[t] earns r(t→t+1).
         prev_row = self._data[self._step_idx - 1]
         returns = self._compute_returns(prev_row, row)
-        port_return = np.dot(self._weights, returns)
+        port_return = np.dot(target_weights, returns)
         new_value = self._portfolio_value * (1.0 + port_return)
 
         # 5. Transaction costs
