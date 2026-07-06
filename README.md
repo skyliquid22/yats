@@ -84,6 +84,26 @@ PYTHONPATH=.:pipelines uv run dagster dev -m pipelines.yats_pipelines.definition
 | 8812 | PG wire | psycopg2 reads |
 | 9009 | ILP (TCP) | questdb.ingress writes |
 
+### ThetaData terminal
+
+ThetaData v2 REST is served by a local Java process (Theta Terminal) that proxies
+requests upstream with your subscriber credentials. No auth headers are needed in
+REST calls — authentication happens at terminal startup.
+
+```bash
+# Download ThetaTerminal.jar from https://thetadata.net/
+# Run it with your ThetaData credentials:
+java -jar ThetaTerminal.jar your@email.com yourpassword
+
+# The terminal listens on port 25510 (default).
+# Verify it's running:
+curl http://127.0.0.1:25510/v2/list/roots/option
+```
+
+`THETADATA_API_KEY` in `.env` is your subscriber password used to launch the terminal,
+not an API key sent in REST requests. Set `THETADATA_BASE_URL` only if the terminal
+runs on a non-default address.
+
 ### Test gating
 
 Tests that require a live QuestDB are marked `@pytest.mark.live_db`. They
