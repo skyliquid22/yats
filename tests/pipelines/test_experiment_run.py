@@ -90,6 +90,7 @@ _install_mocks()
 
 from pipelines.yats_pipelines.jobs.experiment_run import (
     _build_returns_df,
+    _merge_closes_into_features,
     _reconstruct_spec,
     _dataframe_to_env_rows,
     _rollout_non_rl_policy,
@@ -376,3 +377,135 @@ class TestWriteRunArtifacts:
         assert summary["experiment_id"] == "test_exp"
         assert summary["dagster_run_id"] == "run-123"
         assert "rollout_json" in summary["artifacts"]
+
+
+# ---------------------------------------------------------------------------
+# _merge_closes_into_features tests
+# ---------------------------------------------------------------------------
+
+
+class TestMergeClosesIntoFeatures:
+    def _features_df(self, rows):
+        return pd.DataFrame(rows)
+
+    def _closes_df(self, rows):
+        return pd.DataFrame(rows)
+
+    def test_close_column_present_in_merged_result(self):
+        features = self._features_df([
+            {"timestamp": "2024-01-01", "symbol": "AAPL", "sma_20d": 0.5},
+            {"timestamp": "2024-01-01", "symbol": "MSFT", "sma_20d": 0.7},
+        ])
+        closes = self._closes_df([
+            {"timestamp": "2024-01-01", "symbol": "AAPL", "close": 100.0},
+            {"timestamp": "2024-01-01", "symbol": "MSFT", "close": 200.0},
+        ])
+        merged, n_dropped = _merge_closes_into_features(features, closes)
+
+        assert n_dropped == 0
+        assert "close" in merged.columns
+        aapl = merged[merged["symbol"] == "AAPL"].iloc[0]
+        assert aapl["close"] == pytest.approx(100.0)
+        msft = merged[merged["symbol"] == "MSFT"].iloc[0]
+        assert msft["close"] == pytest.approx(200.0)
+
+    def test_missing_close_row_is_dropped(self):
+        features = self._features_df([
+            {"timestamp": "2024-01-01", "symbol": "AAPL", "sma_20d": 0.5},
+            {"timestamp": "2024-01-01", "symbol": "MSFT", "sma_20d": 0.7},
+            {"timestamp": "2024-01-02", "symbol": "AAPL", "sma_20d": 0.6},
+            {"timestamp": "2024-01-02", "symbol": "MSFT", "sma_20d": 0.8},  # no close
+        ])
+        closes = self._closes_df([
+            {"timestamp": "2024-01-01", "symbol": "AAPL", "close": 100.0},
+            {"timestamp": "2024-01-01", "symbol": "MSFT", "close": 200.0},
+            {"timestamp": "2024-01-02", "symbol": "AAPL", "close": 101.0},
+            # MSFT 2024-01-02 intentionally absent
+        ])
+        merged, n_dropped = _merge_closes_into_features(features, closes)
+
+        assert n_dropped == 1
+        assert len(merged) == 3
+        missing = merged[(merged["symbol"] == "MSFT") & (merged["timestamp"] == "2024-01-02")]
+        assert len(missing) == 0
+
+    def test_empty_features_returns_empty_unchanged(self):
+        merged, n_dropped = _merge_closes_into_features(
+            pd.DataFrame(),
+            self._closes_df([{"timestamp": "2024-01-01", "symbol": "AAPL", "close": 100.0}]),
+        )
+        assert n_dropped == 0
+        assert merged.empty
+
+    def test_env_rows_contain_close_after_merge(self):
+        """Full pipeline: merge → _dataframe_to_env_rows produces rows with 'close'."""
+        features = self._features_df([
+            {"timestamp": "2024-01-01", "symbol": "AAPL", "sma_20d": 0.5},
+            {"timestamp": "2024-01-01", "symbol": "MSFT", "sma_20d": 0.7},
+        ])
+        closes = self._closes_df([
+            {"timestamp": "2024-01-01", "symbol": "AAPL", "close": 150.0},
+            {"timestamp": "2024-01-01", "symbol": "MSFT", "close": 300.0},
+        ])
+        merged, _ = _merge_closes_into_features(features, closes)
+        rows = _dataframe_to_env_rows(merged, ["AAPL", "MSFT"], ["close", "sma_20d"], [])
+
+        assert len(rows) == 1
+        assert "close" in rows[0], f"'close' missing from env row keys: {list(rows[0].keys())}"
+        assert rows[0]["close"]["AAPL"] == pytest.approx(150.0)
+        assert rows[0]["close"]["MSFT"] == pytest.approx(300.0)
+
+    def test_dropped_rows_not_nan_filled(self):
+        """Dropped rows must be absent, not NaN-filled (close is load-bearing)."""
+        features = self._features_df([
+            {"timestamp": "2024-01-01", "symbol": "AAPL", "sma_20d": 0.5},
+            {"timestamp": "2024-01-01", "symbol": "MISSING", "sma_20d": 0.9},
+        ])
+        closes = self._closes_df([
+            {"timestamp": "2024-01-01", "symbol": "AAPL", "close": 100.0},
+        ])
+        merged, n_dropped = _merge_closes_into_features(features, closes)
+
+        assert n_dropped == 1
+        assert "MISSING" not in merged["symbol"].values
+        assert merged["close"].notna().all()
+
+
+# ---------------------------------------------------------------------------
+# fetch_features integration test (requires live QuestDB)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.live_db
+class TestFetchFeaturesLiveDB:
+    def test_fetch_features_env_rows_contain_close(self):
+        """Integration: fetch_features joins canonical closes; env rows have 'close'."""
+        from dagster import build_op_context
+        from pipelines.yats_pipelines.jobs.experiment_run import (
+            ExperimentRunConfig,
+            fetch_features,
+        )
+
+        context = build_op_context()
+        config = ExperimentRunConfig(experiment_id="live_integration_test")
+        spec_data = {
+            "symbols": ["AAPL", "MSFT"],
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "feature_set": "core_v1",
+            "policy": "ppo",
+            "policy_params": {},
+        }
+
+        result = fetch_features(context, config, spec_data)
+
+        assert "data" in result
+        assert "observation_columns" in result
+        assert "close" in result["observation_columns"], (
+            "observation_columns must include 'close'"
+        )
+        if result["data"]:
+            row = result["data"][0]
+            assert "close" in row, (
+                f"fetch_features env row missing 'close'; keys present: {list(row.keys())}"
+            )

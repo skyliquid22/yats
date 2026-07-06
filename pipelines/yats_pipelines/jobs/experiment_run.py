@@ -111,10 +111,28 @@ def fetch_features(context: OpExecutionContext, config: ExperimentRunConfig, spe
         col_names = [desc[0] for desc in cur.description]
         rows = cur.fetchall()
         cur.close()
+
+        features_df = pd.DataFrame(rows, columns=col_names)
+
+        # Join canonical close prices — features table has no close column
+        closes_cur = conn.cursor()
+        closes_cur.execute(
+            f"SELECT timestamp, symbol, close "
+            f"FROM canonical_equity_ohlcv "
+            f"WHERE {where_clause} "
+            f"ORDER BY timestamp, symbol"
+        )
+        closes_col_names = [desc[0] for desc in closes_cur.description]
+        closes_rows = closes_cur.fetchall()
+        closes_cur.close()
         conn.close()
 
+        closes_df = pd.DataFrame(closes_rows, columns=closes_col_names)
+        df, n_dropped = _merge_closes_into_features(features_df, closes_df)
+        if n_dropped > 0:
+            context.log.info("Dropped %d feature rows missing canonical close", n_dropped)
+
         # Convert to list-of-dicts format expected by SignalWeightEnv
-        df = pd.DataFrame(rows, columns=col_names)
         data_rows = _dataframe_to_env_rows(df, symbols, observation_columns, regime_cols)
         data_hash = hashlib.sha256(
             json.dumps(data_rows, default=str, sort_keys=True).encode()
@@ -544,6 +562,27 @@ def _dataframe_to_env_rows(
         rows.append(row)
 
     return rows
+
+
+def _merge_closes_into_features(
+    features_df: pd.DataFrame,
+    closes_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, int]:
+    """Inner-join canonical close prices onto features rows by (timestamp, symbol).
+
+    Rows in features_df without a matching close price are dropped (logged by caller).
+    Returns (merged_df, n_dropped).
+    """
+    if features_df.empty:
+        return features_df, 0
+
+    before = len(features_df)
+    merged = features_df.merge(
+        closes_df[["timestamp", "symbol", "close"]],
+        on=["timestamp", "symbol"],
+        how="inner",
+    )
+    return merged, before - len(merged)
 
 
 def _build_returns_df(data: list[dict[str, Any]], symbols: list[str]) -> pd.DataFrame:
