@@ -248,6 +248,19 @@ class TestPPOTrainer:
         assert len(infos) == len(weights)
         assert all(isinstance(w, np.ndarray) for w in weights)
 
+    def test_rollout_ppo_ignores_risk_overrides(self, tmp_path):
+        """Eval rollout must use base risk_config, not risk_overrides (PRD §12.2)."""
+        spec = _make_spec(risk_overrides={"max_gross_exposure": 5.0, "max_symbol_weight": 0.9})
+        data = _make_data()
+
+        train_ppo(spec, data, tmp_path / "runs", observation_columns=["close"])
+        checkpoint = tmp_path / "runs" / "ppo_checkpoint"
+
+        with patch("research.training.ppo_trainer.merge_risk_overrides") as mock_merge:
+            rollout_ppo(spec, data, checkpoint, observation_columns=["close"])
+
+        mock_merge.assert_not_called()
+
     def test_training_info_in_result(self, tmp_path):
         spec = _make_spec()
         data = _make_data()
