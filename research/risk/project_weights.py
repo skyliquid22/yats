@@ -71,6 +71,7 @@ def project_weights(
     *,
     current_vol: float | None = None,
     adv_shares: np.ndarray | None = None,
+    prices: np.ndarray | None = None,
     confidences: np.ndarray | None = None,
     holding_bars: np.ndarray | None = None,
     nav: float | None = None,
@@ -85,7 +86,8 @@ def project_weights(
         risk_config: Risk configuration with constraint parameters.
         prev_weights: Previous step weights for turnover constraint.
         current_vol: Current realized volatility (annualized).
-        adv_shares: 20-day average daily volume per symbol.
+        adv_shares: 20-day average daily volume in shares per symbol.
+        prices: Latest close prices per symbol (required with adv_shares).
         confidences: Signal confidence per symbol.
         holding_bars: Bars held per symbol (0 for new positions).
         nav: Current portfolio NAV (for ADV pct computation).
@@ -99,6 +101,7 @@ def project_weights(
         prev_weights,
         current_vol=current_vol,
         adv_shares=adv_shares,
+        prices=prices,
         confidences=confidences,
         holding_bars=holding_bars,
         nav=nav,
@@ -113,6 +116,7 @@ def project_weights_full(
     *,
     current_vol: float | None = None,
     adv_shares: np.ndarray | None = None,
+    prices: np.ndarray | None = None,
     confidences: np.ndarray | None = None,
     holding_bars: np.ndarray | None = None,
     nav: float | None = None,
@@ -120,6 +124,15 @@ def project_weights_full(
     """Project weights with full decision audit trail.
 
     Returns a RiskResult with projected weights and per-constraint decisions.
+
+    Constraint-ordering semantics: constraints are applied in the canonical order
+    defined in the module docstring.  Hard caps (eff_max_symbol_weight,
+    eff_max_gross_exposure) are re-enforced in a final validation pass so that
+    soft constraints applied later (holding-period reverts, min-order reverts,
+    concentration, ADV) cannot reopen exposure that was already capped.
+    Turnover violations that survive the final pass are logged as warnings but
+    not reversed — forced holds and min-order reverts may legitimately increase
+    the L1 delta beyond the original cap.
     """
     w = np.array(raw_weights, dtype=np.float64)
     n = len(w)
@@ -247,6 +260,12 @@ def project_weights_full(
                 decision=Decision.PASS,
                 details={"l1_delta": float(l1)},
             ))
+
+        # Interpolating toward prev_weights can push gross back above the
+        # vol-brake-reduced eff_max_gross_exposure — re-apply immediately.
+        total_post_tv = w.sum()
+        if total_post_tv > max_exposure and total_post_tv > 0:
+            w *= max_exposure / total_post_tv
 
     # --- 5. Net exposure (|sum of weights|) ---
     net = w.sum()  # long-only so net == gross, but kept for completeness
