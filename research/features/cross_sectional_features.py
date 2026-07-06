@@ -30,12 +30,10 @@ def compute_mom_12m_excl_1m(df: pd.DataFrame) -> pd.Series:
 
 @feature("log_mkt_cap", lookback=0)
 def compute_log_mkt_cap(df: pd.DataFrame) -> pd.Series:
-    """log(shares_outstanding * close_price).
-
-    Requires shares_outstanding from canonical_financial_metrics merged
-    into the DataFrame.
-    """
-    return np.log(df["shares_outstanding"] * df["close"])
+    """log(shares_outstanding * close_price). Returns NaN for missing inputs."""
+    shares = pd.to_numeric(df["shares_outstanding"], errors="coerce")
+    close = pd.to_numeric(df["close"], errors="coerce")
+    return np.log(shares * close)
 
 
 @feature("size_rank", lookback=0)

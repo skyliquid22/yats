@@ -13,6 +13,7 @@ from yats_pipelines.jobs.canonicalize import (
     _canonicalize_equity_ohlcv,
     _canonicalize_financial_metrics,
     _canonicalize_fundamentals,
+    _load_fundamentals_weighted_shares,
     _run_already_written,
     _validate_ohlcv_row,
 )
@@ -370,3 +371,184 @@ class TestCanonicalizeFundamentals:
 
         canonical_call = sender.row.call_args_list[0]
         assert canonical_call[1]["columns"]["revenue"] == 999
+
+
+# ---------------------------------------------------------------------------
+# _load_fundamentals_weighted_shares — shares_outstanding data gap fix (ya-balr8)
+# ---------------------------------------------------------------------------
+
+
+def _make_fund_shares_conn(rows: list[tuple] | None = None, fail: bool = False):
+    """Mock conn for _load_fundamentals_weighted_shares.
+
+    rows: list of (symbol, timestamp, weighted_average_shares) tuples.
+    fail=True simulates a DB error.
+    """
+    cur = MagicMock()
+    if fail:
+        cur.execute.side_effect = Exception("DB error")
+    else:
+        cur.fetchall.return_value = rows or []
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    return conn
+
+
+class TestLoadFundamentalsWeightedShares:
+    """Unit tests for the _load_fundamentals_weighted_shares helper."""
+
+    def test_returns_sorted_timeline_per_symbol(self):
+        from datetime import date
+
+        t1 = datetime(2023, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2023, 6, 1, tzinfo=timezone.utc)
+        rows = [
+            ("AAPL", t1, 1_000_000.0),
+            ("AAPL", t2, 1_100_000.0),
+        ]
+        conn = _make_fund_shares_conn(rows)
+        result = _load_fundamentals_weighted_shares(conn)
+
+        assert "AAPL" in result
+        assert len(result["AAPL"]) == 2
+        assert result["AAPL"][0][0] == date(2023, 1, 1)
+        assert result["AAPL"][1][1] == pytest.approx(1_100_000.0)
+
+    def test_skips_none_shares(self):
+        t1 = datetime(2023, 1, 1, tzinfo=timezone.utc)
+        rows = [("AAPL", t1, None), ("MSFT", t1, 500_000.0)]
+        conn = _make_fund_shares_conn(rows)
+        result = _load_fundamentals_weighted_shares(conn)
+
+        assert "AAPL" not in result
+        assert "MSFT" in result
+
+    def test_returns_empty_on_db_error(self):
+        conn = _make_fund_shares_conn(fail=True)
+        result = _load_fundamentals_weighted_shares(conn)
+        assert result == {}
+
+    def test_deduplicates_same_date_keeps_last(self):
+        """Two rows for same symbol+date — later row's value is kept."""
+        from datetime import date
+
+        t = datetime(2023, 3, 1, tzinfo=timezone.utc)
+        rows = [("AAPL", t, 900_000.0), ("AAPL", t, 1_000_000.0)]
+        conn = _make_fund_shares_conn(rows)
+        result = _load_fundamentals_weighted_shares(conn)
+
+        assert len(result["AAPL"]) == 1
+        assert result["AAPL"][0][1] == pytest.approx(1_000_000.0)
+
+
+class TestSharesOutstandingEnrichment:
+    """_canonicalize_financial_metrics must enrich shares_outstanding from raw_fd_fundamentals."""
+
+    def _make_metrics_conn(self, metrics_rows: list[dict], fund_rows: list[tuple]):
+        """Mock conn with 3 cursor calls: dedup / metrics data / fundamentals shares."""
+        metrics_columns = list(metrics_rows[0].keys()) if metrics_rows else []
+        metrics_raw = [tuple(r[c] for c in metrics_columns) for r in metrics_rows]
+
+        call_count = [0]
+
+        def cursor_factory():
+            call_count[0] += 1
+            cur = MagicMock()
+            if call_count[0] == 1:
+                cur.fetchone.return_value = (0,)  # dedup: not yet written
+            elif call_count[0] == 2:
+                cur.description = [(col, None, None, None, None, None, None) for col in metrics_columns]
+                cur.fetchall.return_value = metrics_raw
+            else:
+                cur.fetchall.return_value = fund_rows  # fundamentals shares
+            return cur
+
+        conn = MagicMock()
+        conn.cursor.side_effect = cursor_factory
+        return conn
+
+    def test_shares_outstanding_filled_from_fundamentals(self):
+        """When metrics lacks shares_outstanding, it is sourced from raw_fd_fundamentals."""
+        t_metric = datetime(2023, 6, 1, tzinfo=timezone.utc)
+        t_fund = datetime(2023, 1, 1, tzinfo=timezone.utc)
+
+        metrics_rows = [{
+            "symbol": "AAPL",
+            "timestamp": t_metric,
+            "market_cap": None,
+            "pe_ratio": 20.0,
+            "ps_ratio": None,
+            "pb_ratio": None,
+            "ev_ebitda": None,
+            "roe": 0.15,
+            "gross_margin": 0.40,
+            "operating_margin": None,
+            "net_margin": None,
+            "fcf_margin": None,
+            "debt_to_equity": None,
+            "revenue_growth_yoy": None,
+            "eps_growth_yoy": None,
+            "shares_outstanding": None,  # missing from metrics API
+            "ingested_at": t_metric,
+        }]
+        fund_rows = [("AAPL", t_fund, 1_000_000.0)]
+
+        conn = self._make_metrics_conn(metrics_rows, fund_rows)
+        sender = MagicMock()
+        config = CanonicalizeConfig(start_date="2023-06-01", end_date="2023-06-01")
+        now = datetime(2023, 6, 5, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_financial_metrics(conn, sender, config, now, "run-enrich", log)
+
+        assert count == 1
+        # Find the canonical_financial_metrics row call
+        metrics_calls = [
+            c for c in sender.row.call_args_list
+            if c[1]["symbols"].get("symbol") == "AAPL"
+            and "shares_outstanding" in c[1].get("columns", {})
+        ]
+        assert metrics_calls, "Expected shares_outstanding to be written"
+        assert metrics_calls[0][1]["columns"]["shares_outstanding"] == pytest.approx(1_000_000.0)
+
+    def test_metrics_shares_takes_precedence_over_fundamentals(self):
+        """When metrics API provides shares_outstanding, it is not overwritten by fundamentals."""
+        t_metric = datetime(2023, 6, 1, tzinfo=timezone.utc)
+        t_fund = datetime(2023, 1, 1, tzinfo=timezone.utc)
+
+        metrics_rows = [{
+            "symbol": "AAPL",
+            "timestamp": t_metric,
+            "market_cap": None,
+            "pe_ratio": 20.0,
+            "ps_ratio": None,
+            "pb_ratio": None,
+            "ev_ebitda": None,
+            "roe": None,
+            "gross_margin": None,
+            "operating_margin": None,
+            "net_margin": None,
+            "fcf_margin": None,
+            "debt_to_equity": None,
+            "revenue_growth_yoy": None,
+            "eps_growth_yoy": None,
+            "shares_outstanding": 2_000_000.0,  # API does provide it
+            "ingested_at": t_metric,
+        }]
+        fund_rows = [("AAPL", t_fund, 1_000_000.0)]  # different value
+
+        conn = self._make_metrics_conn(metrics_rows, fund_rows)
+        sender = MagicMock()
+        config = CanonicalizeConfig(start_date="2023-06-01", end_date="2023-06-01")
+        now = datetime(2023, 6, 5, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        _canonicalize_financial_metrics(conn, sender, config, now, "run-no-overwrite", log)
+
+        metrics_calls = [
+            c for c in sender.row.call_args_list
+            if c[1]["symbols"].get("symbol") == "AAPL"
+            and "shares_outstanding" in c[1].get("columns", {})
+        ]
+        assert metrics_calls
+        assert metrics_calls[0][1]["columns"]["shares_outstanding"] == pytest.approx(2_000_000.0)
