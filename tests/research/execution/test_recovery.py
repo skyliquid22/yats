@@ -246,9 +246,10 @@ class TestReconcilePendingOrders:
         conn.cursor.return_value = cur
 
         broker = MagicMock()
-        pending, warnings = reconcile_pending_orders(conn, "exp-1", "paper", broker)
+        pending, filled_offline, warnings = reconcile_pending_orders(conn, "exp-1", "paper", broker)
 
         assert len(pending) == 0
+        assert len(filled_offline) == 0
         assert len(warnings) == 0
 
     def test_order_filled_while_offline(self):
@@ -270,9 +271,12 @@ class TestReconcilePendingOrders:
             filled_avg_price=150.0,
         )
 
-        pending, warnings = reconcile_pending_orders(conn, "exp-1", "paper", broker)
+        pending, filled_offline, warnings = reconcile_pending_orders(conn, "exp-1", "paper", broker)
 
         assert len(pending) == 0
+        # Filled-while-offline order collected for caller to apply
+        assert len(filled_offline) == 1
+        assert filled_offline[0].filled_qty == 10.0
         assert len(warnings) == 1
         assert "filled while offline" in warnings[0]
 
@@ -294,10 +298,11 @@ class TestReconcilePendingOrders:
         broker = MagicMock()
         broker.get_order_status.return_value = pending_result
 
-        pending, warnings = reconcile_pending_orders(conn, "exp-1", "paper", broker)
+        pending, filled_offline, warnings = reconcile_pending_orders(conn, "exp-1", "paper", broker)
 
         assert len(pending) == 1
         assert pending[0].order_id == "broker-1"
+        assert len(filled_offline) == 0
         assert len(warnings) == 0
 
     def test_broker_error_warning(self):
@@ -310,9 +315,10 @@ class TestReconcilePendingOrders:
         broker = MagicMock()
         broker.get_order_status.side_effect = BrokerError("connection timeout")
 
-        pending, warnings = reconcile_pending_orders(conn, "exp-1", "paper", broker)
+        pending, filled_offline, warnings = reconcile_pending_orders(conn, "exp-1", "paper", broker)
 
         assert len(pending) == 0
+        assert len(filled_offline) == 0
         assert len(warnings) == 1
         assert "failed to check" in warnings[0]
 

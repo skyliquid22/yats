@@ -49,6 +49,7 @@ class RecoveryResult:
     pending_orders: list[OrderResult]
     mismatches: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    filled_offline: list[OrderResult] = field(default_factory=list)
 
     @property
     def has_mismatches(self) -> bool:
@@ -341,13 +342,16 @@ def reconcile_pending_orders(
     experiment_id: str,
     mode: str,
     broker: AlpacaBrokerAdapter,
-) -> tuple[list[OrderResult], list[str]]:
+) -> tuple[list[OrderResult], list[OrderResult], list[str]]:
     """Reconcile pending orders with Alpaca API.
 
     PRD §13.4 lines 1023-1024: Alpaca API is source of truth for broker-side state.
     Pending orders in our orders table are checked against Alpaca's actual state.
 
-    Returns list of truly pending orders and any warning messages.
+    Returns (still_pending, filled_offline, warnings):
+      - still_pending: orders genuinely still open at the broker
+      - filled_offline: orders filled while we were offline — caller must apply fills
+      - warnings: human-readable issues for logging
     """
     warnings: list[str] = []
 
@@ -370,17 +374,20 @@ def reconcile_pending_orders(
 
     if not local_pending:
         logger.info("No pending orders to reconcile")
-        return [], warnings
+        return [], [], warnings
 
     logger.info("Reconciling %d locally pending orders with Alpaca", len(local_pending))
 
     still_pending: list[OrderResult] = []
+    filled_offline: list[OrderResult] = []
     for order_id, broker_order_id, symbol, side_str, qty in local_pending:
         bid = broker_order_id or order_id
         try:
             result = broker.get_order_status(bid)
 
             if result.status == OrderStatus.FILLED:
+                # Collect for the caller to apply — position/cash must be updated
+                filled_offline.append(result)
                 warnings.append(
                     f"{symbol}: order {bid} was filled while offline "
                     f"(qty={result.filled_qty:.4f} @ {result.filled_avg_price:.4f})"
@@ -408,7 +415,7 @@ def reconcile_pending_orders(
         for w in warnings:
             logger.warning("Order reconciliation: %s", w)
 
-    return still_pending, warnings
+    return still_pending, filled_offline, warnings
 
 
 # ---------------------------------------------------------------------------
@@ -458,9 +465,10 @@ def recover_state(
 
         # Step 3: Reconcile pending orders (if broker available)
         pending_orders: list[OrderResult] = []
+        filled_offline: list[OrderResult] = []
         order_warnings: list[str] = []
         if broker is not None:
-            pending_orders, order_warnings = reconcile_pending_orders(
+            pending_orders, filled_offline, order_warnings = reconcile_pending_orders(
                 conn, experiment_id, mode, broker,
             )
 
@@ -468,6 +476,7 @@ def recover_state(
             positions=positions,
             portfolio=portfolio,
             pending_orders=pending_orders,
+            filled_offline=filled_offline,
             mismatches=pos_mismatches,
             warnings=order_warnings,
         )
