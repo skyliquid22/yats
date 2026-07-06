@@ -159,6 +159,9 @@ def fetch_thetadata_options(
     chain_rows: list[dict] = []
     eod_rows: list[dict] = []
 
+    start_ymd = config.start_date.replace("-", "") if config.start_date else ""
+    end_ymd = config.end_date.replace("-", "") if config.end_date else ""
+
     for underlying in config.underlyings:
         context.log.info("Fetching expirations for %s", underlying)
         try:
@@ -169,6 +172,7 @@ def fetch_thetadata_options(
             )
             continue
 
+        # Chain snapshots: upcoming expirations only
         relevant_exps = [e for e in exps if today_str <= e <= cutoff_str]
         context.log.info(
             "%s: %d expirations within %d-day window",
@@ -177,25 +181,48 @@ def fetch_thetadata_options(
             config.expiry_window_days,
         )
 
+        chain_count = 0
         for exp in relevant_exps:
             try:
                 raw_chain = td.get_option_chain_snapshot(underlying, exp)
                 chain_rows.extend(td.normalize_chain_snapshot(raw_chain, now, ""))
+                chain_count += len(raw_chain)
             except Exception as exc:
                 context.log.warning(
                     "Chain snapshot failed for %s exp=%s: %s", underlying, exp, exc
                 )
+        context.log.info(
+            "%s: fetched %d chain rows across %d expirations",
+            underlying, chain_count, len(relevant_exps),
+        )
 
-            if config.start_date and config.end_date:
+        # EOD historical backfill: use ALL expirations active during [start_ymd, end_ymd].
+        # relevant_exps only contains upcoming expirations — historical expirations (which
+        # have the actual EOD data) are filtered out by the today_str <= e cutoff. The EOD
+        # loop must use its own expiration set derived from start_ymd.
+        if start_ymd and end_ymd:
+            eod_exps = [e for e in exps if e >= start_ymd]
+            eod_count = 0
+            for exp in eod_exps:
                 try:
-                    start_ymd = config.start_date.replace("-", "")
-                    end_ymd = config.end_date.replace("-", "")
                     raw_eod = td.get_historical_eod(underlying, exp, start_ymd, end_ymd)
                     eod_rows.extend(td.normalize_eod(raw_eod, now, ""))
+                    eod_count += len(raw_eod)
                 except Exception as exc:
                     context.log.warning(
                         "EOD fetch failed for %s exp=%s: %s", underlying, exp, exc
                     )
+            if eod_count == 0:
+                context.log.warning(
+                    "%s: EOD backfill (%s to %s) queried %d expirations but fetched 0 rows"
+                    " — verify terminal subscription covers historical options data",
+                    underlying, start_ymd, end_ymd, len(eod_exps),
+                )
+            else:
+                context.log.info(
+                    "%s: EOD backfill fetched %d rows across %d expirations (%s to %s)",
+                    underlying, eod_count, len(eod_exps), start_ymd, end_ymd,
+                )
 
     context.log.info(
         "Fetched %d chain rows, %d EOD rows for %d underlyings",
@@ -290,10 +317,12 @@ def write_raw_thetadata(
                 run_id,
             )
         elif eod_rows:
+            skipped_eod = 0
             with _ilp_sender(qdb) as sender:
                 for row in eod_rows:
                     quote_date = row.get("quote_date")
                     if quote_date is None:
+                        skipped_eod += 1
                         continue
                     ingested_at = row["ingested_at"]
                     expiry_dt = _parse_exp_to_datetime(row.get("exp", ""))
@@ -322,7 +351,13 @@ def write_raw_thetadata(
                         at=_ts_nanos(quote_date),
                     )
                 sender.flush()
-            eod_written = len(eod_rows)
+            if skipped_eod:
+                context.log.warning(
+                    "Skipped %d/%d EOD rows with missing quote_date"
+                    " (last_trade field missing or unparseable)",
+                    skipped_eod, len(eod_rows),
+                )
+            eod_written = len(eod_rows) - skipped_eod
             context.log.info(
                 "Wrote %d rows to raw_thetadata_options_eod", eod_written
             )

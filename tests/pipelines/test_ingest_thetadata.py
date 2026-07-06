@@ -247,6 +247,20 @@ class TestGetHistoricalEod:
         "0.00,0.00,0.00,0.00,0,0,0,6,0.00,50,172,22,0.52,50\n"
     )
 
+    # Real response captured live from Theta Terminal v3
+    # GET /v3/option/history/eod?symbol=AAPL&expiration=20250718&start_date=20250701&end_date=20250705
+    EOD_CSV_LIVE = (
+        "symbol,expiration,strike,right,created,last_trade,open,high,low,close,"
+        "volume,count,bid_size,bid_exchange,bid,bid_condition,ask_size,ask_exchange,"
+        "ask,ask_condition\n"
+        '"AAPL","2025-07-18",300.000,"PUT",'
+        "2025-07-01T17:15:03.452,2025-07-01T00:00:00.000,"
+        "0.00,0.00,0.00,0.00,0,0,105,7,91.40,50,100,7,92.70,50\n"
+        '"AAPL","2025-07-18",300.000,"CALL",'
+        "2025-07-01T17:15:03.452,2025-07-01T15:52:58.319,"
+        "0.01,0.01,0.01,0.01,11,3,0,31,0.00,50,20,31,0.01,50\n"
+    )
+
     def test_eod_row_shape(self):
         td = ThetaDataResource()
         with patch.object(td, "_request_with_retry", return_value=self.EOD_CSV):
@@ -263,6 +277,52 @@ class TestGetHistoricalEod:
         assert row["volume"] == 0
         assert row["trade_count"] == 0
         assert isinstance(row["quote_date"], datetime)
+
+    def test_eod_live_response_two_rows(self):
+        """Real response: one no-trade PUT (midnight last_trade) + one traded CALL."""
+        td = ThetaDataResource()
+        with patch.object(td, "_request_with_retry", return_value=self.EOD_CSV_LIVE):
+            rows = td.get_historical_eod("AAPL", "20250718", "20250701", "20250705")
+
+        assert len(rows) == 2
+
+        put_row = next(r for r in rows if r["right"] == "PUT")
+        assert put_row["root"] == "AAPL"
+        assert put_row["exp"] == "20250718"
+        assert put_row["strike"] == 300.0
+        assert put_row["volume"] == 0
+        assert put_row["trade_count"] == 0
+        assert isinstance(put_row["quote_date"], datetime)
+        assert put_row["quote_date"].date().isoformat() == "2025-07-01"
+
+        call_row = next(r for r in rows if r["right"] == "CALL")
+        assert call_row["strike"] == 300.0
+        assert call_row["volume"] == 11
+        assert call_row["trade_count"] == 3
+        assert call_row["open"] == pytest.approx(0.01)
+        assert call_row["close"] == pytest.approx(0.01)
+        assert isinstance(call_row["quote_date"], datetime)
+        assert call_row["quote_date"].date().isoformat() == "2025-07-01"
+
+    def test_eod_no_trade_midnight_quote_date_is_not_none(self):
+        """Rows with last_trade=...T00:00:00.000 (no trade) must yield a valid quote_date."""
+        no_trade_csv = (
+            "symbol,expiration,strike,right,created,last_trade,open,high,low,close,"
+            "volume,count,bid_size,bid_exchange,bid,bid_condition,ask_size,ask_exchange,"
+            "ask,ask_condition\n"
+            '"AAPL","2025-07-18",300.000,"PUT",'
+            "2025-07-01T17:15:03.452,2025-07-01T00:00:00.000,"
+            "0.00,0.00,0.00,0.00,0,0,105,7,91.40,50,100,7,92.70,50\n"
+        )
+        td = ThetaDataResource()
+        with patch.object(td, "_request_with_retry", return_value=no_trade_csv):
+            rows = td.get_historical_eod("AAPL", "20250718", "20250701", "20250701")
+
+        assert len(rows) == 1
+        assert rows[0]["quote_date"] is not None, (
+            "Midnight last_trade must not produce None quote_date — "
+            "write_raw_thetadata silently skips None-quote_date rows"
+        )
 
 
 # ---------------------------------------------------------------------------
