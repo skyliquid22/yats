@@ -473,18 +473,21 @@ def live_trading_health_sensor(
     Same alert logic as paper_trading_health_sensor, but for mode='live'.
     Critical alerts auto-trigger live teardown.
     """
-    conn = psycopg2.connect(
-        host="localhost",
-        port=8812,
-        user="admin",
-        password="quest",
-        database="qdb",
-    )
-
     try:
-        alerts = _check_live_heartbeat_health(conn, context)
-    finally:
-        conn.close()
+        conn = psycopg2.connect(
+            host="localhost",
+            port=8812,
+            user="admin",
+            password="quest",
+            database="qdb",
+        )
+        try:
+            alerts = _check_live_heartbeat_health(conn, context)
+        finally:
+            conn.close()
+    except Exception as exc:
+        context.log.error("Live health sensor error: %s", exc)
+        return SkipReason(f"Sensor evaluation error: {exc}")
 
     if not alerts:
         return SkipReason("All live trading heartbeats healthy")
@@ -557,6 +560,9 @@ def _check_live_heartbeat_health(
         if last_hb is None:
             continue
 
+        if last_hb.tzinfo is None:
+            last_hb = last_hb.replace(tzinfo=timezone.utc)
+
         hb_age_s = (now - last_hb).total_seconds()
         if hb_age_s > 3 * 60:
             alerts.append({
@@ -568,6 +574,8 @@ def _check_live_heartbeat_health(
             })
 
         if last_bar is not None:
+            if last_bar.tzinfo is None:
+                last_bar = last_bar.replace(tzinfo=timezone.utc)
             bar_age_s = (now - last_bar).total_seconds()
             if bar_age_s > 120 and _is_market_hours(now):
                 alerts.append({
@@ -613,15 +621,17 @@ def _check_live_heartbeat_health(
 
 def _is_market_hours(dt: Any) -> bool:
     """Check if current time is during US market hours (9:30-16:00 ET)."""
-    et_hour = (dt.hour - 5) % 24
-    et_minute = dt.minute
+    from zoneinfo import ZoneInfo
 
-    if dt.weekday() >= 5:
+    et = dt.astimezone(ZoneInfo("America/New_York"))
+
+    if et.weekday() >= 5:  # Saturday/Sunday
         return False
 
-    if et_hour < 9 or (et_hour == 9 and et_minute < 30):
+    # Market hours: 9:30 AM - 4:00 PM ET
+    if et.hour < 9 or (et.hour == 9 and et.minute < 30):
         return False
-    if et_hour >= 16:
+    if et.hour >= 16:
         return False
 
     return True
