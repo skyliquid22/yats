@@ -8,9 +8,10 @@ PRD §11 (lines 839-868), §24 (lines 2179-2226).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,14 @@ _TIER_INDEX = {t: i for i, t in enumerate(TIERS)}
 # ---------------------------------------------------------------------------
 
 
+def _hash_file(path: str | Path) -> str:
+    """Return SHA-256 hex digest of file contents, or '' if file doesn't exist."""
+    p = Path(path)
+    if not p.exists():
+        return ""
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
 @dataclass
 class PromotionRecord:
     """Immutable promotion record — written once per experiment per tier."""
@@ -43,6 +52,9 @@ class PromotionRecord:
     promoted_at: str
     promoted_by: str
     dagster_run_id: str
+    qualification_report_hash: str = field(default="")
+    spec_hash: str = field(default="")
+    metrics_hash: str = field(default="")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -55,6 +67,9 @@ class PromotionRecord:
             "promoted_at": self.promoted_at,
             "promoted_by": self.promoted_by,
             "dagster_run_id": self.dagster_run_id,
+            "qualification_report_hash": self.qualification_report_hash,
+            "spec_hash": self.spec_hash,
+            "metrics_hash": self.metrics_hash,
         }
 
 
@@ -293,20 +308,34 @@ def check_immutability(
     existing = json.loads(record_path.read_text(encoding="utf-8"))
     new = record.to_dict()
 
-    # Compare content fields (excluding promoted_at and dagster_run_id
-    # which are expected to differ between attempts)
-    content_keys = (
-        "experiment_id", "tier", "qualification_report_path",
-        "spec_path", "metrics_path",
+    # Compare content hashes if stored in the existing record (write-once semantics).
+    # Falls back to path comparison only for old-format records that lack hash fields.
+    hash_keys = (
+        "qualification_report_hash", "spec_hash", "metrics_hash",
     )
-    for key in content_keys:
-        if existing.get(key) != new.get(key):
-            raise PromotionError(
-                f"Immutability violation: promotion record already exists "
-                f"for {record.experiment_id} at tier {record.tier} "
-                f"with different content (field: {key}). "
-                f"No overwrites allowed."
-            )
+    if any(existing.get(k) for k in hash_keys):
+        for key in hash_keys:
+            if existing.get(key) != new.get(key):
+                raise PromotionError(
+                    f"Immutability violation: promotion record already exists "
+                    f"for {record.experiment_id} at tier {record.tier} "
+                    f"with different content hashes (field: {key}). "
+                    f"No overwrites allowed."
+                )
+    else:
+        # Legacy records: compare path fields as before
+        content_keys = (
+            "experiment_id", "tier", "qualification_report_path",
+            "spec_path", "metrics_path",
+        )
+        for key in content_keys:
+            if existing.get(key) != new.get(key):
+                raise PromotionError(
+                    f"Immutability violation: promotion record already exists "
+                    f"for {record.experiment_id} at tier {record.tier} "
+                    f"with different content (field: {key}). "
+                    f"No overwrites allowed."
+                )
 
     logger.info(
         "Promotion record already exists for %s at %s with same content — idempotent",
@@ -523,6 +552,9 @@ def promote(
         spec_path=spec_path,
         metrics_path=metrics_path,
         promotion_reason=promotion_reason,
+        qualification_report_hash=_hash_file(qual_report_path),
+        spec_hash=_hash_file(spec_path),
+        metrics_hash=_hash_file(metrics_path),
         promoted_at=datetime.now(timezone.utc).isoformat(),
         promoted_by=promoted_by,
         dagster_run_id=dagster_run_id,

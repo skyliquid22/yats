@@ -306,6 +306,63 @@ class TestEngineQuestDBIntegration:
         assert "sharpe" in metrics_call.kwargs
         assert "max_drawdown" in metrics_call.kwargs
         assert "total_return" in metrics_call.kwargs
+        assert "execution_halts" in metrics_call.kwargs
+
+    def test_halted_run_stores_halts_in_metrics(self, tmp_path):
+        """execution_halts > 0 must be passed to write_metrics when halts occur."""
+        from research.experiments.spec import CostConfig, ExperimentSpec, RiskConfig
+        from research.shadow.data_source import Snapshot
+        from research.shadow.engine import ShadowEngine, ShadowRunConfig
+
+        spec = ExperimentSpec(
+            experiment_name="test_halts_qdb",
+            symbols=("AAPL", "MSFT"),
+            start_date=datetime(2023, 1, 1).date(),
+            end_date=datetime(2023, 12, 31).date(),
+            interval="daily",
+            feature_set="core_v1",
+            policy="equal_weight",
+            policy_params={},
+            cost_config=CostConfig(transaction_cost_bp=0.0),
+            seed=42,
+            risk_config=RiskConfig(daily_loss_limit=-0.000001),
+        )
+
+        snapshots = []
+        for i in range(6):
+            panel = {
+                "AAPL": {"close": max(100.0 - i * 5.0, 1.0), "ret_1d": -0.05},
+                "MSFT": {"close": max(200.0 - i * 5.0, 1.0), "ret_1d": -0.05},
+            }
+            snapshots.append(Snapshot(
+                as_of=datetime(2023, 1, 3 + i, tzinfo=timezone.utc),
+                symbols=("AAPL", "MSFT"),
+                panel=panel,
+                regime_features=(),
+                regime_feature_names=(),
+                observation_columns=("close",),
+            ))
+
+        config = ShadowRunConfig(
+            experiment_id="test_halts_qdb",
+            run_id="run_halts",
+            output_dir=tmp_path / "shadow" / "test_halts_qdb" / "run_halts",
+            execution_mode="sim",
+        )
+
+        from research.policies.equal_weight_policy import EqualWeightPolicy
+        mock_writer = MagicMock(spec=ExecutionTableWriter)
+
+        engine = ShadowEngine(spec, EqualWeightPolicy(2), snapshots, config,
+                              questdb_writer=mock_writer)
+        summary = engine.run()
+
+        metrics_call = mock_writer.write_metrics.call_args
+        stored_halts = metrics_call.kwargs.get("execution_halts", 0)
+        assert stored_halts > 0, (
+            f"Expected execution_halts > 0 in write_metrics, got {stored_halts}; "
+            f"summary execution_halts={summary.get('execution_halts')}"
+        )
 
     def test_engine_works_without_writer(self, tmp_path):
         """Engine should work fine with no QuestDB writer (backwards compat)."""

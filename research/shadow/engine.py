@@ -208,6 +208,7 @@ class ShadowEngine:
                 sharpe=summary.get("sharpe", 0.0),
                 max_drawdown=summary.get("max_drawdown", 0.0),
                 total_return=summary.get("total_return", 0.0),
+                execution_halts=self._execution_halts,
             )
 
         logger.info(
