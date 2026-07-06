@@ -1,0 +1,13 @@
+name: dev10
+description: 10-symbol dev universe for local testing
+tickers:
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMZN
+  - GOOGL
+  - META
+  - TSLA
+  - JPM
+  - SPY
+  - QQQ
