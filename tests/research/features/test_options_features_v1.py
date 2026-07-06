@@ -32,16 +32,20 @@ def _make_chain(
     expiry_30d: str | None = None,
     expiry_60d: str | None = None,
     spot: float = 150.0,
-    n_strikes: int = 5,
+    n_strikes: int = 11,
     atm_iv: float = 0.25,
     skew: float = 0.05,
     gamma: float = 0.01,
     include_gamma: bool = True,
+    right_format: str = "short",  # "short" → "C"/"P", "long" → "CALL"/"PUT"
 ) -> pd.DataFrame:
     """Build a synthetic options chain with realistic ATM/OTM structure.
 
     Creates contracts for each expiry with strikes centred around spot.
-    IV decreases linearly from ATM; put delta negative, call delta positive.
+    IV has a smile; delta spans 0.01–0.99 across the strike grid so 25-delta
+    strikes are always present. Uses n_strikes=11 and ±25% moneyness spread
+    to match real chain shape. right_format="long" produces "CALL"/"PUT" as
+    ThetaData v3 returns; "short" produces "C"/"P".
     """
     qd = pd.Timestamp(quote_date, tz="UTC")
     expiries = []
@@ -50,18 +54,25 @@ def _make_chain(
     if expiry_60d:
         expiries.append(pd.Timestamp(expiry_60d, tz="UTC"))
 
+    if right_format == "long":
+        call_right, put_right = "CALL", "PUT"
+    else:
+        call_right, put_right = "C", "P"
+
     rows = []
     for expiry in expiries:
         dte = (expiry - qd).days
         # For farther-out expirations, IV is slightly higher (term slope)
         base_iv = atm_iv + (dte - 30) * 0.001  # +0.1 vol per extra day
-        strikes = [spot * (1 + 0.025 * i) for i in range(-n_strikes // 2, n_strikes // 2 + 1)]
+        # ±25% moneyness spread with n_strikes steps — gives delta ~0.01–0.99
+        half = n_strikes // 2
+        strikes = [spot * (1 + 0.05 * i) for i in range(-half, half + 1)]
         for strike in strikes:
             moneyness = (strike - spot) / spot
             # Simple IV smile: ATM lowest, wings higher
             iv = base_iv + abs(moneyness) * 0.3
 
-            # Approximate delta: call ~0.5 at ATM, put ~-0.5 at ATM
+            # Approximate delta: call ~0.5 at ATM, decreasing toward OTM
             call_delta = max(0.01, min(0.99, 0.5 - moneyness * 2))
             put_delta = call_delta - 1.0  # put-call parity delta
 
@@ -82,9 +93,9 @@ def _make_chain(
                 base_row["gamma"] = gamma * np.exp(-0.5 * moneyness**2 * 400)
 
             # Call contract
-            call = {**base_row, "right": "C", "delta": call_delta}
+            call = {**base_row, "right": call_right, "delta": call_delta}
             # Put contract
-            put = {**base_row, "right": "P", "delta": put_delta}
+            put = {**base_row, "right": put_right, "delta": put_delta}
             rows.extend([call, put])
 
     return pd.DataFrame(rows)
@@ -371,6 +382,85 @@ class TestComputeOptionsFeatures:
         # Should return a value (extrapolated to nearest endpoint), not crash
         # skew_25d may be non-NaN (nearest endpoint fallback) or NaN — just must not raise
         assert isinstance(feats["skew_25d"], float)
+
+
+# ---------------------------------------------------------------------------
+# Realistic chain shape — mirrors real ThetaData v3 data ("CALL"/"PUT" right column)
+# These tests would have returned NaN for skew_25d, put_call_oi_ratio, and
+# net_gamma_exposure before the right-column normalisation fix.
+# ---------------------------------------------------------------------------
+
+class TestRealisticChainShape:
+    """Verify all 5 features are non-NaN when the chain uses real ThetaData v3 format."""
+
+    _qd = "2024-01-15"
+    _exp30 = "2024-02-16"   # 32 days out
+    _exp60 = "2024-03-18"   # 63 days out
+    _spot = 150.0
+
+    def _realistic_chain(self, **kwargs):
+        return _make_chain(
+            self._qd,
+            expiry_30d=self._exp30,
+            expiry_60d=self._exp60,
+            spot=self._spot,
+            right_format="long",  # "CALL"/"PUT" as ThetaData v3 returns
+            **kwargs,
+        )
+
+    def test_all_5_features_non_nan_with_call_put_right(self):
+        chain = self._realistic_chain(include_gamma=True)
+        feats = compute_options_features(chain, self._spot, _ts(self._qd))
+        for name in ["atm_iv", "skew_25d", "iv_term_slope", "put_call_oi_ratio", "net_gamma_exposure"]:
+            assert not np.isnan(feats[name]), f"{name} is NaN with CALL/PUT right column"
+
+    def test_skew_25d_non_nan_with_call_put_right(self):
+        chain = self._realistic_chain()
+        feats = compute_options_features(chain, self._spot, _ts(self._qd))
+        assert not np.isnan(feats["skew_25d"]), "skew_25d must not be NaN when right='CALL'/'PUT'"
+
+    def test_put_call_oi_ratio_non_nan_with_call_put_right(self):
+        chain = self._realistic_chain()
+        feats = compute_options_features(chain, self._spot, _ts(self._qd))
+        assert not np.isnan(feats["put_call_oi_ratio"])
+        assert feats["put_call_oi_ratio"] > 0
+
+    def test_net_gamma_exposure_correct_sign_convention_with_call_put_right(self):
+        qd = _ts(self._qd)
+        expiry = _ts(self._exp30)
+        # Single call (+GEX) and single put (-GEX), equal gamma and OI → net = 0
+        df = pd.DataFrame([
+            {"quote_date": qd, "underlying": "TEST", "expiry": expiry,
+             "strike": 150.0, "right": "CALL", "iv": 0.25, "delta": 0.5,
+             "gamma": 0.01, "open_interest": 100},
+            {"quote_date": qd, "underlying": "TEST", "expiry": expiry,
+             "strike": 150.0, "right": "PUT", "iv": 0.25, "delta": -0.5,
+             "gamma": 0.01, "open_interest": 100},
+        ])
+        feats = compute_options_features(df, 150.0, qd)
+        assert pytest.approx(feats["net_gamma_exposure"], abs=1e-9) == 0.0
+
+    def test_net_gamma_exposure_positive_call_only(self):
+        qd = _ts(self._qd)
+        expiry = _ts(self._exp30)
+        df = pd.DataFrame([
+            {"quote_date": qd, "underlying": "TEST", "expiry": expiry,
+             "strike": 150.0, "right": "CALL", "iv": 0.25, "delta": 0.5,
+             "gamma": 0.01, "open_interest": 100},
+        ])
+        feats = compute_options_features(df, 150.0, qd)
+        assert feats["net_gamma_exposure"] > 0, "Call-only chain must have positive GEX"
+
+    def test_iv_term_slope_non_nan_with_call_put_right(self):
+        chain = self._realistic_chain()
+        feats = compute_options_features(chain, self._spot, _ts(self._qd))
+        assert not np.isnan(feats["iv_term_slope"])
+
+    def test_skew_25d_sign_positive_for_put_heavy_with_call_put_right(self):
+        chain = self._realistic_chain()
+        chain.loc[chain["right"] == "PUT", "iv"] += 0.05
+        feats = compute_options_features(chain, self._spot, _ts(self._qd))
+        assert feats["skew_25d"] > 0
 
 
 # ---------------------------------------------------------------------------

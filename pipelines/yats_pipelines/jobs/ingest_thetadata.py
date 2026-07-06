@@ -50,11 +50,33 @@ def _validate_contract(row: dict) -> list[str]:
     return issues
 
 
+def _normalize_right(val: str) -> str:
+    """Normalize ThetaData v3 right values to canonical single-char form.
+
+    v3 API returns "CALL" / "PUT"; canonical table and feature code expect "C" / "P".
+    """
+    if val in ("CALL", "CALLS"):
+        return "C"
+    if val in ("PUT", "PUTS"):
+        return "P"
+    return val
+
+
+# Fields populated from the second-order greeks endpoint (PRO subscription only).
+# When a later ingest run cannot reach that endpoint, these fields come back as None.
+# Preserve the most-recent non-None value so a transient endpoint outage doesn't
+# silently zero-out data that was fetched in an earlier run.
+_PRESERVE_IF_NONE = frozenset({"gamma"})
+
+
 def _pick_latest_per_contract(rows: list[dict]) -> list[dict]:
     """Group rows by contract+date key and keep the latest ingested per group.
 
     Latest is determined by ingested_at. Used to implement latest-quote-wins
     semantics for canonicalization.
+
+    For fields in _PRESERVE_IF_NONE (e.g. gamma from PRO second-order greeks):
+    if the newest row has None but an earlier row had a value, keep the earlier value.
     """
     by_key: dict[tuple, dict] = {}
     for row in rows:
@@ -72,8 +94,14 @@ def _pick_latest_per_contract(rows: list[dict]) -> list[dict]:
             quote_date,
         )
         existing = by_key.get(key)
-        if existing is None or _ingested_after(row, existing):
+        if existing is None:
             by_key[key] = row
+        elif _ingested_after(row, existing):
+            merged = dict(row)
+            for field in _PRESERVE_IF_NONE:
+                if merged.get(field) is None and existing.get(field) is not None:
+                    merged[field] = existing[field]
+            by_key[key] = merged
     return list(by_key.values())
 
 
@@ -472,7 +500,7 @@ def canonicalize_options(
                     "canonical_options_chain",
                     symbols={
                         "underlying": row.get("underlying", ""),
-                        "right": row.get("right", ""),
+                        "right": _normalize_right(row.get("right", "")),
                         "source_vendor": "thetadata",
                         "reconcile_method": "latest_quote_wins",
                     },
