@@ -188,9 +188,7 @@ def rollout_ppo(
     if observation_columns is None:
         observation_columns = _infer_observation_columns(data)
 
-    # Apply risk overrides for rollout (PRD §12.2)
-    rollout_risk_config = merge_risk_overrides(spec.risk_config, spec.risk_overrides)
-
+    # Eval rollouts use the base risk config — overrides apply to training/shadow-sim only (PRD §12.2)
     env_config = SignalWeightEnvConfig(
         symbols=list(spec.symbols),
         observation_columns=observation_columns,
@@ -198,7 +196,7 @@ def rollout_ppo(
         slippage_bp=spec.cost_config.slippage_bp,
         execution_sim=spec.execution_sim,
         regime_feature_names=regime_feature_names,
-        risk_config=rollout_risk_config,
+        risk_config=spec.risk_config,
         seed=spec.seed,
     )
     base_env = SignalWeightEnv(env_config)
