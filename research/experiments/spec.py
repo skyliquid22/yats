@@ -65,6 +65,49 @@ class EvaluationSplitConfig:
 
 
 @dataclass(frozen=True)
+class WFOConfig:
+    """Walk-Forward Optimization harness configuration.
+
+    Configures rolling or anchored (expanding) walk-forward cross-validation.
+    Under anchored mode (default), roll i trains on [0, test_start_i), so the
+    window grows from a fixed anchor and never drops historical data — critical
+    for regime/hierarchical controllers that must have seen all market modes.
+
+    Under rolling mode, train window is fixed-length and slides forward;
+    each roll drops the oldest bars.
+
+    In both modes, each roll trains ONE policy to FULL CONVERGENCE on its
+    train window (total_timesteps is never reduced). OOS test blocks are
+    concatenated in chronological order to form a single OOS track record.
+
+    purge_buffer and label_horizon are inherited from EvaluationSplitConfig
+    semantics (ya-2mt9e) and applied between each train window and its
+    adjacent test block.
+    """
+
+    n_periods: int = 4
+    train_window: int = 504          # bars for fold-1 anchor (anchored) or every fold (rolling)
+    test_window: int | None = None   # derived from n_periods if None
+    mode: str = "anchored"           # "anchored" (expanding) or "rolling" (fixed-length)
+    label_horizon: int = 1           # bars to purge from train-end
+    purge_buffer: int | None = None  # None = auto from feature set max lookback
+
+    def __post_init__(self):
+        if self.n_periods < 2:
+            raise ValueError("n_periods must be >= 2")
+        if self.train_window < 1:
+            raise ValueError("train_window must be >= 1")
+        if self.test_window is not None and self.test_window < 1:
+            raise ValueError("test_window must be >= 1 if specified")
+        if self.mode not in ("anchored", "rolling"):
+            raise ValueError(f"mode must be 'anchored' or 'rolling', got '{self.mode}'")
+        if self.label_horizon < 0:
+            raise ValueError("label_horizon must be >= 0")
+        if self.purge_buffer is not None and self.purge_buffer < 0:
+            raise ValueError("purge_buffer must be >= 0")
+
+
+@dataclass(frozen=True)
 class RiskConfig:
     # Global limits
     max_gross_exposure: float = 1.0
@@ -164,8 +207,9 @@ class ExperimentSpec:
     cost_config: CostConfig
     seed: int
 
-    # Optional fields (9)
+    # Optional fields (10)
     evaluation_split: EvaluationSplitConfig | None = None
+    wfo_config: WFOConfig | None = None
     risk_config: RiskConfig = field(default_factory=RiskConfig)
     execution_sim: ExecutionSimConfig | None = None
     notes: str | None = None

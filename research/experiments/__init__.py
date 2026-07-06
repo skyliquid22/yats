@@ -4,6 +4,7 @@ from research.experiments.spec import (
     ExecutionSimConfig,
     ExperimentSpec,
     RiskConfig,
+    WFOConfig,
     resolve_inheritance,
 )
 from research.experiments.registry import (
@@ -21,6 +22,7 @@ __all__ = [
     "ExecutionSimConfig",
     "ExperimentSpec",
     "RiskConfig",
+    "WFOConfig",
     "resolve_inheritance",
     "create",
     "exists",
