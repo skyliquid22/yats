@@ -13,6 +13,7 @@ interface VendorInfo {
 const VENDOR_CAPABILITIES: Record<string, string[]> = {
   alpaca: ["equity_ohlcv"],
   financialdatasets: ["fundamentals", "financial_metrics"],
+  thetadata: ["options_chain"],
 };
 
 export const dataVendors: ToolDef = {

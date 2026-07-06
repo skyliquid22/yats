@@ -7,3 +7,7 @@ alpaca:
 financialdatasets:
   base_url: https://api.financialdatasets.ai
   env_key: FINANCIALDATASETS_API_KEY
+
+thetadata:
+  base_url: https://api.thetadata.us
+  env_key: THETADATA_API_KEY
