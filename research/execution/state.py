@@ -64,24 +64,57 @@ class Position:
     cost_basis: float = 0.0  # total cost basis for avg price calc
 
     def apply_fill(self, fill: Fill) -> None:
-        """Update position from a fill."""
-        if fill.side == OrderSide.BUY:
-            # Buying: increase quantity, update avg entry price
-            new_cost = fill.filled_qty * fill.filled_avg_price
-            self.cost_basis += new_cost
-            self.quantity += fill.filled_qty
-            if self.quantity > 0:
-                self.avg_entry_price = self.cost_basis / self.quantity
-        else:
-            # Selling: reduce quantity, realize PnL
-            if self.quantity > 0 and self.avg_entry_price > 0:
-                sold_qty = min(fill.filled_qty, self.quantity)
-                pnl = sold_qty * (fill.filled_avg_price - self.avg_entry_price)
-                self.realized_pnl += pnl
-                self.cost_basis -= sold_qty * self.avg_entry_price
-            self.quantity -= fill.filled_qty
+        """Update position from a fill. Handles longs, shorts, and flips."""
+        qty = fill.filled_qty
+        price = fill.filled_avg_price
 
-        # Subtract commission from realized PnL
+        if fill.side == OrderSide.BUY:
+            if self.quantity < 0:
+                # Covering a short (possibly flipping to long)
+                cover_qty = min(qty, abs(self.quantity))
+                self.realized_pnl += cover_qty * (self.avg_entry_price - price)
+                self.quantity += qty
+                if self.quantity > 0:
+                    # Flipped long: start fresh long position at cover price
+                    self.avg_entry_price = price
+                    self.cost_basis = self.quantity * price
+                elif self.quantity == 0:
+                    self.avg_entry_price = 0.0
+                    self.cost_basis = 0.0
+                else:
+                    # Still short, avg_entry_price unchanged; trim cost_basis
+                    self.cost_basis = self.quantity * self.avg_entry_price
+            else:
+                # Adding to or opening a long position
+                self.cost_basis += qty * price
+                self.quantity += qty
+                if self.quantity > 0:
+                    self.avg_entry_price = self.cost_basis / self.quantity
+        else:
+            if self.quantity > 0:
+                # Reducing long or flipping to short
+                sold_qty = min(qty, self.quantity)
+                self.realized_pnl += sold_qty * (price - self.avg_entry_price)
+                self.cost_basis -= sold_qty * self.avg_entry_price
+                self.quantity -= qty
+                if self.quantity < 0:
+                    # Flipped short: start fresh short position at sell price
+                    self.avg_entry_price = price
+                    self.cost_basis = self.quantity * price
+                elif self.quantity == 0:
+                    self.avg_entry_price = 0.0
+                    self.cost_basis = 0.0
+                # else: still long, avg_entry_price unchanged
+            else:
+                # Adding to or opening a short position
+                # cost_basis is negative (= quantity * avg_entry_price)
+                prev_proceeds = abs(self.cost_basis)
+                self.quantity -= qty
+                total_proceeds = prev_proceeds + qty * price
+                if self.quantity < 0:
+                    self.avg_entry_price = total_proceeds / abs(self.quantity)
+                    self.cost_basis = self.quantity * self.avg_entry_price
+
         self.realized_pnl -= fill.commission
 
     def notional(self, current_price: float) -> float:
@@ -327,7 +360,7 @@ class PortfolioStateWriter:
             gross_exposure += abs(notional)
             net_exposure += notional
 
-        nav = gross_exposure + cash
+        nav = net_exposure + cash
         if nav > self._peak_nav:
             self._peak_nav = nav
 

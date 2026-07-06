@@ -414,9 +414,9 @@ class PaperTradingLoop:
         syms = [s.symbol for s in netted]
         target_weights = np.array([s.target_position_pct for s in netted])
         prev_weights = np.array([
-            abs(positions[sym].notional(
+            positions[sym].notional(
                 current_prices.get(sym, positions[sym].avg_entry_price)
-            )) / nav
+            ) / nav
             if sym in positions else 0.0
             for sym in syms
         ])
@@ -902,12 +902,12 @@ class PaperTradingLoop:
         positions: dict[str, Position],
         current_prices: dict[str, float],
     ) -> float:
-        """Compute current NAV from positions + cash."""
-        exposure = sum(
-            abs(pos.notional(current_prices.get(sym, pos.avg_entry_price)))
+        """Compute current NAV: cash + net_exposure (signed, handles shorts)."""
+        net_exposure = sum(
+            pos.notional(current_prices.get(sym, pos.avg_entry_price))
             for sym, pos in positions.items()
         )
-        return exposure + self._cash
+        return net_exposure + self._cash
 
     def _cleanup(self) -> None:
         """Clean up resources on shutdown."""

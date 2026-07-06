@@ -114,6 +114,47 @@ class TestReconstructPositionsFromFills:
         positions = _reconstruct_positions_from_fills(conn, "exp-1", "paper")
         assert positions["AAPL"].realized_pnl == pytest.approx(-1.0)
 
+    def test_short_position(self):
+        cur = _mock_cursor([
+            ("TSLA", "sell", 10.0, 200.0, 0.0),
+        ])
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+
+        positions = _reconstruct_positions_from_fills(conn, "exp-1", "paper")
+
+        assert "TSLA" in positions
+        assert positions["TSLA"].quantity == pytest.approx(-10.0)
+        assert positions["TSLA"].avg_entry_price == pytest.approx(200.0)
+
+    def test_short_then_cover(self):
+        cur = _mock_cursor([
+            ("TSLA", "sell", 10.0, 200.0, 0.0),
+            ("TSLA", "buy", 10.0, 180.0, 0.0),
+        ])
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+
+        positions = _reconstruct_positions_from_fills(conn, "exp-1", "paper")
+
+        # Fully covered: position removed
+        assert "TSLA" not in positions
+
+    def test_short_partial_cover_remaining(self):
+        cur = _mock_cursor([
+            ("TSLA", "sell", 10.0, 200.0, 0.0),
+            ("TSLA", "buy", 5.0, 180.0, 0.0),
+        ])
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+
+        positions = _reconstruct_positions_from_fills(conn, "exp-1", "paper")
+
+        assert "TSLA" in positions
+        assert positions["TSLA"].quantity == pytest.approx(-5.0)
+        assert positions["TSLA"].avg_entry_price == pytest.approx(200.0)
+        assert positions["TSLA"].realized_pnl == pytest.approx(100.0)  # 5*(200-180)
+
 
 # ---------------------------------------------------------------------------
 # Position validation
@@ -396,6 +437,20 @@ class TestComputeSnapshotFromPositions:
         assert snap.nav == pytest.approx(1500.0)
         assert snap.gross_exposure == pytest.approx(1500.0)
         assert snap.leverage == pytest.approx(1.0)
+
+    def test_short_position_nav(self):
+        """NAV with a short should reflect net_exposure, not gross."""
+        positions = {
+            "AAPL": Position("AAPL", 10.0, 150.0),   # long $1500
+            "TSLA": Position("TSLA", -5.0, 200.0),   # short $1000
+        }
+        snap = _compute_snapshot_from_positions(positions)
+
+        assert snap.net_exposure == pytest.approx(500.0)  # 1500 - 1000
+        assert snap.gross_exposure == pytest.approx(2500.0)  # 1500 + 1000
+        assert snap.nav == pytest.approx(500.0)  # net_exposure only (no cash)
+        # gross+0 would give 2500 — wrong, and NAV < gross for long/short
+        assert snap.nav < snap.gross_exposure
 
 
 class TestRecoveryResult:
