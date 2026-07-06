@@ -143,8 +143,6 @@ def fetch_thetadata_options(
 ) -> dict:
     """Fetch option chain snapshots (and optional EOD data) from ThetaData API."""
     td = ThetaDataResource()
-    if not td.api_key:
-        raise RuntimeError("Missing ThetaData credentials: set THETADATA_API_KEY")
 
     now = datetime.now(timezone.utc)
     today = now.date()

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import socket
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from yats_pipelines.jobs.ingest_thetadata import (
     _ingested_after,
@@ -16,10 +19,19 @@ from yats_pipelines.resources.thetadata import (
     ThetaDataResource,
     _f,
     _i,
+    _parse_iso_timestamp,
     _parse_strike,
     _parse_thetadata_date,
     _parse_thetadata_datetime,
 )
+
+
+def _thetadata_reachable() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", 25503), timeout=1):
+            return True
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +66,10 @@ class TestSafeConversions:
     def test_i_none(self):
         assert _i(None) is None
 
+    def test_i_float_string(self):
+        # v3 returns integers as e.g. "38" — also verify float strings round correctly
+        assert _i("38") == 38
+
 
 class TestParseThetadataDate:
     def test_yyyymmdd_integer(self):
@@ -79,6 +95,163 @@ class TestParseThetadataDatetime:
         assert _parse_thetadata_datetime(0, 5000) is None
 
 
+class TestParseIsoTimestamp:
+    def test_valid_timestamp(self):
+        dt = _parse_iso_timestamp("2026-07-02T16:00:00.003")
+        assert dt is not None
+        assert dt.year == 2026
+        assert dt.month == 7
+        assert dt.day == 2
+        assert dt.tzinfo == timezone.utc
+
+    def test_none_returns_none(self):
+        assert _parse_iso_timestamp(None) is None
+
+    def test_empty_string_returns_none(self):
+        assert _parse_iso_timestamp("") is None
+
+    def test_date_only_string(self):
+        dt = _parse_iso_timestamp("2026-07-02T00:00:00.000")
+        assert dt is not None
+        assert dt.hour == 0
+
+
+# ---------------------------------------------------------------------------
+# CSV response parsing (v3)
+# ---------------------------------------------------------------------------
+
+
+class TestParseCsvResponse:
+    # Fixture: verified live sample from /v3/option/list/expirations?symbol=AAPL
+    EXPIRATIONS_CSV = 'symbol,expiration\n"AAPL","2026-07-10"\n"AAPL","2026-07-17"\n'
+
+    # Fixture: verified live sample from /v3/option/snapshot/open_interest?symbol=AAPL&expiration=2026-07-10
+    OPEN_INTEREST_CSV = (
+        "timestamp,symbol,expiration,strike,right,open_interest\n"
+        '2026-07-02T06:30:25.000,"AAPL","2026-07-10",375.000,"CALL",38\n'
+        '2026-07-02T06:30:13.000,"AAPL","2026-07-10",375.000,"PUT",0\n'
+    )
+
+    def test_expirations_parsed(self):
+        rows = ThetaDataResource._parse_csv_response(self.EXPIRATIONS_CSV)
+        assert len(rows) == 2
+        assert rows[0]["symbol"] == "AAPL"
+        assert rows[0]["expiration"] == "2026-07-10"
+        assert rows[1]["expiration"] == "2026-07-17"
+
+    def test_open_interest_parsed(self):
+        rows = ThetaDataResource._parse_csv_response(self.OPEN_INTEREST_CSV)
+        assert len(rows) == 2
+        assert rows[0]["strike"] == "375.000"
+        assert rows[0]["right"] == "CALL"
+        assert rows[0]["open_interest"] == "38"
+        assert rows[1]["right"] == "PUT"
+        assert rows[1]["open_interest"] == "0"
+
+    def test_empty_csv_returns_empty_list(self):
+        rows = ThetaDataResource._parse_csv_response("symbol,expiration\n")
+        assert rows == []
+
+    def test_header_only_returns_empty_list(self):
+        rows = ThetaDataResource._parse_csv_response("timestamp,strike,right\n")
+        assert rows == []
+
+
+class TestListExpirations:
+    EXPIRATIONS_CSV = 'symbol,expiration\n"AAPL","2026-07-10"\n"AAPL","2025-01-17"\n'
+
+    def test_returns_sorted_yyyymmdd_strings(self):
+        td = ThetaDataResource()
+        with patch.object(td, "_request_with_retry", return_value=self.EXPIRATIONS_CSV):
+            result = td.list_expirations("AAPL")
+        assert result == ["20250117", "20260710"]
+
+    def test_empty_expiration_skipped(self):
+        td = ThetaDataResource()
+        csv_text = 'symbol,expiration\n"AAPL",""\n"AAPL","2026-07-10"\n'
+        with patch.object(td, "_request_with_retry", return_value=csv_text):
+            result = td.list_expirations("AAPL")
+        assert result == ["20260710"]
+
+
+class TestGetOptionChainSnapshot:
+    GREEKS_CSV = (
+        "symbol,expiration,strike,right,timestamp,bid,ask,delta,theta,vega,rho,"
+        "epsilon,lambda,implied_vol,iv_error,underlying_timestamp,underlying_price\n"
+        '"AAPL","2026-07-10",375.000,"CALL",2026-07-02T16:00:00.003,'
+        "0.0000,0.2400,0.0129,-0.0572,1.5154,0.0844,-0.0871,33.2011,0.5999,-0.0024,"
+        "2026-07-02T20:00:00.265,306.2400\n"
+    )
+    OI_CSV = (
+        "timestamp,symbol,expiration,strike,right,open_interest\n"
+        '2026-07-02T06:30:25.000,"AAPL","2026-07-10",375.000,"CALL",38\n'
+    )
+    OHLC_CSV = (
+        "timestamp,symbol,expiration,strike,right,open,high,low,close,volume,count\n"
+        '2026-06-26T09:30:12.881,"AAPL","2026-07-10",375.000,"CALL",'
+        "0.01,0.01,0.01,0.01,25,1\n"
+    )
+
+    def test_snapshot_row_shape(self):
+        td = ThetaDataResource()
+        responses = [self.GREEKS_CSV, self.OI_CSV, self.OHLC_CSV]
+        with patch.object(td, "_request_with_retry", side_effect=responses):
+            rows = td.get_option_chain_snapshot("AAPL", "20260710")
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["root"] == "AAPL"
+        assert row["exp"] == "20260710"
+        assert row["strike"] == 375.0
+        assert row["right"] == "CALL"
+        assert row["bid"] == 0.0
+        assert row["ask"] == 0.24
+        assert row["iv"] == pytest.approx(0.5999)
+        assert row["delta"] == pytest.approx(0.0129)
+        assert row["gamma"] is None        # not available on STANDARD plan
+        assert row["open_interest"] == 38
+        assert row["volume"] == 25
+        assert row["last"] == pytest.approx(0.01)
+        assert isinstance(row["quote_ts"], datetime)
+
+    def test_missing_oi_gives_none(self):
+        td = ThetaDataResource()
+        empty_oi = "timestamp,symbol,expiration,strike,right,open_interest\n"
+        responses = [self.GREEKS_CSV, empty_oi, self.OHLC_CSV]
+        with patch.object(td, "_request_with_retry", side_effect=responses):
+            rows = td.get_option_chain_snapshot("AAPL", "20260710")
+
+        assert rows[0]["open_interest"] is None
+
+
+class TestGetHistoricalEod:
+    EOD_CSV = (
+        "symbol,expiration,strike,right,created,last_trade,open,high,low,close,"
+        "volume,count,bid_size,bid_exchange,bid,bid_condition,ask_size,ask_exchange,"
+        "ask,ask_condition\n"
+        '"AAPL","2026-07-10",375.000,"CALL",'
+        "2026-06-22T17:23:38.351,2026-06-22T00:00:00.000,"
+        "0.00,0.00,0.00,0.00,0,0,0,6,0.00,50,172,22,0.52,50\n"
+    )
+
+    def test_eod_row_shape(self):
+        td = ThetaDataResource()
+        with patch.object(td, "_request_with_retry", return_value=self.EOD_CSV):
+            rows = td.get_historical_eod("AAPL", "20260710", "20260620", "20260705")
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["root"] == "AAPL"
+        assert row["exp"] == "20260710"
+        assert row["strike"] == 375.0
+        assert row["right"] == "CALL"
+        assert row["open"] == 0.0
+        assert row["close"] == 0.0
+        assert row["volume"] == 0
+        assert row["trade_count"] == 0
+        assert isinstance(row["quote_date"], datetime)
+
+
 # ---------------------------------------------------------------------------
 # Normalization (ThetaDataResource methods)
 # ---------------------------------------------------------------------------
@@ -88,7 +261,7 @@ class TestNormalizeChainSnapshot:
     def test_adds_metadata(self):
         td = ThetaDataResource()
         raw_rows = [
-            {"root": "AAPL", "exp": "20240119", "strike": 150.0, "right": "C"}
+            {"root": "AAPL", "exp": "20240119", "strike": 150.0, "right": "CALL"}
         ]
         now = datetime(2026, 1, 5, 10, 0, 0, tzinfo=timezone.utc)
         result = td.normalize_chain_snapshot(raw_rows, now, "run-abc")
@@ -108,7 +281,7 @@ class TestNormalizeEod:
     def test_adds_metadata(self):
         td = ThetaDataResource()
         raw_rows = [
-            {"root": "SPY", "exp": "20240119", "strike": 450.0, "right": "P",
+            {"root": "SPY", "exp": "20240119", "strike": 450.0, "right": "PUT",
              "open": 2.0, "high": 2.5, "low": 1.8, "close": 2.2, "volume": 100, "trade_count": 5}
         ]
         now = datetime(2026, 1, 5, tzinfo=timezone.utc)
@@ -117,22 +290,6 @@ class TestNormalizeEod:
         assert len(result) == 1
         assert result[0]["ingested_at"] == now
         assert result[0]["dagster_run_id"] == "run-xyz"
-
-
-class TestParseResponse:
-    def test_columnar_response_to_dicts(self):
-        data = {
-            "header": {"format": ["strike", "right", "implied_vol"]},
-            "response": [[150000, "C", 0.25], [155000, "P", 0.30]],
-        }
-        rows = ThetaDataResource._parse_response(data)
-        assert len(rows) == 2
-        assert rows[0] == {"strike": 150000, "right": "C", "implied_vol": 0.25}
-        assert rows[1] == {"strike": 155000, "right": "P", "implied_vol": 0.30}
-
-    def test_empty_response(self):
-        data = {"header": {"format": ["strike"]}, "response": []}
-        assert ThetaDataResource._parse_response(data) == []
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +327,6 @@ class TestValidateContract:
         assert any("iv_outlier" in i for i in issues)
 
     def test_none_oi_and_iv_are_not_flagged(self):
-        # Missing optional fields are not validation failures
         row = {"strike": 150.0, "open_interest": None, "iv": None}
         assert _validate_contract(row) == []
 
@@ -320,3 +476,45 @@ class TestIngestedAfter:
         a = {"ingested_at": datetime(2026, 1, 5, tzinfo=timezone.utc)}
         b = {"ingested_at": None}
         assert _ingested_after(a, b) is True
+
+
+# ---------------------------------------------------------------------------
+# Live integration tests (require Theta Terminal v3 on 127.0.0.1:25503)
+# ---------------------------------------------------------------------------
+
+_skip_if_no_theta = pytest.mark.skipif(
+    not _thetadata_reachable(),
+    reason="Theta Terminal v3 not reachable on 127.0.0.1:25503",
+)
+
+
+@_skip_if_no_theta
+def test_live_list_expirations():
+    """Verify list_expirations returns a non-empty list against the live terminal."""
+    td = ThetaDataResource()
+    exps = td.list_expirations("AAPL")
+    assert len(exps) > 0, "Expected at least one AAPL expiration from live terminal"
+    # All entries should be 8-char YYYYMMDD strings
+    for exp in exps[:5]:
+        assert len(exp) == 8, f"Expected YYYYMMDD, got: {exp}"
+        assert exp.isdigit(), f"Expected all digits, got: {exp}"
+
+
+@_skip_if_no_theta
+def test_live_open_interest_snapshot():
+    """Verify get_option_chain_snapshot returns OI rows against the live terminal."""
+    import datetime as dt
+    td = ThetaDataResource()
+    exps = td.list_expirations("AAPL")
+    assert exps, "Need at least one expiration to test OI snapshot"
+    # Pick the first future expiration (at least 1 day out) so greeks/first_order has data
+    today = dt.date.today().strftime("%Y%m%d")
+    future_exps = [e for e in exps if e >= today]
+    assert future_exps, "No future AAPL expirations found"
+    exp = future_exps[0]
+    rows = td.get_option_chain_snapshot("AAPL", exp)
+    assert len(rows) > 0, f"Expected option chain rows for AAPL exp={exp}"
+    sample = rows[0]
+    assert "strike" in sample
+    assert "right" in sample
+    assert sample["right"] in ("CALL", "PUT")
