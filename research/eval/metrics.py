@@ -107,12 +107,20 @@ def compute_total_return(equity_curve: pd.Series) -> float:
 
 
 def compute_annualized_return(total_return: float, n_days: int) -> float:
-    """Annualize a total return over n trading days."""
+    """Annualize a total return over n trading days.
+
+    total_return is floored at -1.0 (total wipeout) so that values <= -1
+    yield -1.0 rather than NaN from raising a non-positive base to a
+    fractional power.
+    """
     if n_days <= 0:
         return 0.0
     years = n_days / ANNUALIZATION_FACTOR
     if years <= 0:
         return 0.0
+    total_return = max(total_return, -1.0)
+    if total_return <= -1.0:
+        return -1.0
     return float((1.0 + total_return) ** (1.0 / years) - 1.0)
 
 
@@ -142,10 +150,16 @@ def compute_performance_metrics(
 # ---------------------------------------------------------------------------
 
 def compute_turnover(weights: pd.DataFrame) -> pd.Series:
-    """Daily turnover: sum of absolute weight changes across symbols."""
-    if len(weights) < 2:
+    """Daily turnover: sum of absolute weight changes across symbols.
+
+    Row 0 is the establishment turnover (trading from an all-zero initial portfolio
+    into the first allocation), so it equals sum(abs(weights.iloc[0])).
+    """
+    if len(weights) == 0:
         return pd.Series(dtype=float)
-    return weights.diff().abs().sum(axis=1).iloc[1:]
+    turnover = weights.diff().abs().sum(axis=1)
+    turnover.iloc[0] = weights.iloc[0].abs().sum()
+    return turnover
 
 
 def compute_avg_holding_period(weights: pd.DataFrame) -> float:

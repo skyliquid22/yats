@@ -369,12 +369,18 @@ def _dict_sha256(d: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def _normalize(val: Any) -> Any:
-    """Recursively normalize a value for canonical JSON."""
+    """Recursively normalize a value for canonical JSON.
+
+    Integers are promoted to float so that, e.g., transaction_cost_bp=5 and
+    5.0 produce the same canonical representation and identical experiment IDs.
+    """
     if val is None:
         return None
     if isinstance(val, bool):
         return val
-    if isinstance(val, (int, float, str)):
+    if isinstance(val, int):
+        return float(val)
+    if isinstance(val, (float, str)):
         return val
     if isinstance(val, date):
         return val.isoformat()

@@ -599,7 +599,8 @@ def _dataframe_to_env_rows(
     if df.empty:
         return []
 
-    # Group by timestamp
+    # Group by timestamp — skip rows with NaN feature values rather than zero-filling,
+    # since zero is not a neutral value for bounded features like dist_20d_high.
     rows: list[dict[str, Any]] = []
     for ts, group in df.groupby("timestamp"):
         row: dict[str, Any] = {"timestamp": str(ts)}
@@ -610,13 +611,17 @@ def _dataframe_to_env_rows(
                 for _, r in group.iterrows():
                     sym = r.get("symbol", "")
                     if sym in symbols:
-                        per_sym[sym] = float(r[col]) if pd.notna(r[col]) else 0.0
+                        val = r[col]
+                        if pd.notna(val):
+                            per_sym[sym] = float(val)
                 row[col] = per_sym
 
-        # Regime features are scalar (market-wide)
+        # Regime features are scalar (market-wide); skip NaN rather than coercing to 0.0
         for col in regime_cols:
             if col in group.columns:
-                row[col] = float(group[col].iloc[0]) if pd.notna(group[col].iloc[0]) else 0.0
+                val = group[col].iloc[0]
+                if pd.notna(val):
+                    row[col] = float(val)
 
         rows.append(row)
 
@@ -645,7 +650,10 @@ def _merge_closes_into_features(
 
 
 def _build_returns_df(data: list[dict[str, Any]], symbols: list[str]) -> pd.DataFrame:
-    """Build returns DataFrame from env data rows (close-to-close returns)."""
+    """Build returns DataFrame from env data rows (close-to-close returns).
+
+    Missing close prices are stored as NaN (not 0.0) to avoid fabricating -100% returns.
+    """
     dates = []
     close_vals: dict[str, list[float]] = {s: [] for s in symbols}
 
@@ -654,9 +662,10 @@ def _build_returns_df(data: list[dict[str, Any]], symbols: list[str]) -> pd.Data
         close = row.get("close", {})
         for s in symbols:
             if isinstance(close, dict):
-                close_vals[s].append(float(close.get(s, 0.0)))
+                raw = close.get(s)
+                close_vals[s].append(float(raw) if raw is not None else float("nan"))
             else:
-                close_vals[s].append(float(close))
+                close_vals[s].append(float(close) if close is not None else float("nan"))
 
     close_df = pd.DataFrame(close_vals, index=dates)
     returns_df = close_df.pct_change().iloc[1:]  # Drop first NaN row

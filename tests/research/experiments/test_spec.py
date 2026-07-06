@@ -538,10 +538,15 @@ class TestNormalize:
         assert _normalize(None) is None
 
     def test_primitives(self):
-        assert _normalize(42) == 42
+        assert _normalize(42) == 42.0
         assert _normalize(3.14) == 3.14
         assert _normalize("hello") == "hello"
         assert _normalize(True) is True
+
+    def test_int_promoted_to_float(self):
+        # int and float with same value must normalize identically
+        assert _normalize(5) == _normalize(5.0)
+        assert isinstance(_normalize(5), float)
 
     def test_date(self):
         assert _normalize(date(2024, 6, 15)) == "2024-06-15"
@@ -557,3 +562,9 @@ class TestNormalize:
         c = CostConfig(transaction_cost_bp=5.0, slippage_bp=1.0)
         result = _normalize(c)
         assert result == {"transaction_cost_bp": 5.0, "slippage_bp": 1.0}
+
+    def test_int_float_hash_identical(self):
+        # transaction_cost_bp=5 (int) and 5.0 (float) must yield the same experiment_id
+        spec_int = ExperimentSpec(**_base_kwargs(cost_config=CostConfig(transaction_cost_bp=5)))
+        spec_float = ExperimentSpec(**_base_kwargs(cost_config=CostConfig(transaction_cost_bp=5.0)))
+        assert spec_int.experiment_id == spec_float.experiment_id

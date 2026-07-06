@@ -460,3 +460,56 @@ class TestEnvRewardAlignment:
                 f"Step {step}: reward={reward:.8f} != expected={expected_reward:.8f}"
             )
             step += 1
+
+
+# ---------------------------------------------------------------------------
+# Execution simulator determinism (seeded RNG)
+# ---------------------------------------------------------------------------
+
+class TestExecutionSimDeterminism:
+    def _run_episode(self, seed: int | None) -> list[float]:
+        """Run a full episode with execution sim and return per-step portfolio values."""
+        cfg = _base_config(
+            execution_sim=ExecutionSimConfig(
+                enabled=True,
+                slippage_bp=5.0,
+                fill_probability=0.80,  # low fill probability makes RNG visible
+            ),
+            seed=seed,
+        )
+        env = SignalWeightEnv(cfg)
+        data = _make_data(15)
+        env.reset(data=data)
+
+        values = []
+        done = False
+        while not done:
+            _, _, done, info = env.step([0.5, 0.5])
+            values.append(info["portfolio_value"])
+        return values
+
+    def test_seeded_env_is_deterministic(self):
+        vals1 = self._run_episode(seed=42)
+        vals2 = self._run_episode(seed=42)
+        assert vals1 == vals2
+
+    def test_different_seeds_produce_different_missed_fills(self):
+        # fill_probability=0.50 → seed=42's first random() is ~0.639 (> 0.5, miss)
+        # seed=99's first random() is ~0.404 (< 0.5, fill) — guaranteed divergence
+        def _run(seed):
+            cfg = _base_config(
+                execution_sim=ExecutionSimConfig(
+                    enabled=True, slippage_bp=5.0, fill_probability=0.50,
+                ),
+                seed=seed,
+            )
+            env = SignalWeightEnv(cfg)
+            env.reset(data=_make_data(5))
+            _, _, _, info = env.step([0.5, 0.5])
+            return info["missed_fill_ratio"]
+
+        ratio42 = _run(42)
+        ratio99 = _run(99)
+        # seed=42: AAPL misses (first random ~0.639 > 0.5), MSFT fills → 50% miss
+        # seed=99: both fill (0.404 < 0.5, 0.200 < 0.5) → 0% miss
+        assert ratio42 != ratio99
