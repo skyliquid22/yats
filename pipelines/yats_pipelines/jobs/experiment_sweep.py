@@ -2,7 +2,8 @@
 
 Input: sweep config (base spec + override grid from configs/sweeps/)
 Steps: for each override combination → create experiment (via registry) → run experiment_run
-Output: multiple experiment artifacts + index rows
+       → aggregate DSR across configs
+Output: multiple experiment artifacts + index rows + sweep DSR artifact
 
 PRD §15.3 (lines 1293-1297).
 """
