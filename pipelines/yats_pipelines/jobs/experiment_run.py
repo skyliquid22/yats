@@ -179,7 +179,7 @@ def train_policy(context: OpExecutionContext, config: ExperimentRunConfig, spec_
     regime_cols = features["regime_feature_names"]
 
     # Honor evaluation_split: train only on the training partition.
-    train_data, _ = _apply_evaluation_split(data, spec)
+    train_data, _, _ = _apply_evaluation_split(data, spec)
     if len(train_data) < 2:
         context.log.warning("Training partition too small (%d rows) — skipping training", len(train_data))
         return {"trained": False, "checkpoint_path": None}
@@ -231,22 +231,27 @@ def evaluate_experiment(
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     # Honor evaluation_split: evaluate ONLY on the held-out test partition.
-    _, eval_data = _apply_evaluation_split(data, spec)
+    _, eval_data, fn_split_meta = _apply_evaluation_split(data, spec)
     split_meta: dict[str, Any] = {}
     if spec.evaluation_split is not None:
         split_meta = {
             "evaluation_split": {
-                "train_rows": len(data) - len(eval_data) + 1,  # +1 for overlap bar
+                "train_rows": fn_split_meta.get("train_rows", 0),
                 "test_rows": len(eval_data),
                 "train_start": data[0].get("timestamp"),
-                "train_end": data[len(data) - len(eval_data)].get("timestamp"),
-                "test_start": eval_data[0].get("timestamp"),
-                "test_end": eval_data[-1].get("timestamp"),
+                "train_end": fn_split_meta.get("train_boundary_date"),
+                "test_start": fn_split_meta.get("test_boundary_date"),
+                "test_end": eval_data[-1].get("timestamp") if eval_data else None,
+                "purged_count": fn_split_meta.get("purged_count", 0),
+                "embargoed_count": fn_split_meta.get("embargoed_count", 0),
             }
         }
         context.log.info(
-            "Evaluation split: evaluating on %d/%d rows (test window: %s to %s)",
+            "Evaluation split: evaluating on %d/%d rows "
+            "(purged=%d embargo=%d test window: %s to %s)",
             len(eval_data), len(data),
+            fn_split_meta.get("purged_count", 0),
+            fn_split_meta.get("embargoed_count", 0),
             split_meta["evaluation_split"]["test_start"],
             split_meta["evaluation_split"]["test_end"],
         )
@@ -305,19 +310,14 @@ def evaluate_experiment(
         if regime_df is not None:
             regime_df = regime_df.loc[regime_df.index.intersection(common_idx)]
 
-    # Run evaluation
+    # Run evaluation (pass purge/embargo metadata for embedding in metrics.json)
     metrics = evaluate_to_json(
         spec, weights_df, returns_df,
         output_path=eval_dir / "metrics.json",
         regime_features=regime_df,
         data_hash=features.get("data_hash"),
+        split_metadata=split_meta if split_meta else None,
     )
-
-    # Record split boundaries in metrics metadata
-    if split_meta:
-        if "metadata" not in metrics:
-            metrics["metadata"] = {}
-        metrics["metadata"].update(split_meta)
 
     # Write run artifacts per PRD §8.2
     _write_run_artifacts(
@@ -395,22 +395,23 @@ def experiment_run():
 def _apply_evaluation_split(
     data: list[dict[str, Any]],
     spec: Any,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split data into (train_data, test_data) per spec.evaluation_split.
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Split data into (train_data, test_data, split_meta) per spec.evaluation_split.
 
-    Returns (full_data, full_data) when evaluation_split is None — preserving
-    the existing behavior where both training and eval see the full window.
+    Returns (full_data, full_data, {}) when evaluation_split is None.
 
-    When a split is configured:
-    - train_data = data[:split_idx]
-    - test_data  = data[split_idx-1:]  (one overlap bar anchors the first test return)
+    When a split is configured, applies López de Prado purge+embargo (AFML §5):
+    1. Compute the raw split boundary (split_idx).
+    2. PURGE: drop the last label_horizon training bars whose label/reward
+       window overlaps the test set. Eliminates the old deliberate overlap bar.
+    3. EMBARGO: drop embargo_bars = floor(embargo_pct * n) bars from both
+       train-end and test-start to break serial-correlation bleed.
 
-    The overlap bar is necessary because _build_returns_df (and the env reset)
-    consume data[0] as a price anchor and produce returns starting at data[1].
+    Returns split_meta with purged_count, embargoed_count, and boundary dates.
     """
     split = spec.evaluation_split
     if split is None:
-        return data, data
+        return data, data, {}
 
     n = len(data)
     if split.test_window_months is not None:
@@ -420,10 +421,33 @@ def _apply_evaluation_split(
     else:
         split_idx = max(2, int(n * split.train_ratio))
 
-    train_data = data[:split_idx]
-    # One overlap bar so the first test return can be anchored at the split boundary.
-    test_data = data[split_idx - 1:]
-    return train_data, test_data
+    label_horizon = split.label_horizon
+    embargo_bars = max(0, int(split.embargo_pct * n))
+
+    # Apply purge then embargo
+    train_end = split_idx - label_horizon - embargo_bars
+    test_start = split_idx + embargo_bars
+
+    # Clamp so each partition has at least 1 bar; fall back to clean split if degenerate
+    train_end = max(1, train_end)
+    test_start = min(n - 1, test_start)
+    if train_end >= test_start:
+        train_end = split_idx
+        test_start = split_idx
+
+    train_data = data[:train_end]
+    test_data = data[test_start:]
+
+    split_meta = {
+        "purged_count": label_horizon,
+        "embargoed_count": embargo_bars,
+        "train_rows": train_end,
+        "test_rows": n - test_start,
+        "train_boundary_date": data[train_end - 1].get("timestamp") if train_end > 0 else None,
+        "test_boundary_date": data[test_start].get("timestamp") if test_start < n else None,
+    }
+
+    return train_data, test_data, split_meta
 
 
 def _rollout_non_rl_policy(

@@ -59,6 +59,54 @@ def deflated_sharpe_ratio(
     }
 
 
+def probabilistic_sharpe_ratio(
+    observed_sharpe: float,
+    n_observations: int,
+    returns_skewness: float,
+    returns_kurtosis: float,
+    benchmark_sharpe: float = 0.0,
+    annualization: float = 252.0,
+) -> dict:
+    """Compute Probabilistic Sharpe Ratio (PSR) per Bailey & de Prado (2012).
+
+    PSR(SR*) = Phi((SR_hat - SR*) / SE(SR_hat))
+    where SE(SR_hat) accounts for return skewness and excess kurtosis (Lo 2002).
+
+    Single-path capable — no multiple-testing correction. Use deflated_sharpe_ratio
+    for the multi-trial (DSR) version.
+    """
+    if n_observations <= 1:
+        return {
+            "psr": 0.5,
+            "z_score": 0.0,
+            "benchmark_sharpe": benchmark_sharpe,
+            "observed_sharpe": observed_sharpe,
+        }
+
+    # Work in de-annualized terms
+    sr = observed_sharpe / np.sqrt(annualization)
+    sr_star = benchmark_sharpe / np.sqrt(annualization)
+
+    # Standard error of SR (Lo 2002) using T-1 to match the PSR paper
+    variance = (1 - returns_skewness * sr + ((returns_kurtosis - 1) / 4) * sr**2) / (n_observations - 1)
+    if variance <= 0:
+        extreme = 1.0 if observed_sharpe > benchmark_sharpe else 0.0
+        return {
+            "psr": extreme,
+            "z_score": float("inf") if observed_sharpe > benchmark_sharpe else float("-inf"),
+            "benchmark_sharpe": benchmark_sharpe,
+            "observed_sharpe": observed_sharpe,
+        }
+
+    z = (sr - sr_star) / np.sqrt(variance)
+    return {
+        "psr": float(sp_stats.norm.cdf(z)),
+        "z_score": float(z),
+        "benchmark_sharpe": benchmark_sharpe,
+        "observed_sharpe": observed_sharpe,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Deflated Sharpe Ratio")
     parser.add_argument("--observed-sharpe", type=float, required=True, help="Observed Sharpe ratio")
