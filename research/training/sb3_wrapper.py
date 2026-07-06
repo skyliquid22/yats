@@ -11,10 +11,11 @@ from __future__ import annotations
 
 from typing import Any
 
+import gymnasium
 import numpy as np
 
 
-class SB3EnvWrapper:
+class SB3EnvWrapper(gymnasium.Env):
     """Gymnasium-compatible wrapper around RewardAdapterEnv for SB3.
 
     SB3 requires:
@@ -35,18 +36,17 @@ class SB3EnvWrapper:
         n_symbols: int,
         data: list[dict[str, Any]],
     ) -> None:
-        import gymnasium
-        from gymnasium import spaces
+        super().__init__()
 
         self._env = env
         self._data = data
         self._n_symbols = n_symbols
         obs_len = env.observation_length
 
-        self.observation_space = spaces.Box(
+        self.observation_space = gymnasium.spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_len,), dtype=np.float32,
         )
-        self.action_space = spaces.Box(
+        self.action_space = gymnasium.spaces.Box(
             low=0.0, high=1.0, shape=(n_symbols,), dtype=np.float32,
         )
 
@@ -66,6 +66,7 @@ class SB3EnvWrapper:
         Returns:
             (observation, info) tuple.
         """
+        super().reset(seed=seed)
         obs_tuple = self._env.reset(data=self._data)
         obs = np.array(obs_tuple, dtype=np.float32)
         return obs, {}

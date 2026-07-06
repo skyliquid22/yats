@@ -29,8 +29,18 @@ def _install_mocks():
                 return np.zeros(self.shape, dtype=self.dtype)
             def contains(self, x):
                 return True
+        class MockEnv:
+            def reset(self, *, seed=None, options=None):
+                pass
+            def step(self, action):
+                raise NotImplementedError
+            def render(self):
+                pass
+            def close(self):
+                pass
         spaces_mod.Box = MockBox
         gym_mod.spaces = spaces_mod
+        gym_mod.Env = MockEnv
         sys.modules["gymnasium"] = gym_mod
         sys.modules["gymnasium.spaces"] = spaces_mod
 
