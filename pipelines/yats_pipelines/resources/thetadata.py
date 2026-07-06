@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -311,7 +311,6 @@ def _parse_thetadata_date(date_int: int) -> datetime | None:
 
 def _parse_thetadata_datetime(date_int: int, ms_of_day: int) -> datetime | None:
     """Convert ThetaData v2 date + ms_of_day offset to UTC datetime."""
-    from datetime import timedelta
     base = _parse_thetadata_date(date_int)
     if base is None:
         return None
