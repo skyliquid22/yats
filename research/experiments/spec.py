@@ -36,8 +36,9 @@ class EvaluationSplitConfig:
     train_ratio: float
     test_ratio: float
     test_window_months: int | None = None
-    label_horizon: int = 1       # bars to purge from train-end (López de Prado §5)
-    embargo_pct: float = 0.01    # fraction of n to embargo on each side of the split
+    label_horizon: int = 1       # bars to purge from train-end (López de Prado Ch. 7)
+    purge_buffer: int | None = None  # absolute bar count for serial-correlation buffer
+                                     # (None = auto from feature set max lookback)
 
     _VALID_WINDOWS = {1, 3, 4, 6, 12}
 
@@ -59,8 +60,8 @@ class EvaluationSplitConfig:
             )
         if self.label_horizon < 0:
             raise ValueError("label_horizon must be >= 0")
-        if self.embargo_pct < 0:
-            raise ValueError("embargo_pct must be >= 0")
+        if self.purge_buffer is not None and self.purge_buffer < 0:
+            raise ValueError("purge_buffer must be >= 0")
 
 
 @dataclass(frozen=True)

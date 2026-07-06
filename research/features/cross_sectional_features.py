@@ -10,7 +10,7 @@ import pandas as pd
 from research.features.feature_registry import feature
 
 
-@feature("mom_3m")
+@feature("mom_3m", lookback=63)
 def compute_mom_3m(df: pd.DataFrame) -> pd.Series:
     """Cumulative return over 63 trading days.
 
@@ -19,7 +19,7 @@ def compute_mom_3m(df: pd.DataFrame) -> pd.Series:
     return np.log(df["close"] / df["close"].shift(63))
 
 
-@feature("mom_12m_excl_1m")
+@feature("mom_12m_excl_1m", lookback=252)
 def compute_mom_12m_excl_1m(df: pd.DataFrame) -> pd.Series:
     """Cumulative return months 2-12 (skip most recent month).
 
@@ -28,7 +28,7 @@ def compute_mom_12m_excl_1m(df: pd.DataFrame) -> pd.Series:
     return np.log(df["close"].shift(21) / df["close"].shift(252))
 
 
-@feature("log_mkt_cap")
+@feature("log_mkt_cap", lookback=0)
 def compute_log_mkt_cap(df: pd.DataFrame) -> pd.Series:
     """log(shares_outstanding * close_price).
 
@@ -38,7 +38,7 @@ def compute_log_mkt_cap(df: pd.DataFrame) -> pd.Series:
     return np.log(df["shares_outstanding"] * df["close"])
 
 
-@feature("size_rank")
+@feature("size_rank", lookback=0)
 def compute_size_rank(group: pd.DataFrame) -> pd.Series:
     """Percentile rank of log_mkt_cap within universe on each date.
 
@@ -47,7 +47,7 @@ def compute_size_rank(group: pd.DataFrame) -> pd.Series:
     return group["log_mkt_cap"].rank(pct=True)
 
 
-@feature("value_rank")
+@feature("value_rank", lookback=0)
 def compute_value_rank(group: pd.DataFrame) -> pd.Series:
     """Percentile rank of 1/pe_ttm within universe on each date.
 
