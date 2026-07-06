@@ -27,6 +27,7 @@ class ExperimentRunConfig(Config):
 
     experiment_id: str
     data_root: str = ".yats_data"
+    allow_empty_data: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -80,20 +81,21 @@ def fetch_features(context: OpExecutionContext, config: ExperimentRunConfig, spe
         )
         conn.autocommit = True
 
-        # Query OHLCV + feature data
-        symbol_filter = ", ".join(f"'{s}'" for s in symbols)
-        date_conditions = []
+        # Build parameterized query — no f-string interpolation of user values
+        q_parts = ["symbol IN %s"]
+        q_params: list = [tuple(symbols)]
         if start_date:
-            date_conditions.append(f"timestamp >= '{start_date}'")
+            q_parts.append("timestamp >= %s")
+            q_params.append(start_date)
         if end_date:
-            date_conditions.append(f"timestamp <= '{end_date}'")
-        where_clause = f"symbol IN ({symbol_filter})"
-        if date_conditions:
-            where_clause += " AND " + " AND ".join(date_conditions)
+            q_parts.append("timestamp <= %s")
+            q_params.append(end_date)
+        where_clause = " AND ".join(q_parts)
 
         cur = conn.cursor()
         cur.execute(
-            f"SELECT * FROM features WHERE {where_clause} ORDER BY timestamp, symbol"
+            f"SELECT * FROM features WHERE {where_clause} ORDER BY timestamp, symbol",
+            q_params,
         )
         col_names = [desc[0] for desc in cur.description]
         rows = cur.fetchall()
@@ -101,13 +103,20 @@ def fetch_features(context: OpExecutionContext, config: ExperimentRunConfig, spe
 
         features_df = pd.DataFrame(rows, columns=col_names)
 
+        # Deduplicate on (symbol, timestamp, feature_set, feature_set_version) to guard
+        # against cross-run duplicate rows in the features table; keep last written.
+        if not features_df.empty:
+            dedup_cols = [c for c in ["symbol", "timestamp", "feature_set", "feature_set_version"]
+                          if c in features_df.columns]
+            if dedup_cols:
+                features_df = features_df.drop_duplicates(subset=dedup_cols, keep="last")
+
         # Join canonical close prices — features table has no close column
         closes_cur = conn.cursor()
         closes_cur.execute(
-            f"SELECT timestamp, symbol, close "
-            f"FROM canonical_equity_ohlcv "
-            f"WHERE {where_clause} "
-            f"ORDER BY timestamp, symbol"
+            "SELECT timestamp, symbol, close FROM canonical_equity_ohlcv "
+            f"WHERE {where_clause} ORDER BY timestamp, symbol",
+            q_params,
         )
         closes_col_names = [desc[0] for desc in closes_cur.description]
         closes_rows = closes_cur.fetchall()
@@ -125,12 +134,19 @@ def fetch_features(context: OpExecutionContext, config: ExperimentRunConfig, spe
             json.dumps(data_rows, default=str, sort_keys=True).encode()
         ).hexdigest()[:16]
 
-    except Exception:
-        context.log.warning("QuestDB not available, using empty data")
+    except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+        context.log.warning("QuestDB not available (%s) — using empty data", exc)
         data_rows = []
         data_hash = "no_data"
 
     context.log.info("Fetched %d rows for %d symbols", len(data_rows), len(symbols))
+
+    if not data_rows and not config.allow_empty_data:
+        raise RuntimeError(
+            f"fetch_features returned 0 rows for experiment '{config.experiment_id}'. "
+            "Check that QuestDB is populated and the date range / symbols are correct. "
+            "Set allow_empty_data=true in run config to proceed with empty data."
+        )
 
     return {
         "data": data_rows,

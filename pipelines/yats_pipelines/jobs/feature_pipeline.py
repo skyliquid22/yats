@@ -66,13 +66,18 @@ def _ts_nanos(dt) -> TimestampNanos:
     return TimestampNanos(int(dt.timestamp() * 1_000_000_000))
 
 
-def _date_clause(start_date: str, end_date: str, ts_col: str = "timestamp") -> str:
-    parts = []
+def _date_clause(start_date: str, end_date: str, ts_col: str = "timestamp") -> tuple[str, list]:
+    """Return (WHERE clause template, params list) for date filtering."""
+    parts: list[str] = []
+    params: list = []
     if start_date:
-        parts.append(f"{ts_col} >= '{start_date}T00:00:00.000000Z'")
+        parts.append(f"{ts_col} >= %s")
+        params.append(f"{start_date}T00:00:00.000000Z")
     if end_date:
-        parts.append(f"{ts_col} <= '{end_date}T23:59:59.999999Z'")
-    return " WHERE " + " AND ".join(parts) if parts else ""
+        parts.append(f"{ts_col} <= %s")
+        params.append(f"{end_date}T23:59:59.999999Z")
+    where = " WHERE " + " AND ".join(parts) if parts else ""
+    return where, params
 
 
 def _load_universe(name: str) -> list[str]:
@@ -94,17 +99,17 @@ def _load_universe(name: str) -> list[str]:
 
 def _load_ohlcv(conn, tickers: list[str], start_date: str, end_date: str) -> pd.DataFrame:
     """Load canonical OHLCV data for given tickers and date range."""
-    where = _date_clause(start_date, end_date)
-    ticker_list = ",".join(f"'{t}'" for t in tickers)
+    where, params = _date_clause(start_date, end_date)
     if where:
-        where += f" AND symbol IN ({ticker_list})"
+        where += " AND symbol IN %s"
     else:
-        where = f" WHERE symbol IN ({ticker_list})"
+        where = " WHERE symbol IN %s"
+    params.append(tuple(tickers))
 
     query = f"SELECT timestamp, symbol, open, high, low, close, volume FROM canonical_equity_ohlcv{where} ORDER BY symbol, timestamp"
 
     cur = conn.cursor()
-    cur.execute(query)
+    cur.execute(query, params)
     columns = [desc[0] for desc in cur.description]
     rows = cur.fetchall()
     cur.close()
@@ -119,12 +124,12 @@ def _load_ohlcv(conn, tickers: list[str], start_date: str, end_date: str) -> pd.
 
 def _load_financial_metrics(conn, tickers: list[str], start_date: str, end_date: str) -> pd.DataFrame:
     """Load canonical financial metrics for given tickers and date range."""
-    where = _date_clause(start_date, end_date)
-    ticker_list = ",".join(f"'{t}'" for t in tickers)
+    where, params = _date_clause(start_date, end_date)
     if where:
-        where += f" AND symbol IN ({ticker_list})"
+        where += " AND symbol IN %s"
     else:
-        where = f" WHERE symbol IN ({ticker_list})"
+        where = " WHERE symbol IN %s"
+    params.append(tuple(tickers))
 
     fields = [
         "timestamp", "symbol", "pe_ratio", "ps_ratio", "pb_ratio",
@@ -136,7 +141,7 @@ def _load_financial_metrics(conn, tickers: list[str], start_date: str, end_date:
     query = f"SELECT {field_str} FROM canonical_financial_metrics{where} ORDER BY symbol, timestamp"
 
     cur = conn.cursor()
-    cur.execute(query)
+    cur.execute(query, params)
     columns = [desc[0] for desc in cur.description]
     rows = cur.fetchall()
     cur.close()
@@ -361,6 +366,7 @@ def _write_features(
 ) -> int:
     """Write feature rows to QuestDB via ILP."""
     written = 0
+    skipped_all_nan = 0
     for i, ts in enumerate(timestamps):
         if pd.isna(ts):
             continue
@@ -379,6 +385,7 @@ def _write_features(
                     has_any = True
 
         if not has_any:
+            skipped_all_nan += 1
             continue
 
         columns["computed_at"] = _ts_nanos(now)
@@ -395,6 +402,11 @@ def _write_features(
         )
         written += 1
 
+    if skipped_all_nan > 0:
+        logger.debug(
+            "_write_features: skipped %d all-NaN rows for symbol %s (feature_set=%s)",
+            skipped_all_nan, symbol, feature_set,
+        )
     return written
 
 

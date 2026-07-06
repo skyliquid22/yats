@@ -75,16 +75,18 @@ def _row(sender, table: str, symbols: dict, columns: dict, at: datetime) -> None
     )
 
 
-def _date_clause(start_date: str, end_date: str, ts_col: str = "timestamp") -> str:
-    """Build a WHERE clause for date range filtering."""
-    parts = []
+def _date_clause(start_date: str, end_date: str, ts_col: str = "timestamp") -> tuple[str, list]:
+    """Return (WHERE clause template, params list) for date range filtering."""
+    parts: list[str] = []
+    params: list = []
     if start_date:
-        parts.append(f"{ts_col} >= '{start_date}T00:00:00.000000Z'")
+        parts.append(f"{ts_col} >= %s")
+        params.append(f"{start_date}T00:00:00.000000Z")
     if end_date:
-        parts.append(f"{ts_col} <= '{end_date}T23:59:59.999999Z'")
-    if parts:
-        return " WHERE " + " AND ".join(parts)
-    return ""
+        parts.append(f"{ts_col} <= %s")
+        params.append(f"{end_date}T23:59:59.999999Z")
+    where = " WHERE " + " AND ".join(parts) if parts else ""
+    return where, params
 
 
 # ---------------------------------------------------------------------------
@@ -173,11 +175,11 @@ def _canonicalize_equity_ohlcv(
         log.info("equity_ohlcv: run %s already written — skipping (idempotent)", run_id)
         return 0
 
-    where = _date_clause(config.start_date, config.end_date)
+    where, params = _date_clause(config.start_date, config.end_date)
     query = f"SELECT * FROM raw_alpaca_equity_ohlcv{where} ORDER BY timestamp"
 
     cur = conn.cursor()
-    cur.execute(query)
+    cur.execute(query, params)
     columns = [desc[0] for desc in cur.description]
     raw_rows = [dict(zip(columns, row)) for row in cur.fetchall()]
     cur.close()
@@ -201,10 +203,19 @@ def _canonicalize_equity_ohlcv(
         day = ts.date()
         by_key[(row["symbol"], day)].append(row)
 
+    def _ingested_at_key(b: dict):
+        """Sort key for ingested_at — latest wins; None sorts first."""
+        v = b.get("ingested_at")
+        if v is None:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        if isinstance(v, datetime) and v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v
+
     written = 0
     for (symbol, day), bars in by_key.items():
-        # Single vendor per symbol-day — take the latest ingested bar
-        bar = bars[-1]
+        # Latest-ingested wins per symbol-day — deterministic regardless of DB row order
+        bar = max(bars, key=_ingested_at_key)
 
         warnings = _validate_ohlcv_row(bar, rolling_stats, config.outlier_std_threshold)
         if any(w.startswith("missing_") or w.startswith("non_positive_") for w in warnings):
@@ -285,11 +296,11 @@ def _canonicalize_fundamentals(
         log.info("fundamentals: run %s already written — skipping (idempotent)", run_id)
         return 0
 
-    where = _date_clause(config.start_date, config.end_date, ts_col="report_date")
+    where, params = _date_clause(config.start_date, config.end_date, ts_col="report_date")
     query = f"SELECT * FROM raw_fd_fundamentals{where} ORDER BY report_date"
 
     cur = conn.cursor()
-    cur.execute(query)
+    cur.execute(query, params)
     columns = [desc[0] for desc in cur.description]
     raw_rows = [dict(zip(columns, row)) for row in cur.fetchall()]
     cur.close()
@@ -376,11 +387,11 @@ def _canonicalize_financial_metrics(
         log.info("financial_metrics: run %s already written — skipping (idempotent)", run_id)
         return 0
 
-    where = _date_clause(config.start_date, config.end_date)
+    where, params = _date_clause(config.start_date, config.end_date)
     query = f"SELECT * FROM raw_fd_financial_metrics{where} ORDER BY timestamp"
 
     cur = conn.cursor()
-    cur.execute(query)
+    cur.execute(query, params)
     columns = [desc[0] for desc in cur.description]
     raw_rows = [dict(zip(columns, row)) for row in cur.fetchall()]
     cur.close()

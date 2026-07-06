@@ -268,10 +268,12 @@ def write_raw_thetadata(
                 run_id,
             )
         elif chain_rows:
+            skipped_chain = 0
             with _ilp_sender(qdb) as sender:
                 for row in chain_rows:
                     quote_ts = row.get("quote_ts")
                     if quote_ts is None:
+                        skipped_chain += 1
                         continue
                     ingested_at = row["ingested_at"]
                     expiry_dt = _parse_exp_to_datetime(row.get("exp", ""))
@@ -305,7 +307,13 @@ def write_raw_thetadata(
                         at=_ts_nanos(quote_ts),
                     )
                 sender.flush()
-            chain_written = len(chain_rows)
+            if skipped_chain:
+                context.log.warning(
+                    "Skipped %d/%d chain rows with missing quote_ts "
+                    "(timestamp field missing or unparseable)",
+                    skipped_chain, len(chain_rows),
+                )
+            chain_written = len(chain_rows) - skipped_chain
             context.log.info(
                 "Wrote %d rows to raw_thetadata_options_chain", chain_written
             )
