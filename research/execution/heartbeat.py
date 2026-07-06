@@ -9,12 +9,30 @@ Implements PRD §13.5 Heartbeat Monitoring:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+import numpy as np
 from questdb.ingress import Protocol, Sender, TimestampNanos
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_columns(cols: dict) -> dict:
+    """Coerce numpy scalar values to native Python types; drop NaN floats."""
+    out = {}
+    for k, v in cols.items():
+        if isinstance(v, np.floating):
+            fv = float(v)
+            if math.isnan(fv):
+                continue
+            out[k] = fv
+        elif isinstance(v, np.integer):
+            out[k] = int(v)
+        else:
+            out[k] = v
+    return out
 
 
 @dataclass
@@ -63,7 +81,7 @@ class HeartbeatWriter:
                     "experiment_id": self.experiment_id,
                     "mode": self.mode,
                 },
-                columns=columns,
+                columns=_coerce_columns(columns),
                 at=ts,
             )
             sender.flush()
