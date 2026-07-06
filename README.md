@@ -86,23 +86,27 @@ PYTHONPATH=.:pipelines uv run dagster dev -m pipelines.yats_pipelines.definition
 
 ### ThetaData terminal
 
-ThetaData v2 REST is served by a local Java process (Theta Terminal) that proxies
-requests upstream with your subscriber credentials. No auth headers are needed in
-REST calls — authentication happens at terminal startup.
+ThetaData v3 REST is served by the local Theta Terminal v3 process (a Java app) that
+proxies requests upstream with your subscriber credentials. No auth headers are needed
+in REST calls — authentication happens at terminal startup.
+
+**Requirements:** Java 21. On this machine: `/opt/homebrew/opt/openjdk@21/bin` must be
+on `PATH` (the terminal spawns a child JVM from PATH).
 
 ```bash
-# Download ThetaTerminal.jar from https://thetadata.net/
-# Run it with your ThetaData credentials:
-java -jar ThetaTerminal.jar your@email.com yourpassword
+# Download ThetaTerminalv3.jar:
+# https://download-unstable.thetadata.us/ThetaTerminalv3.jar
+#
+# Launch with your API key:
+java -jar ThetaTerminalv3.jar --api-key <YOUR_THETADATA_API_KEY>
 
-# The terminal listens on port 25510 (default).
+# The terminal listens on port 25503.
 # Verify it's running:
-curl http://127.0.0.1:25510/v2/list/roots/option
+curl "http://127.0.0.1:25503/v3/option/list/expirations?symbol=AAPL"
 ```
 
-`THETADATA_API_KEY` in `.env` is your subscriber password used to launch the terminal,
-not an API key sent in REST requests. Set `THETADATA_BASE_URL` only if the terminal
-runs on a non-default address.
+`THETADATA_BASE_URL` env var overrides the default `http://127.0.0.1:25503/v3` if the
+terminal runs on a non-default address.
 
 ### Test gating
 

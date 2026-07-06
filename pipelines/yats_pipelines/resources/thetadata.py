@@ -1,37 +1,40 @@
-"""ThetaData REST API v2 vendor adapter — options chains, greeks, IV, open interest."""
+"""ThetaData REST API v3 vendor adapter — options chains, greeks, IV, open interest."""
 
+import csv
+import io
 import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import requests
 
 logger = logging.getLogger(__name__)
 
 RETRY_DELAYS = [1, 5, 30]  # seconds — exponential backoff
-# ThetaData v2 REST is served by the local Theta Terminal process.
-# Override with THETADATA_BASE_URL env var if the terminal runs on a non-default port.
-BASE_URL = os.environ.get("THETADATA_BASE_URL", "http://127.0.0.1:25510/v2")
+# ThetaData v3 REST is served by the local Theta Terminal v3 process.
+# Override with THETADATA_BASE_URL env var if the terminal runs on a non-default address.
+BASE_URL = os.environ.get("THETADATA_BASE_URL", "http://127.0.0.1:25503/v3")
 
 
 @dataclass
 class ThetaDataResource:
-    """ThetaData REST API v2 resource — proxied through local Theta Terminal.
+    """ThetaData REST API v3 resource — proxied through local Theta Terminal v3.
 
-    The Theta Terminal must be running at base_url before any calls are made.
+    The Theta Terminal v3 must be running at base_url before any calls are made.
     No auth headers are sent; the terminal authenticates upstream at launch.
-    Strikes are in milli-dollars (ThetaData internal) — divide by 1000 for USD.
+    Strikes are in dollars (v3 native format — no milli-dollar conversion).
+    Expiration dates use YYYYMMDD at the interface boundary; v3 API also accepts this.
     """
 
     base_url: str = field(
-        default_factory=lambda: os.environ.get("THETADATA_BASE_URL", "http://127.0.0.1:25510/v2")
+        default_factory=lambda: os.environ.get("THETADATA_BASE_URL", "http://127.0.0.1:25503/v3")
     )
     request_delay: float = 0.3  # seconds between requests for rate limiting
 
-    def _request_with_retry(self, url: str, params: dict) -> dict:
-        """Execute GET request with exponential backoff retry (3 attempts)."""
+    def _request_with_retry(self, url: str, params: dict) -> str:
+        """Execute GET request with exponential backoff retry (3 attempts). Returns CSV text."""
         last_exc: Exception | None = None
         for attempt, delay in enumerate(RETRY_DELAYS):
             try:
@@ -47,10 +50,11 @@ class ThetaDataResource:
                     time.sleep(retry_after)
                     continue
                 resp.raise_for_status()
-                return resp.json()
+                return resp.text
             except requests.exceptions.ConnectionError as exc:
                 raise RuntimeError(
-                    "Theta Terminal not running — start it with your ThetaData credentials; see README"
+                    "Theta Terminal not running — start it with: "
+                    "java -jar ThetaTerminalv3.jar --api-key <key>; see README"
                 ) from exc
             except requests.RequestException as exc:
                 last_exc = exc
@@ -68,106 +72,97 @@ class ThetaDataResource:
         ) from last_exc
 
     @staticmethod
-    def _parse_response(data: dict) -> list[dict]:
-        """Convert ThetaData v2 columnar response to list of row dicts."""
-        fields = data["header"]["format"]
-        return [dict(zip(fields, row)) for row in data.get("response", [])]
+    def _parse_csv_response(text: str) -> list[dict]:
+        """Parse ThetaData v3 CSV response into list of row dicts."""
+        reader = csv.DictReader(io.StringIO(text))
+        return [dict(row) for row in reader]
 
     def list_expirations(self, root: str) -> list[str]:
-        """List all available expiration dates for a root.
+        """List all available expiration dates for a root symbol.
 
         Returns sorted list of YYYYMMDD strings.
         """
-        url = f"{self.base_url}/list/expirations"
-        raw = self._request_with_retry(url, {"root": root})
-        rows = self._parse_response(raw)
+        url = f"{self.base_url}/option/list/expirations"
+        text = self._request_with_retry(url, {"symbol": root})
+        rows = self._parse_csv_response(text)
         exps = []
         for row in rows:
-            # ThetaData returns expirations as integers YYYYMMDD in first field
-            val = row.get("expirations") or next(iter(row.values()), None)
-            if val is not None:
-                exps.append(str(int(val)))
+            exp = row.get("expiration", "")
+            if exp:
+                # v3 returns "YYYY-MM-DD"; strip dashes for interface compatibility
+                exps.append(exp.replace("-", ""))
         return sorted(exps)
 
     def get_option_chain_snapshot(self, root: str, exp: str) -> list[dict]:
         """Get option chain snapshot for a root + expiry.
 
-        Calls greeks, quote, open_interest, and ohlc bulk snapshot endpoints
-        and joins them by (strike_raw, right) key.
+        Calls greeks/first_order, open_interest, and ohlc endpoints and joins
+        them by (strike, right) key.
 
         Args:
             root: Underlying ticker (e.g. "AAPL").
-            exp: Expiration date as YYYYMMDD string (e.g. "20240119").
+            exp: Expiration date as YYYYMMDD string (e.g. "20260710").
 
         Returns:
             List of dicts per contract with fields: root, exp, strike, right,
             bid, ask, last, iv, delta, gamma, theta, vega, rho,
             open_interest, volume, quote_ts.
+
+            Note: gamma is always None on a STANDARD subscription (second-order
+            greeks require a professional plan).
         """
-        params = {"root": root, "exp": exp}
+        params = {"symbol": root, "expiration": exp}
 
-        greeks_rows = self._parse_response(
+        greeks_rows = self._parse_csv_response(
             self._request_with_retry(
-                f"{self.base_url}/bulk_snapshot/option/greeks", params
+                f"{self.base_url}/option/snapshot/greeks/first_order", params
             )
         )
         time.sleep(self.request_delay)
 
-        quote_rows = self._parse_response(
+        oi_rows = self._parse_csv_response(
             self._request_with_retry(
-                f"{self.base_url}/bulk_snapshot/option/quote", params
+                f"{self.base_url}/option/snapshot/open_interest", params
             )
         )
         time.sleep(self.request_delay)
 
-        oi_rows = self._parse_response(
+        ohlc_rows = self._parse_csv_response(
             self._request_with_retry(
-                f"{self.base_url}/bulk_snapshot/option/open_interest", params
-            )
-        )
-        time.sleep(self.request_delay)
-
-        ohlc_rows = self._parse_response(
-            self._request_with_retry(
-                f"{self.base_url}/bulk_snapshot/option/ohlc", params
+                f"{self.base_url}/option/snapshot/ohlc", params
             )
         )
         time.sleep(self.request_delay)
 
         def _key(row: dict) -> tuple:
-            return (row.get("strike"), row.get("right"))
+            return (row.get("strike", ""), row.get("right", ""))
 
-        greeks_by_key = {_key(r): r for r in greeks_rows}
-        quote_by_key = {_key(r): r for r in quote_rows}
         oi_by_key = {_key(r): r for r in oi_rows}
         ohlc_by_key = {_key(r): r for r in ohlc_rows}
 
         rows = []
-        for key, gk in greeks_by_key.items():
-            qt = quote_by_key.get(key, {})
+        for gk in greeks_rows:
+            key = _key(gk)
             oi = oi_by_key.get(key, {})
             oh = ohlc_by_key.get(key, {})
-
-            ms = gk.get("ms_of_day") or qt.get("ms_of_day") or 0
-            date_int = gk.get("date") or qt.get("date") or 0
 
             rows.append({
                 "root": root,
                 "exp": exp,
-                "strike": _parse_strike(gk.get("strike")),
-                "right": gk.get("right", ""),
-                "bid": _f(qt.get("bid")),
-                "ask": _f(qt.get("ask")),
+                "strike": _f(gk.get("strike")),   # v3: already in dollars
+                "right": gk.get("right", ""),      # v3: "CALL" or "PUT"
+                "bid": _f(gk.get("bid")),
+                "ask": _f(gk.get("ask")),
                 "last": _f(oh.get("close")),
                 "iv": _f(gk.get("implied_vol")),
                 "delta": _f(gk.get("delta")),
-                "gamma": _f(gk.get("gamma")),
+                "gamma": None,  # requires professional subscription
                 "theta": _f(gk.get("theta")),
                 "vega": _f(gk.get("vega")),
                 "rho": _f(gk.get("rho")),
                 "open_interest": _i(oi.get("open_interest")),
                 "volume": _i(oh.get("volume")),
-                "quote_ts": _parse_thetadata_datetime(date_int, ms),
+                "quote_ts": _parse_iso_timestamp(gk.get("timestamp")),
             })
 
         logger.info(
@@ -190,31 +185,30 @@ class ThetaDataResource:
             List of dicts per contract per day with fields: root, exp, strike,
             right, open, high, low, close, volume, trade_count, quote_date.
         """
-        url = f"{self.base_url}/bulk_hist/option/eod"
+        url = f"{self.base_url}/option/history/eod"
         params = {
-            "root": root,
-            "exp": exp,
+            "symbol": root,
+            "expiration": exp,
             "start_date": start_date,
             "end_date": end_date,
         }
-        raw = self._request_with_retry(url, params)
-        raw_rows = self._parse_response(raw)
+        text = self._request_with_retry(url, params)
+        raw_rows = self._parse_csv_response(text)
 
         rows = []
         for row in raw_rows:
-            date_int = row.get("date", 0)
             rows.append({
                 "root": root,
                 "exp": exp,
-                "strike": _parse_strike(row.get("strike")),
-                "right": row.get("right", ""),
+                "strike": _f(row.get("strike")),   # v3: already in dollars
+                "right": row.get("right", ""),      # v3: "CALL" or "PUT"
                 "open": _f(row.get("open")),
                 "high": _f(row.get("high")),
                 "low": _f(row.get("low")),
                 "close": _f(row.get("close")),
                 "volume": _i(row.get("volume")),
                 "trade_count": _i(row.get("count")),
-                "quote_date": _parse_thetadata_date(date_int),
+                "quote_date": _parse_iso_timestamp(row.get("last_trade")),
             })
 
         logger.info(
@@ -272,13 +266,30 @@ def _i(val) -> int | None:
     if val is None:
         return None
     try:
-        return int(val)
+        return int(float(val))
     except (ValueError, TypeError):
         return None
 
 
+def _parse_iso_timestamp(ts: str | None) -> datetime | None:
+    """Parse ThetaData v3 ISO 8601 timestamp string to UTC datetime."""
+    if not ts:
+        return None
+    try:
+        # v3 uses format like "2026-07-02T16:00:00.003" (no tz suffix = ET session time)
+        # Store as-is treating as UTC for consistency with existing pipeline convention.
+        return datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+    except (ValueError, AttributeError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# v2 compatibility helpers (kept for existing tests; not called by adapter)
+# ---------------------------------------------------------------------------
+
+
 def _parse_strike(val) -> float | None:
-    """Convert ThetaData strike (milli-dollars) to USD dollars."""
+    """Convert ThetaData v2 strike (milli-dollars) to USD dollars. Not used in v3."""
     if val is None:
         return None
     try:
@@ -288,7 +299,7 @@ def _parse_strike(val) -> float | None:
 
 
 def _parse_thetadata_date(date_int: int) -> datetime | None:
-    """Convert ThetaData YYYYMMDD integer to UTC midnight datetime."""
+    """Convert ThetaData v2 YYYYMMDD integer to UTC midnight datetime."""
     if not date_int:
         return None
     try:
@@ -299,7 +310,8 @@ def _parse_thetadata_date(date_int: int) -> datetime | None:
 
 
 def _parse_thetadata_datetime(date_int: int, ms_of_day: int) -> datetime | None:
-    """Convert ThetaData date + ms_of_day offset to UTC datetime."""
+    """Convert ThetaData v2 date + ms_of_day offset to UTC datetime."""
+    from datetime import timedelta
     base = _parse_thetadata_date(date_int)
     if base is None:
         return None
