@@ -218,14 +218,10 @@ class ThetaDataResource:
     ) -> list[dict]:
         """Get historical EOD option data for all contracts of a root + expiry.
 
-        Calls the EOD endpoint for OHLCV + bid/ask, then enriches with greeks
-        (first-order and gamma) and open interest from separate history endpoints.
-        Each is best-effort: a 472 (no data) or 403 (subscription limit) returns []
-        and greeks/OI remain None for that contract-day.
-
-        EOD endpoint provides: open, high, low, close, volume, trade_count, bid, ask.
-        Historical greeks endpoints provide: iv, delta, theta, vega, rho, gamma.
-        Historical OI endpoint provides: open_interest.
+        Calls /option/history/greeks/eod — one row per contract per day with OHLCV,
+        bid/ask, and all greeks (iv, delta, gamma, theta, vega, rho) in a single call.
+        Open interest is fetched separately from /option/history/open_interest and
+        joined by (strike, right, date); greeks/eod has no OI column.
 
         Args:
             root: Underlying ticker (e.g. "AAPL").
@@ -238,7 +234,7 @@ class ThetaDataResource:
             right, open, high, low, close, volume, trade_count, bid, ask,
             iv, delta, gamma, theta, vega, rho, open_interest, quote_date.
         """
-        url = f"{self.base_url}/option/history/eod"
+        url = f"{self.base_url}/option/history/greeks/eod"
         params = {
             "symbol": root,
             "expiration": exp,
@@ -263,15 +259,14 @@ class ThetaDataResource:
                 "trade_count": _i(row.get("count")),
                 "bid": _f(row.get("bid")),
                 "ask": _f(row.get("ask")),
-                # greeks enriched below; None until joined
-                "iv": None,
-                "delta": None,
-                "gamma": None,
-                "theta": None,
-                "vega": None,
-                "rho": None,
-                "open_interest": None,
-                "quote_date": _parse_iso_timestamp(row.get("last_trade")),
+                "iv": _f(row.get("implied_vol")),
+                "delta": _f(row.get("delta")),
+                "gamma": _f(row.get("gamma")),
+                "theta": _f(row.get("theta")),
+                "vega": _f(row.get("vega")),
+                "rho": _f(row.get("rho")),
+                "open_interest": None,  # enriched below from OI endpoint
+                "quote_date": _parse_iso_timestamp(row.get("timestamp")),
             })
 
         if rows:
@@ -287,27 +282,7 @@ class ThetaDataResource:
             )
             return rows
 
-        # Enrich with historical first-order greeks (iv, delta, theta, vega, rho)
-        greeks_rows = self._get_historical_greeks_first_order(root, exp, start_date, end_date)
-        if greeks_rows:
-            # Key: (strike_str, right, date_str)
-            greeks_by_key: dict[tuple, dict] = {}
-            for gr in greeks_rows:
-                key = (str(gr.get("strike", "")), gr.get("right", ""), gr.get("_date", ""))
-                greeks_by_key[key] = gr
-            for row in rows:
-                qd = row["quote_date"]
-                date_str = qd.strftime("%Y-%m-%d") if qd is not None else ""
-                key = (str(row["strike"]) if row["strike"] is not None else "", row["right"], date_str)
-                gr = greeks_by_key.get(key)
-                if gr:
-                    row["iv"] = gr.get("iv")
-                    row["delta"] = gr.get("delta")
-                    row["theta"] = gr.get("theta")
-                    row["vega"] = gr.get("vega")
-                    row["rho"] = gr.get("rho")
-
-        # Enrich with historical open interest
+        # Enrich with open interest — greeks/eod has no OI column
         oi_rows = self._get_historical_open_interest(root, exp, start_date, end_date)
         if oi_rows:
             oi_by_key: dict[tuple, int | None] = {}
@@ -321,68 +296,7 @@ class ThetaDataResource:
                 if key in oi_by_key:
                     row["open_interest"] = oi_by_key[key]
 
-        # Enrich with historical second-order greeks (gamma) — best-effort PRO endpoint
-        gamma_map = self._try_get_historical_second_order_greeks(root, exp, start_date, end_date)
-        if gamma_map:
-            for row in rows:
-                qd = row["quote_date"]
-                date_str = qd.strftime("%Y-%m-%d") if qd is not None else ""
-                key = (str(row["strike"]) if row["strike"] is not None else "", row["right"], date_str)
-                gamma = gamma_map.get(key)
-                if gamma is not None:
-                    row["gamma"] = gamma
-
         return rows
-
-    def _get_historical_greeks_first_order(
-        self, root: str, exp: str, start_date: str, end_date: str
-    ) -> list[dict]:
-        """Fetch historical first-order greeks (iv, delta, theta, vega, rho).
-
-        Returns [] immediately on 472 (no data) or 403 (subscription limit).
-        Each returned dict has keys: strike, right, iv, delta, theta, vega, rho, _date.
-        """
-        url = f"{self.base_url}/option/history/greeks/first_order"
-        params = {
-            "symbol": root,
-            "expiration": exp,
-            "start_date": start_date,
-            "end_date": end_date,
-        }
-        try:
-            resp = requests.get(url, params=params, timeout=30)
-            if resp.status_code in (403, 404, 472):
-                logger.debug(
-                    "Historical first-order greeks not available (HTTP %d) for %s exp=%s",
-                    resp.status_code, root, exp,
-                )
-                return []
-            resp.raise_for_status()
-            raw_rows = self._parse_csv_response(resp.text)
-        except requests.exceptions.ConnectionError:
-            logger.debug("Historical greeks fetch skipped: Theta Terminal not reachable")
-            return []
-        except requests.RequestException as exc:
-            logger.debug("Historical first-order greeks fetch failed: %s", exc)
-            return []
-
-        result = []
-        for row in raw_rows:
-            date_str = _extract_date_str(
-                row.get("last_trade") or row.get("timestamp") or row.get("date") or ""
-            )
-            result.append({
-                "strike": _f(row.get("strike")),
-                "right": row.get("right", ""),
-                "iv": _f(row.get("implied_vol") or row.get("iv")),
-                "delta": _f(row.get("delta")),
-                "theta": _f(row.get("theta")),
-                "vega": _f(row.get("vega")),
-                "rho": _f(row.get("rho")),
-                "_date": date_str,
-            })
-        time.sleep(self.request_delay)
-        return result
 
     def _get_historical_open_interest(
         self, root: str, exp: str, start_date: str, end_date: str
@@ -427,48 +341,6 @@ class ThetaDataResource:
                 "open_interest": _i(row.get("open_interest")),
                 "_date": date_str,
             })
-        time.sleep(self.request_delay)
-        return result
-
-    def _try_get_historical_second_order_greeks(
-        self, root: str, exp: str, start_date: str, end_date: str
-    ) -> dict[tuple, float | None]:
-        """Fetch historical second-order greeks (gamma). Best-effort PRO endpoint.
-
-        Returns {} immediately on 472/403/404 or any error.
-        Keys: (strike_str, right, date_str) → gamma float.
-        """
-        url = f"{self.base_url}/option/history/greeks/second_order"
-        params = {
-            "symbol": root,
-            "expiration": exp,
-            "start_date": start_date,
-            "end_date": end_date,
-        }
-        try:
-            resp = requests.get(url, params=params, timeout=30)
-            if resp.status_code in (403, 404, 472):
-                logger.debug(
-                    "Historical second-order greeks not available (HTTP %d) for %s exp=%s",
-                    resp.status_code, root, exp,
-                )
-                return {}
-            resp.raise_for_status()
-            raw_rows = self._parse_csv_response(resp.text)
-        except requests.exceptions.ConnectionError:
-            logger.debug("Historical second-order greeks skipped: Theta Terminal not reachable")
-            return {}
-        except requests.RequestException as exc:
-            logger.debug("Historical second-order greeks fetch failed: %s", exc)
-            return {}
-
-        result = {}
-        for row in raw_rows:
-            date_str = _extract_date_str(
-                row.get("last_trade") or row.get("timestamp") or row.get("date") or ""
-            )
-            key = (str(row.get("strike", "")), row.get("right", ""), date_str)
-            result[key] = _f(row.get("gamma"))
         time.sleep(self.request_delay)
         return result
 
