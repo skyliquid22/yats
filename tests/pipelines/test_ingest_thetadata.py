@@ -239,32 +239,44 @@ class TestGetOptionChainSnapshot:
 
 
 class TestGetHistoricalEod:
-    EOD_CSV = (
-        "symbol,expiration,strike,right,created,last_trade,open,high,low,close,"
+    # Fixture: representative greeks/eod response
+    # GET /v3/option/history/greeks/eod?symbol=AAPL&expiration=...&start_date=...&end_date=...
+    GREEKS_EOD_CSV = (
+        "symbol,expiration,strike,right,timestamp,open,high,low,close,"
         "volume,count,bid_size,bid_exchange,bid,bid_condition,ask_size,ask_exchange,"
-        "ask,ask_condition\n"
-        '"AAPL","2026-07-10",375.000,"CALL",'
-        "2026-06-22T17:23:38.351,2026-06-22T00:00:00.000,"
-        "0.00,0.00,0.00,0.00,0,0,0,6,0.00,50,172,22,0.52,50\n"
+        "ask,ask_condition,delta,theta,vega,rho,epsilon,lambda,gamma,vanna,charm,"
+        "speed,zomma,color,ultima,dualDelta,dualGamma,implied_vol,iv_error,"
+        "underlying_timestamp,underlying_price\n"
+        '"AAPL","2026-07-10",375.000,"CALL",2026-06-22T00:00:00.000,'
+        "0.00,0.00,0.00,0.00,0,0,0,6,0.00,50,172,22,0.52,50,"
+        "0.0129,-0.0572,1.5154,0.0844,0,0,0.0042,0,0,"
+        "0,0,0,0,0,0,0.5999,-0.0024,"
+        "2026-06-22T20:00:00.000,306.24\n"
     )
 
-    # Real response captured live from Theta Terminal v3
-    # GET /v3/option/history/eod?symbol=AAPL&expiration=20250718&start_date=20250701&end_date=20250705
-    EOD_CSV_LIVE = (
-        "symbol,expiration,strike,right,created,last_trade,open,high,low,close,"
+    # Two-row fixture: one no-trade PUT (midnight timestamp) + one traded CALL
+    GREEKS_EOD_CSV_LIVE = (
+        "symbol,expiration,strike,right,timestamp,open,high,low,close,"
         "volume,count,bid_size,bid_exchange,bid,bid_condition,ask_size,ask_exchange,"
-        "ask,ask_condition\n"
-        '"AAPL","2025-07-18",300.000,"PUT",'
-        "2025-07-01T17:15:03.452,2025-07-01T00:00:00.000,"
-        "0.00,0.00,0.00,0.00,0,0,105,7,91.40,50,100,7,92.70,50\n"
-        '"AAPL","2025-07-18",300.000,"CALL",'
-        "2025-07-01T17:15:03.452,2025-07-01T15:52:58.319,"
-        "0.01,0.01,0.01,0.01,11,3,0,31,0.00,50,20,31,0.01,50\n"
+        "ask,ask_condition,delta,theta,vega,rho,epsilon,lambda,gamma,vanna,charm,"
+        "speed,zomma,color,ultima,dualDelta,dualGamma,implied_vol,iv_error,"
+        "underlying_timestamp,underlying_price\n"
+        '"AAPL","2025-07-18",300.000,"PUT",2025-07-01T00:00:00.000,'
+        "0.00,0.00,0.00,0.00,0,0,105,7,91.40,50,100,7,92.70,50,"
+        "-0.9990,0.0000,0.0100,0.0050,0,0,0.0001,0,0,"
+        "0,0,0,0,0,0,0.3500,0.0010,"
+        "2025-07-01T20:00:00.000,199.50\n"
+        '"AAPL","2025-07-18",300.000,"CALL",2025-07-01T15:52:58.319,'
+        "0.01,0.01,0.01,0.01,11,3,0,31,0.00,50,20,31,0.01,50,"
+        "0.0010,0.0000,0.0001,0.0000,0,0,0.0000,0,0,"
+        "0,0,0,0,0,0,0.3500,0.0010,"
+        "2025-07-01T20:00:00.000,199.50\n"
     )
 
     def test_eod_row_shape(self):
         td = ThetaDataResource()
-        with patch.object(td, "_request_with_retry", return_value=self.EOD_CSV):
+        with patch.object(td, "_request_with_retry", return_value=self.GREEKS_EOD_CSV), \
+             patch.object(td, "_get_historical_open_interest", return_value=[]):
             rows = td.get_historical_eod("AAPL", "20260710", "20260620", "20260705")
 
         assert len(rows) == 1
@@ -277,12 +289,18 @@ class TestGetHistoricalEod:
         assert row["close"] == 0.0
         assert row["volume"] == 0
         assert row["trade_count"] == 0
+        assert row["iv"] == pytest.approx(0.5999)
+        assert row["delta"] == pytest.approx(0.0129)
+        assert row["gamma"] == pytest.approx(0.0042)
+        assert row["bid"] == pytest.approx(0.0)
+        assert row["ask"] == pytest.approx(0.52)
         assert isinstance(row["quote_date"], datetime)
 
     def test_eod_live_response_two_rows(self):
-        """Real response: one no-trade PUT (midnight last_trade) + one traded CALL."""
+        """Two-row response: one no-trade PUT (midnight timestamp) + one traded CALL."""
         td = ThetaDataResource()
-        with patch.object(td, "_request_with_retry", return_value=self.EOD_CSV_LIVE):
+        with patch.object(td, "_request_with_retry", return_value=self.GREEKS_EOD_CSV_LIVE), \
+             patch.object(td, "_get_historical_open_interest", return_value=[]):
             rows = td.get_historical_eod("AAPL", "20250718", "20250701", "20250705")
 
         assert len(rows) == 2
@@ -306,24 +324,47 @@ class TestGetHistoricalEod:
         assert call_row["quote_date"].date().isoformat() == "2025-07-01"
 
     def test_eod_no_trade_midnight_quote_date_is_not_none(self):
-        """Rows with last_trade=...T00:00:00.000 (no trade) must yield a valid quote_date."""
+        """Rows with timestamp=...T00:00:00.000 (no trade) must yield a valid quote_date."""
         no_trade_csv = (
-            "symbol,expiration,strike,right,created,last_trade,open,high,low,close,"
+            "symbol,expiration,strike,right,timestamp,open,high,low,close,"
             "volume,count,bid_size,bid_exchange,bid,bid_condition,ask_size,ask_exchange,"
-            "ask,ask_condition\n"
-            '"AAPL","2025-07-18",300.000,"PUT",'
-            "2025-07-01T17:15:03.452,2025-07-01T00:00:00.000,"
-            "0.00,0.00,0.00,0.00,0,0,105,7,91.40,50,100,7,92.70,50\n"
+            "ask,ask_condition,delta,theta,vega,rho,epsilon,lambda,gamma,vanna,charm,"
+            "speed,zomma,color,ultima,dualDelta,dualGamma,implied_vol,iv_error,"
+            "underlying_timestamp,underlying_price\n"
+            '"AAPL","2025-07-18",300.000,"PUT",2025-07-01T00:00:00.000,'
+            "0.00,0.00,0.00,0.00,0,0,105,7,91.40,50,100,7,92.70,50,"
+            "-0.9990,0.0000,0.0100,0.0050,0,0,0.0001,0,0,"
+            "0,0,0,0,0,0,0.3500,0.0010,"
+            "2025-07-01T20:00:00.000,199.50\n"
         )
         td = ThetaDataResource()
-        with patch.object(td, "_request_with_retry", return_value=no_trade_csv):
+        with patch.object(td, "_request_with_retry", return_value=no_trade_csv), \
+             patch.object(td, "_get_historical_open_interest", return_value=[]):
             rows = td.get_historical_eod("AAPL", "20250718", "20250701", "20250701")
 
         assert len(rows) == 1
         assert rows[0]["quote_date"] is not None, (
-            "Midnight last_trade must not produce None quote_date — "
+            "Midnight timestamp must not produce None quote_date — "
             "write_raw_thetadata silently skips None-quote_date rows"
         )
+
+    def test_eod_oi_joined_by_strike_right_date(self):
+        """OI from _get_historical_open_interest is joined into rows by (strike, right, date)."""
+        td = ThetaDataResource()
+        oi_data = [{"strike": 375.0, "right": "CALL", "open_interest": 1234, "_date": "2026-06-22"}]
+        with patch.object(td, "_request_with_retry", return_value=self.GREEKS_EOD_CSV), \
+             patch.object(td, "_get_historical_open_interest", return_value=oi_data):
+            rows = td.get_historical_eod("AAPL", "20260710", "20260620", "20260705")
+
+        assert rows[0]["open_interest"] == 1234
+
+    def test_eod_472_returns_empty(self):
+        """472 (no data) from greeks/eod yields an empty result list."""
+        td = ThetaDataResource()
+        with patch.object(td, "_request_with_retry", return_value=""), \
+             patch.object(td, "_get_historical_open_interest", return_value=[]):
+            rows = td.get_historical_eod("AAPL", "19990101", "19990101", "19990101")
+        assert rows == []
 
 
 # ---------------------------------------------------------------------------
