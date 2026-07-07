@@ -32,6 +32,11 @@ class ThetaDataResource:
         default_factory=lambda: os.environ.get("THETADATA_BASE_URL", "http://127.0.0.1:25503/v3")
     )
     request_delay: float = 0.3  # seconds between requests for rate limiting
+    # Read timeout per request. Historical endpoints can take minutes when the
+    # terminal cold-fetches deep history from the vendor; a too-short timeout
+    # abandons requests the terminal keeps processing, and the retries pile up
+    # until the terminal rate-limits (429) and wedges.
+    timeout: int = 120
 
     def _request_with_retry(self, url: str, params: dict) -> str:
         """Execute GET request with exponential backoff retry (3 attempts). Returns CSV text.
@@ -42,7 +47,7 @@ class ThetaDataResource:
         last_exc: Exception | None = None
         for attempt, delay in enumerate(RETRY_DELAYS):
             try:
-                resp = requests.get(url, params=params, timeout=30)
+                resp = requests.get(url, params=params, timeout=self.timeout)
                 if resp.status_code == 429:
                     retry_after = int(resp.headers.get("Retry-After", delay))
                     logger.warning(
@@ -90,7 +95,7 @@ class ThetaDataResource:
         """
         url = f"{self.base_url}/option/snapshot/greeks/second_order"
         try:
-            resp = requests.get(url, params=params, timeout=30)
+            resp = requests.get(url, params=params, timeout=self.timeout)
             if resp.status_code in (403, 472):
                 logger.debug(
                     "Second-order greeks not available (HTTP %d) for %s",
@@ -299,6 +304,110 @@ class ThetaDataResource:
         return rows
 
 
+    def get_historical_eod_by_date(
+        self,
+        root: str,
+        date_ymd: str,
+        max_dte: int = 0,
+        strike_range: int = 0,
+    ) -> list[dict]:
+        """Get historical EOD data for ALL expirations of a root on ONE trade date.
+
+        Uses /option/history/greeks/eod with expiration=* — the vendor-documented
+        bulk shape ("any expiration=* must be requested day by day"). A single
+        cold 2024 day answers in ~2-4s, versus minutes per expiry-history slice;
+        this is the only shape that scales to a multi-year backfill.
+
+        Args:
+            root: Underlying ticker (e.g. "AAPL").
+            date_ymd: Trade date as YYYYMMDD string (start_date == end_date).
+            max_dte: Server-side tenor filter — drop contracts with more days to
+                expiration (0 = no filter). Bounds payload; LEAPS carry ~zero
+                gamma/OI signal for the options_v1 features.
+            strike_range: Server-side strike window around spot — returns at most
+                2n+1 strikes per expiry (0 = no filter).
+
+        Returns:
+            Same row shape as get_historical_eod (root, exp, strike, right,
+            open/high/low/close, volume, trade_count, bid, ask, iv, delta,
+            gamma, theta, vega, rho, open_interest, quote_date), with exp taken
+            from each row's expiration column (YYYYMMDD).
+        """
+        params: dict = {
+            "symbol": root,
+            "expiration": "*",
+            "start_date": date_ymd,
+            "end_date": date_ymd,
+        }
+        if max_dte > 0:
+            params["max_dte"] = max_dte
+        if strike_range > 0:
+            params["strike_range"] = strike_range
+
+        url = f"{self.base_url}/option/history/greeks/eod"
+        text = self._request_with_retry(url, params)
+        raw_rows = self._parse_csv_response(text)
+        time.sleep(self.request_delay)
+
+        rows = []
+        for row in raw_rows:
+            exp_raw = row.get("expiration", "")
+            rows.append({
+                "root": root,
+                "exp": exp_raw.replace("-", ""),  # "2024-09-20" -> "20240920"
+                "strike": _f(row.get("strike")),
+                "right": row.get("right", ""),
+                "open": _f(row.get("open")),
+                "high": _f(row.get("high")),
+                "low": _f(row.get("low")),
+                "close": _f(row.get("close")),
+                "volume": _i(row.get("volume")),
+                "trade_count": _i(row.get("count")),
+                "bid": _f(row.get("bid")),
+                "ask": _f(row.get("ask")),
+                "iv": _f(row.get("implied_vol")),
+                "delta": _f(row.get("delta")),
+                "gamma": _f(row.get("gamma")),
+                "theta": _f(row.get("theta")),
+                "vega": _f(row.get("vega")),
+                "rho": _f(row.get("rho")),
+                "open_interest": None,  # enriched below
+                "quote_date": _parse_iso_timestamp(row.get("timestamp")),
+            })
+
+        if not rows:
+            logger.info("EOD by-date: no data for %s on %s (472/empty)", root, date_ymd)
+            return rows
+
+        # Enrich with open interest — same bulk shape, joined per contract.
+        # The join key must include expiration: with expiration=* multiple
+        # expiries share (strike, right) on the same date.
+        oi_params = dict(params)
+        oi_text = self._request_with_retry(
+            f"{self.base_url}/option/history/open_interest", oi_params
+        )
+        time.sleep(self.request_delay)
+        oi_by_key: dict[tuple, int | None] = {}
+        for oi in self._parse_csv_response(oi_text):
+            key = (
+                oi.get("expiration", "").replace("-", ""),
+                str(_f(oi.get("strike"))),
+                oi.get("right", ""),
+            )
+            oi_by_key[key] = _i(oi.get("open_interest"))
+        matched = 0
+        for row in rows:
+            key = (row["exp"], str(row["strike"]), row["right"])
+            if key in oi_by_key:
+                row["open_interest"] = oi_by_key[key]
+                matched += 1
+
+        logger.info(
+            "EOD by-date: %s %s — %d rows, %d with OI",
+            root, date_ymd, len(rows), matched,
+        )
+        return rows
+
     def _get_historical_open_interest(
         self, root: str, exp: str, start_date: str, end_date: str
     ) -> list[dict]:
@@ -315,7 +424,7 @@ class ThetaDataResource:
             "end_date": end_date,
         }
         try:
-            resp = requests.get(url, params=params, timeout=30)
+            resp = requests.get(url, params=params, timeout=self.timeout)
             if resp.status_code in (403, 404, 472):
                 logger.debug(
                     "Historical open interest not available (HTTP %d) for %s exp=%s",

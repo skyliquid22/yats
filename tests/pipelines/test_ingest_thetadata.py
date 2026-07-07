@@ -367,6 +367,96 @@ class TestGetHistoricalEod:
         assert rows == []
 
 
+class TestGetHistoricalEodByDate:
+    """Bulk by-date mode: one expiration=* request per trading day (ya-i6nvo)."""
+
+    HEADER = (
+        "symbol,expiration,strike,right,timestamp,open,high,low,close,"
+        "volume,count,bid_size,bid_exchange,bid,bid_condition,ask_size,ask_exchange,"
+        "ask,ask_condition,delta,theta,vega,rho,epsilon,lambda,gamma,vanna,charm,"
+        "speed,zomma,color,ultima,dualDelta,dualGamma,implied_vol,iv_error,"
+        "underlying_timestamp,underlying_price\n"
+    )
+    # Two expirations sharing the same (strike, right) on one trade date —
+    # exactly the shape that forces expiration into the OI join key.
+    GREEKS_CSV = HEADER + (
+        '"AAPL","2024-07-19",210.000,"CALL",2024-07-15T15:59:00.000,'
+        "1.00,1.20,0.90,1.10,50,5,0,6,1.05,50,10,22,1.15,50,"
+        "0.4500,-0.0500,0.1000,0.0300,0,0,0.0400,0,0,"
+        "0,0,0,0,0,0,0.2200,0.0010,"
+        "2024-07-15T20:00:00.000,209.50\n"
+        '"AAPL","2024-09-20",210.000,"CALL",2024-07-15T15:59:00.000,'
+        "5.00,5.50,4.80,5.25,20,3,0,6,5.10,50,10,22,5.30,50,"
+        "0.5200,-0.0300,0.3000,0.0900,0,0,0.0150,0,0,"
+        "0,0,0,0,0,0,0.2500,0.0010,"
+        "2024-07-15T20:00:00.000,209.50\n"
+    )
+    OI_CSV = (
+        "symbol,expiration,strike,right,timestamp,open_interest\n"
+        '"AAPL","2024-07-19",210.000,"CALL",2024-07-15T00:00:00.000,1111\n'
+        '"AAPL","2024-09-20",210.000,"CALL",2024-07-15T00:00:00.000,2222\n'
+    )
+
+    def test_rows_carry_per_row_expiration(self):
+        td = ThetaDataResource(request_delay=0)
+        with patch.object(td, "_request_with_retry",
+                          side_effect=[self.GREEKS_CSV, self.OI_CSV]):
+            rows = td.get_historical_eod_by_date("AAPL", "20240715")
+
+        assert len(rows) == 2
+        exps = sorted(r["exp"] for r in rows)
+        assert exps == ["20240719", "20240920"]
+        for r in rows:
+            assert r["root"] == "AAPL"
+            assert r["strike"] == 210.0
+            assert isinstance(r["quote_date"], datetime)
+
+    def test_oi_joined_per_expiration(self):
+        """Same (strike, right) across two expiries must get DISTINCT OI —
+        the join key must include expiration."""
+        td = ThetaDataResource(request_delay=0)
+        with patch.object(td, "_request_with_retry",
+                          side_effect=[self.GREEKS_CSV, self.OI_CSV]):
+            rows = td.get_historical_eod_by_date("AAPL", "20240715")
+
+        by_exp = {r["exp"]: r for r in rows}
+        assert by_exp["20240719"]["open_interest"] == 1111
+        assert by_exp["20240920"]["open_interest"] == 2222
+
+    def test_server_side_filters_passed(self):
+        td = ThetaDataResource(request_delay=0)
+        with patch.object(td, "_request_with_retry",
+                          side_effect=[self.GREEKS_CSV, self.OI_CSV]) as req:
+            td.get_historical_eod_by_date(
+                "AAPL", "20240715", max_dte=210, strike_range=60
+            )
+
+        greeks_params = req.call_args_list[0][0][1]
+        assert greeks_params["expiration"] == "*"
+        assert greeks_params["max_dte"] == 210
+        assert greeks_params["strike_range"] == 60
+        oi_params = req.call_args_list[1][0][1]
+        assert oi_params["expiration"] == "*"
+        assert oi_params["max_dte"] == 210
+
+    def test_filters_omitted_when_zero(self):
+        td = ThetaDataResource(request_delay=0)
+        with patch.object(td, "_request_with_retry",
+                          side_effect=[self.GREEKS_CSV, self.OI_CSV]) as req:
+            td.get_historical_eod_by_date("AAPL", "20240715")
+        greeks_params = req.call_args_list[0][0][1]
+        assert "max_dte" not in greeks_params
+        assert "strike_range" not in greeks_params
+
+    def test_empty_day_returns_empty_without_oi_call(self):
+        """Non-trading day (472/empty) short-circuits — no OI request made."""
+        td = ThetaDataResource(request_delay=0)
+        with patch.object(td, "_request_with_retry", return_value="") as req:
+            rows = td.get_historical_eod_by_date("AAPL", "20240713")  # a Saturday
+        assert rows == []
+        assert req.call_count == 1
+
+
 # ---------------------------------------------------------------------------
 # Normalization (ThetaDataResource methods)
 # ---------------------------------------------------------------------------

@@ -29,6 +29,13 @@ class IngestThetadataConfig(Config):
     expiry_window_days: int = 90  # fetch chains for expirations within this many days
     start_date: str = ""  # YYYYMMDD for historical EOD fetch (empty = skip EOD)
     end_date: str = ""    # YYYYMMDD for historical EOD fetch
+    # By-date bulk EOD mode: one expiration=* request per trading day instead of
+    # one request per expiration-history. The vendor serves the by-date shape in
+    # seconds; per-expiry history slices cold-fetch for minutes each and do not
+    # scale to multi-year backfills. Filters are applied SERVER-side.
+    eod_by_date: bool = False
+    eod_max_dte: int = 0        # drop contracts with more days-to-expiry (0 = off)
+    eod_strike_range: int = 0   # at most 2n+1 strikes around spot (0 = off)
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +235,36 @@ def fetch_thetadata_options(
         # relevant_exps only contains upcoming expirations — historical expirations (which
         # have the actual EOD data) are filtered out by the today_str <= e cutoff. The EOD
         # loop must use its own expiration set derived from start_ymd.
-        if start_ymd and end_ymd:
+        if start_ymd and end_ymd and config.eod_by_date:
+            # Bulk by-date mode: one expiration=* request per weekday.
+            # Non-trading days return 472/empty and are skipped naturally.
+            eod_count = 0
+            day = datetime.strptime(start_ymd, "%Y%m%d")
+            end_day = datetime.strptime(end_ymd, "%Y%m%d")
+            n_days = 0
+            while day <= end_day:
+                if day.weekday() < 5:  # skip Sat/Sun
+                    n_days += 1
+                    date_str = day.strftime("%Y%m%d")
+                    try:
+                        raw_eod = td.get_historical_eod_by_date(
+                            underlying, date_str,
+                            max_dte=config.eod_max_dte,
+                            strike_range=config.eod_strike_range,
+                        )
+                        eod_rows.extend(td.normalize_eod(raw_eod, now, ""))
+                        eod_count += len(raw_eod)
+                    except Exception as exc:
+                        context.log.warning(
+                            "EOD by-date fetch failed for %s %s: %s",
+                            underlying, date_str, exc,
+                        )
+                day += timedelta(days=1)
+            context.log.info(
+                "%s: EOD by-date backfill fetched %d rows across %d weekdays (%s to %s)",
+                underlying, eod_count, n_days, start_ymd, end_ymd,
+            )
+        elif start_ymd and end_ymd:
             eod_exps = [e for e in exps if e >= start_ymd]
             eod_count = 0
             for exp in eod_exps:
