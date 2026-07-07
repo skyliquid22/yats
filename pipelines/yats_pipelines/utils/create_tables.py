@@ -267,7 +267,8 @@ CREATE TABLE IF NOT EXISTS canonical_options_chain (
     reconcile_method SYMBOL,
     canonicalized_at TIMESTAMP,
     dagster_run_id STRING
-) TIMESTAMP(quote_date) PARTITION BY MONTH;
+) TIMESTAMP(quote_date) PARTITION BY MONTH WAL
+  DEDUP UPSERT KEYS(quote_date, underlying, expiry, strike, right, source_vendor);
 """
 
 # ---------------------------------------------------------------------------
@@ -612,11 +613,13 @@ ALL_TABLES: list[str] = [
 # CREATE TABLE IF NOT EXISTS never alters an existing table, so schema changes
 # to already-created tables must be applied as explicit ALTERs here. Each must
 # be safe to run repeatedly (QuestDB re-applying identical DEDUP keys is a
-# no-op). Enabling DEDUP makes canonical_equity_ohlcv idempotent across
-# canonicalize reruns: a second run's (timestamp, symbol) rows UPSERT rather
-# than append, so the table holds exactly one bar per (symbol, timestamp).
+# no-op). Enabling DEDUP makes canonical tables idempotent across reruns: a
+# second run's rows UPSERT in place rather than append.
 MIGRATIONS: list[str] = [
     "ALTER TABLE canonical_equity_ohlcv DEDUP ENABLE UPSERT KEYS(timestamp, symbol)",
+    # ya-6e7ok: options cross-run idempotency — live+EOD rows coexist via source_vendor key.
+    # QuestDB accepts DOUBLE (strike) and non-designated TIMESTAMP (expiry) as upsert keys.
+    "ALTER TABLE canonical_options_chain DEDUP ENABLE UPSERT KEYS(quote_date, underlying, expiry, strike, right, source_vendor)",
 ]
 
 
