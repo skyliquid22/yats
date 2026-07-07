@@ -3,6 +3,12 @@
 Guards the ya-n4bhm fix: canonical_equity_ohlcv must be born (and migrated)
 with QuestDB DEDUP UPSERT KEYS(timestamp, symbol) so that re-running
 canonicalize UPSERTs bars in place instead of appending duplicates.
+
+Guards the ya-6e7ok fix: canonical_options_chain must be born (and migrated)
+with QuestDB DEDUP UPSERT KEYS(quote_date, underlying, expiry, strike, right,
+source_vendor) so that re-running option_eod canonicalize UPSERTs contracts in
+place instead of appending duplicates. source_vendor is in the key so live
+(thetadata) and EOD (thetadata_eod) rows coexist.
 """
 
 from __future__ import annotations
@@ -11,6 +17,7 @@ import re
 
 from yats_pipelines.utils.create_tables import (
     CANONICAL_EQUITY_OHLCV,
+    CANONICAL_OPTIONS_CHAIN,
     MIGRATIONS,
 )
 
@@ -29,15 +36,37 @@ class TestCanonicalEquityDedupDDL:
         )
 
     def test_is_a_wal_table(self):
-        # DEDUP is only available on WAL tables.
         assert " WAL" in _norm(CANONICAL_EQUITY_OHLCV)
 
     def test_dedup_key_includes_designated_timestamp(self):
-        # QuestDB requires the designated timestamp to be part of the dedup key.
         ddl = _norm(CANONICAL_EQUITY_OHLCV)
         assert "TIMESTAMP(TIMESTAMP)" in ddl
         keys = ddl.split("UPSERT KEYS(")[1].split(")")[0]
         assert "TIMESTAMP" in keys
+
+
+class TestCanonicalOptionsDedupDDL:
+    def test_declares_dedup_upsert_keys(self):
+        ddl = _norm(CANONICAL_OPTIONS_CHAIN)
+        assert "DEDUP UPSERT KEYS(QUOTE_DATE, UNDERLYING, EXPIRY, STRIKE, RIGHT, SOURCE_VENDOR)" in ddl, (
+            "canonical_options_chain must declare the 6-column dedup key so a fresh DB "
+            "is idempotent across canonicalize reruns"
+        )
+
+    def test_is_a_wal_table(self):
+        assert " WAL" in _norm(CANONICAL_OPTIONS_CHAIN)
+
+    def test_dedup_key_includes_designated_timestamp(self):
+        ddl = _norm(CANONICAL_OPTIONS_CHAIN)
+        assert "TIMESTAMP(QUOTE_DATE)" in ddl
+        keys = ddl.split("UPSERT KEYS(")[1].split(")")[0]
+        assert "QUOTE_DATE" in keys
+
+    def test_source_vendor_in_dedup_key(self):
+        # source_vendor distinguishes live (thetadata) from EOD (thetadata_eod) rows.
+        ddl = _norm(CANONICAL_OPTIONS_CHAIN)
+        keys = ddl.split("UPSERT KEYS(")[1].split(")")[0]
+        assert "SOURCE_VENDOR" in keys
 
 
 class TestMigrations:
@@ -46,3 +75,8 @@ class TestMigrations:
         on them (CREATE TABLE IF NOT EXISTS never alters an existing table)."""
         joined = " ".join(_norm(m) for m in MIGRATIONS)
         assert "ALTER TABLE CANONICAL_EQUITY_OHLCV DEDUP ENABLE UPSERT KEYS(TIMESTAMP, SYMBOL)" in joined
+
+    def test_enables_dedup_on_existing_options_table(self):
+        """canonical_options_chain migration must use the full 6-column key."""
+        joined = " ".join(_norm(m) for m in MIGRATIONS)
+        assert "ALTER TABLE CANONICAL_OPTIONS_CHAIN DEDUP ENABLE UPSERT KEYS(QUOTE_DATE, UNDERLYING, EXPIRY, STRIKE, RIGHT, SOURCE_VENDOR)" in joined
