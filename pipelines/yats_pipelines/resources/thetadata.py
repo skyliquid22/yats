@@ -298,6 +298,7 @@ class ThetaDataResource:
 
         return rows
 
+
     def _get_historical_open_interest(
         self, root: str, exp: str, start_date: str, end_date: str
     ) -> list[dict]:
