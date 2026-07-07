@@ -192,7 +192,8 @@ CREATE TABLE IF NOT EXISTS canonical_equity_ohlcv (
     reconcile_method SYMBOL,
     validation_status SYMBOL,
     canonicalized_at TIMESTAMP
-) TIMESTAMP(timestamp) PARTITION BY MONTH;
+) TIMESTAMP(timestamp) PARTITION BY MONTH WAL
+  DEDUP UPSERT KEYS(timestamp, symbol);
 """
 
 CANONICAL_FUNDAMENTALS = """
@@ -605,8 +606,22 @@ ALL_TABLES: list[str] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Idempotent migrations for tables that already exist
+# ---------------------------------------------------------------------------
+# CREATE TABLE IF NOT EXISTS never alters an existing table, so schema changes
+# to already-created tables must be applied as explicit ALTERs here. Each must
+# be safe to run repeatedly (QuestDB re-applying identical DEDUP keys is a
+# no-op). Enabling DEDUP makes canonical_equity_ohlcv idempotent across
+# canonicalize reruns: a second run's (timestamp, symbol) rows UPSERT rather
+# than append, so the table holds exactly one bar per (symbol, timestamp).
+MIGRATIONS: list[str] = [
+    "ALTER TABLE canonical_equity_ohlcv DEDUP ENABLE UPSERT KEYS(timestamp, symbol)",
+]
+
+
 def create_all_tables(resource: QuestDBResource | None = None) -> None:
-    """Execute all DDL statements against QuestDB via PG wire."""
+    """Execute all DDL statements against QuestDB via PG wire, then migrations."""
     if resource is None:
         resource = QuestDBResource()
 
@@ -625,8 +640,17 @@ def create_all_tables(resource: QuestDBResource | None = None) -> None:
             table_name = ddl.split("IF NOT EXISTS")[1].split("(")[0].strip()
             print(f"Creating table: {table_name}")
             cur.execute(ddl)
+        for migration in MIGRATIONS:
+            try:
+                cur.execute(migration)
+                print(f"Applied migration: {migration}")
+            except psycopg2.Error as exc:
+                # Idempotent: tolerate 'already enabled' / re-apply no-ops so a
+                # rerun against an up-to-date DB does not fail bootstrap.
+                print(f"Migration skipped ({exc.pgerror or exc}): {migration}")
         cur.close()
-        print(f"\nDone — {len(ALL_TABLES)} tables created.")
+        print(f"\nDone — {len(ALL_TABLES)} tables created, "
+              f"{len(MIGRATIONS)} migrations applied.")
     finally:
         conn.close()
 
