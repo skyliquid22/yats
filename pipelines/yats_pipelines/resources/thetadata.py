@@ -345,6 +345,7 @@ class ThetaDataResource:
         time.sleep(self.request_delay)
         return result
 
+
     def normalize_chain_snapshot(
         self,
         raw_rows: list[dict],
