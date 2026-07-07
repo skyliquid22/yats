@@ -616,6 +616,7 @@ ALL_TABLES: list[str] = [
 # no-op). Enabling DEDUP makes canonical tables idempotent across reruns: a
 # second run's rows UPSERT in place rather than append.
 MIGRATIONS: list[str] = [
+    # ya-n4bhm: equity cross-run idempotency
     "ALTER TABLE canonical_equity_ohlcv DEDUP ENABLE UPSERT KEYS(timestamp, symbol)",
     # ya-6e7ok: options cross-run idempotency — live+EOD rows coexist via source_vendor key.
     # QuestDB accepts DOUBLE (strike) and non-designated TIMESTAMP (expiry) as upsert keys.
