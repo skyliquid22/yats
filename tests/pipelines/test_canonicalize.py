@@ -100,6 +100,48 @@ def test_equity_ohlcv_writes_on_first_run():
     assert sender.row.call_count == 2  # canonical row + reconciliation_log row
 
 
+def test_equity_ohlcv_within_run_dedups_symbol_day_latest_ingested_wins():
+    """Two raw bars for the same (symbol, day) collapse to ONE canonical row,
+    keeping the latest-ingested. Guards ya-n4bhm at the write-dedup layer;
+    the storage DEDUP keys guard the cross-run vector separately."""
+    now = datetime(2024, 1, 5, tzinfo=timezone.utc)
+    config = CanonicalizeConfig(domains=["equity_ohlcv"])
+    sender = MagicMock()
+    log = MagicMock()
+
+    raw_columns = ["timestamp", "symbol", "open", "high", "low", "close",
+                   "volume", "vwap", "trade_count", "ingested_at"]
+    ts = datetime(2024, 1, 4, 10, 0, 0, tzinfo=timezone.utc)
+    early = (ts, "AAPL", 150.0, 155.0, 149.0, 153.0, 10000, 151.0, 500,
+             datetime(2024, 1, 4, 20, 0, 0, tzinfo=timezone.utc))
+    late = (ts, "AAPL", 150.0, 156.0, 149.0, 154.5, 11000, 151.0, 500,
+            datetime(2024, 1, 4, 23, 0, 0, tzinfo=timezone.utc))
+
+    call_count = [0]
+
+    def cursor_factory():
+        call_count[0] += 1
+        cur = MagicMock()
+        if call_count[0] == 1:
+            cur.fetchone.return_value = (0,)  # dedup: not written
+        else:
+            cur.description = [(col,) for col in raw_columns]
+            cur.fetchall.return_value = [early, late]  # duplicate symbol-day
+        return cur
+
+    conn = MagicMock()
+    conn.cursor.side_effect = cursor_factory
+
+    count = _canonicalize_equity_ohlcv(conn, sender, config, now, "run-DUP", log)
+
+    assert count == 1  # not 2 — the duplicate symbol-day collapsed
+    canonical_calls = [c for c in sender.row.call_args_list
+                       if c[0][0] == "canonical_equity_ohlcv"]
+    assert len(canonical_calls) == 1
+    # Latest-ingested bar wins (close 154.5, not 153.0)
+    assert canonical_calls[0][1]["columns"]["close"] == 154.5
+
+
 def test_fundamentals_dedup_skips_on_second_run():
     now = datetime(2024, 1, 5, tzinfo=timezone.utc)
     config = CanonicalizeConfig()
