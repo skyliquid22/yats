@@ -546,6 +546,23 @@ def _canonicalize_financial_metrics(
 _EOD_GREEK_FIELDS = ("iv", "delta", "gamma", "theta", "vega", "rho")
 
 
+def _normalize_option_right(right_raw) -> str:
+    """Normalize an option right to canonical 'C'/'P'.
+
+    Raw EOD rows may carry the right as 'CALL'/'PUT' (older ingests) or already
+    'C'/'P' (ingests that normalized at write time). Dedup and write MUST use the
+    same normalized value, or the same contract lands twice — once per spelling.
+    """
+    r = str(right_raw or "")
+    if r in ("C", "P"):
+        return r
+    if r in ("CALL", "CALLS"):
+        return "C"
+    if r in ("PUT", "PUTS"):
+        return "P"
+    return r
+
+
 def _pick_latest_eod_per_contract(rows: list[dict]) -> list[dict]:
     """Dedup EOD rows: latest-ingested wins per (underlying, expiry, strike, right, quote_date)."""
     by_key: dict[tuple, dict] = {}
@@ -562,7 +579,7 @@ def _pick_latest_eod_per_contract(rows: list[dict]) -> list[dict]:
             row.get("underlying", ""),
             expiry_str,
             row.get("strike"),
-            row.get("right", ""),
+            _normalize_option_right(row.get("right", "")),
             quote_day,
         )
         existing = by_key.get(key)
@@ -668,11 +685,7 @@ def _canonicalize_option_eod(
         if expiry_dt is not None:
             cols["expiry"] = _ts_nanos(expiry_dt)
 
-        right_raw = row.get("right", "")
-        right = right_raw if right_raw in ("C", "P") else (
-            "C" if right_raw in ("CALL", "CALLS") else
-            "P" if right_raw in ("PUT", "PUTS") else right_raw
-        )
+        right = _normalize_option_right(row.get("right", ""))
 
         _row(sender, "canonical_options_chain",
              symbols={

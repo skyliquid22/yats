@@ -1,0 +1,4 @@
+name: aapl
+description: single-symbol AAPL universe for options-feature verification
+tickers:
+  - AAPL

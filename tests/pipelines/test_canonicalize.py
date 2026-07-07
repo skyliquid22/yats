@@ -661,6 +661,26 @@ class TestPickLatestEodPerContract:
         result = _pick_latest_eod_per_contract([row])
         assert result == []
 
+    def test_mixed_right_spelling_dedups_to_one_contract(self):
+        """CALL/PUT (old ingests) and C/P (normalized ingests) are the SAME
+        contract and must collapse — otherwise the contract lands twice in
+        canonical, once greek-less. Regression for the EOD dedup double-write."""
+        qd = datetime(2026, 6, 17, tzinfo=timezone.utc)
+        old = _make_eod_row(
+            "AAPL", 200.0, "CALL", qd,
+            ingested_at=datetime(2026, 6, 17, 9, tzinfo=timezone.utc),
+            iv=None, gamma=None,
+        )
+        new = _make_eod_row(
+            "AAPL", 200.0, "C", qd,
+            ingested_at=datetime(2026, 6, 17, 18, tzinfo=timezone.utc),
+            iv=0.31, gamma=0.02,
+        )
+        result = _pick_latest_eod_per_contract([old, new])
+        assert len(result) == 1
+        assert result[0]["iv"] == pytest.approx(0.31)
+        assert result[0]["gamma"] == pytest.approx(0.02)
+
 
 # ---------------------------------------------------------------------------
 # _canonicalize_option_eod
