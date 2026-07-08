@@ -367,6 +367,14 @@ class TestExperimentsSearch:
             "qualification_status", "promotion_tier", "created_at", "stale",
         )]
 
+    @pytest.fixture(autouse=True)
+    def _isolate_data_root(self, tmp_path, monkeypatch):
+        """Search also scans YATS_DATA_ROOT/wfo_sweeps — point it at an empty
+        tmp dir so real local sweep summaries can't leak into assertions
+        (observed: 8 real sweep configs made count tests fail on dev machines
+        while passing in clean polecat clones)."""
+        monkeypatch.setenv("YATS_DATA_ROOT", str(tmp_path))
+
     def test_returns_results_and_deflation_clock(self):
         from dashboard.queries import experiments_search
 
