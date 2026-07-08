@@ -26,7 +26,7 @@ from yats_pipelines.resources.questdb import QuestDBResource
 
 logger = logging.getLogger(__name__)
 
-ALL_DOMAINS = ("equity_ohlcv", "fundamentals", "financial_metrics", "option_eod")
+ALL_DOMAINS = ("equity_ohlcv", "fundamentals", "financial_metrics", "option_eod", "insider_trades", "institutional_holdings")
 
 
 class CanonicalizeConfig(Config):
@@ -719,6 +719,299 @@ def _canonicalize_option_eod(
 
 
 # ---------------------------------------------------------------------------
+# Insider trades canonicalization
+# ---------------------------------------------------------------------------
+
+
+def _canonicalize_insider_trades(
+    conn, sender, config: CanonicalizeConfig, now: datetime, run_id: str, log
+) -> int:
+    """Canonicalize raw_fd_insider_trades → canonical_insider_trades.
+
+    AS-OF discipline: rows become visible at filing_date (the date the SEC form
+    was filed), never at transaction_date. Python-level dedup collapses duplicate
+    raw rows for the same logical transaction before writing; QuestDB DEDUP UPSERT
+    handles cross-run idempotency.
+    """
+    if _run_already_written(conn, run_id, "insider_trades"):
+        log.info("insider_trades: run %s already written — skipping (idempotent)", run_id)
+        return 0
+
+    # filed_at is the designated partition key and equals the filing date (ya-2gqv7 fix).
+    where, params = _date_clause(config.start_date, config.end_date, ts_col="filed_at")
+    query = f"SELECT * FROM raw_fd_insider_trades{where} ORDER BY filed_at"
+
+    cur = conn.cursor()
+    cur.execute(query, params)
+    columns = [desc[0] for desc in cur.description]
+    raw_rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+    cur.close()
+
+    if not raw_rows:
+        log.info("insider_trades: no raw rows found")
+        return 0
+
+    log.info("insider_trades: read %d raw rows", len(raw_rows))
+
+    # Parse and normalize timestamps
+    for row in raw_rows:
+        for ts_col in ("filed_at", "filing_date", "transaction_date", "ingested_at"):
+            val = row.get(ts_col)
+            if isinstance(val, str):
+                row[ts_col] = datetime.fromisoformat(val.replace("Z", "+00:00"))
+
+    # Python-level dedup: latest-ingested wins per logical transaction key.
+    # This collapses the case where the same filing is re-ingested into raw.
+    by_key: dict[tuple, dict] = {}
+    for row in raw_rows:
+        # Point-in-time: prefer the new filing_date column (ya-2gqv7), fall back to filed_at.
+        filing_dt = row.get("filing_date") or row.get("filed_at")
+        if filing_dt is None:
+            continue
+        filing_day = filing_dt.date() if hasattr(filing_dt, "date") else None
+        if filing_day is None:
+            continue
+        txn_dt = row.get("transaction_date")
+        txn_day_str = str(txn_dt.date()) if txn_dt and hasattr(txn_dt, "date") else ""
+        key = (
+            filing_day,
+            str(row.get("symbol", "")),
+            str(row.get("insider_name", "")),
+            txn_day_str,
+            str(row.get("transaction_type", "")),
+            row.get("shares"),
+        )
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = row
+        else:
+            ia_new = row.get("ingested_at")
+            ia_old = existing.get("ingested_at")
+            if ia_new is not None and (ia_old is None or ia_new > ia_old):
+                by_key[key] = row
+
+    vendor = "financialdatasets"
+    written = 0
+
+    for row in by_key.values():
+        filing_dt = row.get("filing_date") or row.get("filed_at")
+        # Normalize to midnight UTC for consistent AS-OF keying
+        filing_ts = datetime(
+            filing_dt.date().year, filing_dt.date().month, filing_dt.date().day,
+            tzinfo=timezone.utc,
+        )
+
+        txn_dt = row.get("transaction_date")
+        txn_ts_nanos = None
+        if txn_dt is not None and hasattr(txn_dt, "date"):
+            txn_day = txn_dt.date()
+            txn_ts_nanos = _ts_nanos(datetime(txn_day.year, txn_day.month, txn_day.day, tzinfo=timezone.utc))
+
+        cols: dict = {
+            "insider_name": row.get("insider_name"),
+            "insider_title": row.get("insider_title"),
+            "is_board_director": row.get("is_board_director"),
+            "shares": row.get("shares"),
+            "price_per_share": row.get("price_per_share"),
+            "total_value": row.get("total_value"),
+            "shares_owned_before": row.get("shares_owned_before"),
+            "shares_owned_after": row.get("shares_owned_after"),
+            "security_title": row.get("security_title"),
+            "canonicalized_at": _ts_nanos(now),
+            "dagster_run_id": run_id,
+        }
+        if txn_ts_nanos is not None:
+            cols["transaction_date"] = txn_ts_nanos
+
+        _row(sender, "canonical_insider_trades",
+             symbols={
+                 "symbol": str(row.get("symbol", "")),
+                 "transaction_type": str(row.get("transaction_type", "")),
+                 "source_vendor": vendor,
+             },
+             columns=cols,
+             at=filing_ts)
+
+        _row(sender, "reconciliation_log",
+             symbols={
+                 "domain": "insider_trades",
+                 "symbol": str(row.get("symbol", "")),
+                 "primary_vendor": vendor,
+             },
+             columns={
+                 "fallback_used": False,
+                 "validation_warnings": "[]",
+                 "dagster_run_id": run_id,
+                 "reconciled_at": _ts_nanos(now),
+             },
+             at=filing_ts)
+        written += 1
+
+    return written
+
+
+# ---------------------------------------------------------------------------
+# Institutional holdings canonicalization
+# ---------------------------------------------------------------------------
+
+
+def _canonicalize_institutional_holdings(
+    conn, sender, config: CanonicalizeConfig, now: datetime, run_id: str, log
+) -> int:
+    """Canonicalize raw_fd_institutional_holdings → two canonical tables.
+
+    canonical_institutional_holdings: per-filer rows, DEDUP on
+    (filing_date, symbol, filer_cik, report_period).
+
+    canonical_inst_ownership: aggregate per (symbol, report_period) with
+    total_shares, total_value_usd, filer_count. The aggregate's filing_date
+    = max filing_date across all filers for that period (when it became current).
+    DEDUP on (filing_date, symbol, report_period).
+
+    AS-OF discipline: rows become visible at filing_date. report_period is
+    carried as a column only — never used as the canonical designated timestamp.
+    """
+    if _run_already_written(conn, run_id, "institutional_holdings"):
+        log.info("institutional_holdings: run %s already written — skipping (idempotent)", run_id)
+        return 0
+
+    where, params = _date_clause(config.start_date, config.end_date, ts_col="filing_date")
+    query = f"SELECT * FROM raw_fd_institutional_holdings{where} ORDER BY filing_date"
+
+    cur = conn.cursor()
+    cur.execute(query, params)
+    columns = [desc[0] for desc in cur.description]
+    raw_rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+    cur.close()
+
+    if not raw_rows:
+        log.info("institutional_holdings: no raw rows found")
+        return 0
+
+    log.info("institutional_holdings: read %d raw rows", len(raw_rows))
+
+    for row in raw_rows:
+        for ts_col in ("filing_date", "report_period", "ingested_at"):
+            val = row.get(ts_col)
+            if isinstance(val, str):
+                row[ts_col] = datetime.fromisoformat(val.replace("Z", "+00:00"))
+
+    # --- Per-filer dedup: latest-ingested wins per canonical key ---
+    by_key: dict[tuple, dict] = {}
+    for row in raw_rows:
+        filing_dt = row.get("filing_date")
+        if filing_dt is None:
+            continue
+        filing_day = filing_dt.date() if hasattr(filing_dt, "date") else None
+        if filing_day is None:
+            continue
+        report_period = row.get("report_period")
+        rp_str = str(report_period) if report_period is not None else ""
+        key = (filing_day, str(row.get("symbol", "")), str(row.get("filer_cik", "")), rp_str)
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = row
+        else:
+            ia_new = row.get("ingested_at")
+            ia_old = existing.get("ingested_at")
+            if ia_new is not None and (ia_old is None or ia_new > ia_old):
+                by_key[key] = row
+
+    vendor = "financialdatasets"
+    written = 0
+
+    # --- Aggregate state: (symbol, rp_str) → running totals ---
+    # Built from the deduplicated per-filer rows to avoid double-counting.
+    agg: dict[tuple, dict] = {}
+
+    for row in by_key.values():
+        filing_dt = row["filing_date"]
+        filing_ts = datetime(
+            filing_dt.date().year, filing_dt.date().month, filing_dt.date().day,
+            tzinfo=timezone.utc,
+        )
+        report_period = row.get("report_period")
+        rp_nanos = _ts_nanos(report_period) if report_period is not None else None
+
+        _row(sender, "canonical_institutional_holdings",
+             symbols={
+                 "symbol": str(row.get("symbol", "")),
+                 "filer_cik": str(row.get("filer_cik", "")),
+                 "source_vendor": vendor,
+             },
+             columns={
+                 "report_period": rp_nanos,
+                 "accession_number": row.get("accession_number"),
+                 "filer_name": row.get("filer_name"),
+                 "shares": row.get("shares"),
+                 "value_usd": row.get("value_usd"),
+                 "canonicalized_at": _ts_nanos(now),
+                 "dagster_run_id": run_id,
+             },
+             at=filing_ts)
+
+        _row(sender, "reconciliation_log",
+             symbols={
+                 "domain": "institutional_holdings",
+                 "symbol": str(row.get("symbol", "")),
+                 "primary_vendor": vendor,
+             },
+             columns={
+                 "fallback_used": False,
+                 "validation_warnings": "[]",
+                 "dagster_run_id": run_id,
+                 "reconciled_at": _ts_nanos(now),
+             },
+             at=filing_ts)
+        written += 1
+
+        # Accumulate aggregate
+        symbol = str(row.get("symbol", ""))
+        rp_str = str(report_period) if report_period is not None else ""
+        agg_k = (symbol, rp_str)
+        shares = row.get("shares") or 0.0
+        value_usd = row.get("value_usd") or 0.0
+        if agg_k not in agg:
+            agg[agg_k] = {
+                "symbol": symbol,
+                "report_period": report_period,
+                "max_filing_date": filing_ts,
+                "total_shares": shares,
+                "total_value_usd": value_usd,
+                "filer_count": 1,
+            }
+        else:
+            a = agg[agg_k]
+            a["total_shares"] += shares
+            a["total_value_usd"] += value_usd
+            a["filer_count"] += 1
+            if filing_ts > a["max_filing_date"]:
+                a["max_filing_date"] = filing_ts
+
+    # --- Write aggregate rows ---
+    for a in agg.values():
+        agg_filing_ts = a["max_filing_date"]
+        report_period = a.get("report_period")
+        rp_nanos = _ts_nanos(report_period) if report_period is not None else None
+
+        _row(sender, "canonical_inst_ownership",
+             symbols={
+                 "symbol": a["symbol"],
+                 "source_vendor": vendor,
+             },
+             columns={
+                 "report_period": rp_nanos,
+                 "total_shares": a["total_shares"],
+                 "total_value_usd": a["total_value_usd"],
+                 "filer_count": int(a["filer_count"]),
+                 "canonicalized_at": _ts_nanos(now),
+             },
+             at=agg_filing_ts)
+
+    return written
+
+
+# ---------------------------------------------------------------------------
 # Domain dispatch
 # ---------------------------------------------------------------------------
 
@@ -727,6 +1020,8 @@ _DOMAIN_FNS = {
     "fundamentals": _canonicalize_fundamentals,
     "financial_metrics": _canonicalize_financial_metrics,
     "option_eod": _canonicalize_option_eod,
+    "insider_trades": _canonicalize_insider_trades,
+    "institutional_holdings": _canonicalize_institutional_holdings,
 }
 
 

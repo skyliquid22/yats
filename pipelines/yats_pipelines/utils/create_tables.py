@@ -709,6 +709,12 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE raw_fd_insider_trades ADD COLUMN shares_owned_before DOUBLE",
     "ALTER TABLE raw_fd_insider_trades ADD COLUMN security_title STRING",
     "ALTER TABLE raw_fd_insider_trades ADD COLUMN issuer STRING",
+    # ya-ayjf6: canonical insider_trades + institutional_holdings — DEDUP from day one.
+    # Tables born with DEDUP in CREATE TABLE; these migrate any pre-existing table created
+    # before Stage 3b landed.
+    "ALTER TABLE canonical_insider_trades DEDUP ENABLE UPSERT KEYS(filing_date, symbol, insider_name, transaction_date, transaction_type, shares)",
+    "ALTER TABLE canonical_institutional_holdings DEDUP ENABLE UPSERT KEYS(filing_date, symbol, filer_cik, report_period)",
+    "ALTER TABLE canonical_inst_ownership DEDUP ENABLE UPSERT KEYS(filing_date, symbol, report_period)",
 ]
 
 
