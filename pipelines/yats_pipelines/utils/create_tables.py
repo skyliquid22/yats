@@ -315,7 +315,8 @@ CREATE TABLE IF NOT EXISTS features (
     net_gamma_exposure DOUBLE,
     computed_at TIMESTAMP,
     dagster_run_id STRING
-) TIMESTAMP(timestamp) PARTITION BY MONTH;
+) TIMESTAMP(timestamp) PARTITION BY MONTH WAL
+  DEDUP UPSERT KEYS(timestamp, symbol, feature_set, feature_set_version);
 """
 
 FEATURE_WATERMARKS = """
@@ -621,6 +622,10 @@ MIGRATIONS: list[str] = [
     # ya-6e7ok: options cross-run idempotency — live+EOD rows coexist via source_vendor key.
     # QuestDB accepts DOUBLE (strike) and non-designated TIMESTAMP (expiry) as upsert keys.
     "ALTER TABLE canonical_options_chain DEDUP ENABLE UPSERT KEYS(quote_date, underlying, expiry, strike, right, source_vendor)",
+    # ya-i6nvo: feature reruns upsert instead of appending — stale rows from a
+    # prior run for the same (timestamp, symbol, feature_set) would otherwise be
+    # read alongside fresh ones (fetch_features does not filter by computed_at).
+    "ALTER TABLE features DEDUP ENABLE UPSERT KEYS(timestamp, symbol, feature_set, feature_set_version)",
 ]
 
 

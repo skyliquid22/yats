@@ -18,6 +18,7 @@ import re
 from yats_pipelines.utils.create_tables import (
     CANONICAL_EQUITY_OHLCV,
     CANONICAL_OPTIONS_CHAIN,
+    FEATURES,
     MIGRATIONS,
 )
 
@@ -80,3 +81,19 @@ class TestMigrations:
         """canonical_options_chain migration must use the full 6-column key."""
         joined = " ".join(_norm(m) for m in MIGRATIONS)
         assert "ALTER TABLE CANONICAL_OPTIONS_CHAIN DEDUP ENABLE UPSERT KEYS(QUOTE_DATE, UNDERLYING, EXPIRY, STRIKE, RIGHT, SOURCE_VENDOR)" in joined
+
+    def test_enables_dedup_on_existing_features_table(self):
+        """Feature reruns must upsert: fetch_features reads ALL rows for a
+        (timestamp, symbol, feature_set) without filtering by computed_at, so
+        stale rows from prior runs would contaminate training samples."""
+        joined = " ".join(_norm(m) for m in MIGRATIONS)
+        assert "ALTER TABLE FEATURES DEDUP ENABLE UPSERT KEYS(TIMESTAMP, SYMBOL, FEATURE_SET, FEATURE_SET_VERSION)" in joined
+
+
+class TestFeaturesDedupDDL:
+    def test_declares_dedup_upsert_keys(self):
+        ddl = _norm(FEATURES)
+        assert "DEDUP UPSERT KEYS(TIMESTAMP, SYMBOL, FEATURE_SET, FEATURE_SET_VERSION)" in ddl
+
+    def test_is_a_wal_table(self):
+        assert " WAL" in _norm(FEATURES)

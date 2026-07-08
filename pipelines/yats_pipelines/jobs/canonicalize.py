@@ -383,10 +383,13 @@ def _load_fundamentals_weighted_shares(conn) -> dict[str, list[tuple]]:
     """
     try:
         cur = conn.cursor()
+        # raw_fd_fundamentals' designated timestamp is report_date (NOT
+        # `timestamp`) — querying the wrong column made this helper silently
+        # return {} for every run, so shares_outstanding never enriched.
         cur.execute(
-            "SELECT symbol, timestamp, weighted_average_shares "
+            "SELECT symbol, report_date, weighted_average_shares "
             "FROM raw_fd_fundamentals "
-            "ORDER BY symbol, timestamp"
+            "ORDER BY symbol, report_date"
         )
         rows = cur.fetchall()
         cur.close()
