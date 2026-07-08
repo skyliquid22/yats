@@ -152,7 +152,8 @@ class FinancialDatasetsResource:
             subsidiaries detail is omitted (v1).
         """
         if report_periods is None:
-            report_periods = _recent_quarter_ends(10)
+            n_quarters = int(os.environ.get("FD_13F_QUARTERS", "10"))
+            report_periods = _recent_quarter_ends(n_quarters)
         all_holdings: list[dict] = []
         for rp in report_periods:
             data = self._get("/institutional-holdings", {
