@@ -8,6 +8,7 @@ from questdb.ingress import Protocol, Sender, TimestampNanos
 
 from yats_pipelines.resources.alpaca import AlpacaResource
 from yats_pipelines.resources.questdb import QuestDBResource
+from yats_pipelines.utils.run_recorder import record_finish, record_start
 
 logger = logging.getLogger(__name__)
 
@@ -26,32 +27,38 @@ def fetch_alpaca_bars(
     context: OpExecutionContext, config: IngestAlpacaConfig
 ) -> dict:
     """Fetch historical OHLCV bars from Alpaca Data API v2."""
-    alpaca = AlpacaResource()
+    detail = f"{','.join(config.ticker_list[:5])} {config.start_date}:{config.end_date}"
+    record_start("ingest_alpaca", context.run_id, detail)
+    try:
+        alpaca = AlpacaResource()
 
-    if not alpaca.api_key or not alpaca.api_secret:
-        raise RuntimeError(
-            "Missing Alpaca credentials: set APCA_API_KEY_ID and APCA_API_SECRET_KEY"
+        if not alpaca.api_key or not alpaca.api_secret:
+            raise RuntimeError(
+                "Missing Alpaca credentials: set APCA_API_KEY_ID and APCA_API_SECRET_KEY"
+            )
+
+        context.log.info(
+            "Fetching %s bars for %d tickers: %s (%s to %s)",
+            config.bar_frequency,
+            len(config.ticker_list),
+            ", ".join(config.ticker_list),
+            config.start_date,
+            config.end_date,
         )
 
-    context.log.info(
-        "Fetching %s bars for %d tickers: %s (%s to %s)",
-        config.bar_frequency,
-        len(config.ticker_list),
-        ", ".join(config.ticker_list),
-        config.start_date,
-        config.end_date,
-    )
+        raw_bars = alpaca.get_historical_bars(
+            symbols=config.ticker_list,
+            start=config.start_date,
+            end=config.end_date,
+            timeframe=config.bar_frequency,
+        )
 
-    raw_bars = alpaca.get_historical_bars(
-        symbols=config.ticker_list,
-        start=config.start_date,
-        end=config.end_date,
-        timeframe=config.bar_frequency,
-    )
-
-    rows = alpaca.normalize_bars(raw_bars)
-    context.log.info("Normalized %d rows for QuestDB ingestion", len(rows))
-    return {"rows": rows, "count": len(rows)}
+        rows = alpaca.normalize_bars(raw_bars)
+        context.log.info("Normalized %d rows for QuestDB ingestion", len(rows))
+        return {"rows": rows, "count": len(rows)}
+    except Exception as exc:
+        record_finish("ingest_alpaca", context.run_id, "failed", failure_cause=str(exc)[:200])
+        raise
 
 
 @op
@@ -60,52 +67,64 @@ def write_bars_to_questdb(
 ) -> None:
     """Write OHLCV bars to raw_alpaca_equity_ohlcv via QuestDB ILP."""
     rows = bars_result["rows"]
-    if not rows:
-        context.log.warning("No rows to write — skipping QuestDB ingestion")
-        return
+    _exc: Exception | None = None
+    try:
+        if not rows:
+            context.log.warning("No rows to write — skipping QuestDB ingestion")
+            return
 
-    qdb = QuestDBResource()
-    table = "raw_alpaca_equity_ohlcv"
+        qdb = QuestDBResource()
+        table = "raw_alpaca_equity_ohlcv"
 
-    context.log.info(
-        "Writing %d rows to %s via ILP (%s:%d)",
-        len(rows),
-        table,
-        qdb.ilp_host,
-        qdb.ilp_port,
-    )
+        context.log.info(
+            "Writing %d rows to %s via ILP (%s:%d)",
+            len(rows),
+            table,
+            qdb.ilp_host,
+            qdb.ilp_port,
+        )
 
-    with Sender(Protocol.Tcp, qdb.ilp_host, qdb.ilp_port) as sender:
-        for row in rows:
-            ts = row["timestamp"]
-            if isinstance(ts, str):
-                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            ingested_at = row["ingested_at"]
-            if isinstance(ingested_at, str):
-                ingested_at = datetime.fromisoformat(
-                    ingested_at.replace("Z", "+00:00")
+        with Sender(Protocol.Tcp, qdb.ilp_host, qdb.ilp_port) as sender:
+            for row in rows:
+                ts = row["timestamp"]
+                if isinstance(ts, str):
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                ingested_at = row["ingested_at"]
+                if isinstance(ingested_at, str):
+                    ingested_at = datetime.fromisoformat(
+                        ingested_at.replace("Z", "+00:00")
+                    )
+
+                sender.row(
+                    table,
+                    symbols={"symbol": row["symbol"]},
+                    columns={
+                        "open": row["open"],
+                        "high": row["high"],
+                        "low": row["low"],
+                        "close": row["close"],
+                        "volume": row["volume"],
+                        "vwap": row["vwap"],
+                        "trade_count": row["trade_count"],
+                        "ingested_at": TimestampNanos(
+                            int(ingested_at.timestamp() * 1_000_000_000)
+                        ),
+                    },
+                    at=TimestampNanos(int(ts.timestamp() * 1_000_000_000)),
                 )
+            sender.flush()
 
-            sender.row(
-                table,
-                symbols={"symbol": row["symbol"]},
-                columns={
-                    "open": row["open"],
-                    "high": row["high"],
-                    "low": row["low"],
-                    "close": row["close"],
-                    "volume": row["volume"],
-                    "vwap": row["vwap"],
-                    "trade_count": row["trade_count"],
-                    "ingested_at": TimestampNanos(
-                        int(ingested_at.timestamp() * 1_000_000_000)
-                    ),
-                },
-                at=TimestampNanos(int(ts.timestamp() * 1_000_000_000)),
-            )
-        sender.flush()
-
-    context.log.info("Successfully wrote %d rows to %s", len(rows), table)
+        context.log.info("Successfully wrote %d rows to %s", len(rows), table)
+    except Exception as exc:
+        _exc = exc
+        raise
+    finally:
+        record_finish(
+            "ingest_alpaca", context.run_id,
+            "failed" if _exc else "success",
+            rows_written=None if _exc else len(rows),
+            failure_cause=str(_exc)[:200] if _exc else None,
+        )
 
 
 @job(tags={"yats/concurrency_pool": "ingest", "dagster/priority": "10"})

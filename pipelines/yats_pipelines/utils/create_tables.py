@@ -639,6 +639,25 @@ CREATE TABLE IF NOT EXISTS canonical_hashes (
 """
 
 # ---------------------------------------------------------------------------
+# Ops instrumentation table
+# ---------------------------------------------------------------------------
+
+JOB_RUNS = """
+CREATE TABLE IF NOT EXISTS job_runs (
+    started_at TIMESTAMP,
+    job_name SYMBOL,
+    dagster_run_id SYMBOL,
+    status SYMBOL,
+    finished_at TIMESTAMP,
+    duration_s DOUBLE,
+    rows_written LONG,
+    detail STRING,
+    failure_cause STRING
+) TIMESTAMP(started_at) PARTITION BY MONTH WAL
+  DEDUP UPSERT KEYS(started_at, job_name, dagster_run_id);
+"""
+
+# ---------------------------------------------------------------------------
 # Ordered list of all DDL statements
 # ---------------------------------------------------------------------------
 
@@ -680,6 +699,8 @@ ALL_TABLES: list[str] = [
     RECONCILIATION_LOG,
     CANONICAL_PINS,
     CANONICAL_HASHES,
+    # Dashboard / ops instrumentation
+    JOB_RUNS,
 ]
 
 
@@ -715,6 +736,8 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE canonical_insider_trades DEDUP ENABLE UPSERT KEYS(filing_date, symbol, insider_name, transaction_date, transaction_type, shares)",
     "ALTER TABLE canonical_institutional_holdings DEDUP ENABLE UPSERT KEYS(filing_date, symbol, filer_cik, report_period)",
     "ALTER TABLE canonical_inst_ownership DEDUP ENABLE UPSERT KEYS(filing_date, symbol, report_period)",
+    # ya-vs9a1: job_runs instrumentation table — DEDUP from day one; migrate any pre-existing table.
+    "ALTER TABLE job_runs DEDUP ENABLE UPSERT KEYS(started_at, job_name, dagster_run_id)",
 ]
 
 

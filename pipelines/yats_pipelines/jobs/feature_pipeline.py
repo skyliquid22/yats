@@ -19,6 +19,7 @@ from dagster import Config, OpExecutionContext, job, op
 from questdb.ingress import Protocol, Sender, TimestampNanos
 
 from yats_pipelines.resources.questdb import QuestDBResource
+from yats_pipelines.utils.run_recorder import record_finish, record_start
 
 # Import feature modules to trigger @feature registrations
 import research.features.ohlcv_features  # noqa: F401
@@ -516,6 +517,11 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
     Reads canonical tables, computes all features in the feature set,
     writes to the features table via ILP.
     """
+    detail = f"universe={config.universe} feature_set={config.feature_set}"
+    record_start("feature_pipeline", context.run_id, detail)
+    _exc: Exception | None = None
+    _total_written = 0
+
     qdb = QuestDBResource()
     now = datetime.now(timezone.utc)
 
@@ -674,12 +680,22 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
 
             sender.flush()
 
+        _total_written = total_written
         context.log.info(
             "Feature pipeline complete: %d rows written for %d symbols",
             total_written, len(ohlcv_by_symbol),
         )
+    except Exception as exc:
+        _exc = exc
+        raise
     finally:
         conn.close()
+        record_finish(
+            "feature_pipeline", context.run_id,
+            "failed" if _exc else "success",
+            rows_written=None if _exc else _total_written,
+            failure_cause=str(_exc)[:200] if _exc else None,
+        )
 
 
 @job(tags={"yats/concurrency_pool": "feature", "dagster/priority": "20"})

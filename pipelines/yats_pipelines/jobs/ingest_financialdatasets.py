@@ -19,6 +19,7 @@ from dagster import Config, OpExecutionContext, job, op
 
 from yats_pipelines.resources.financialdatasets import FinancialDatasetsResource
 from yats_pipelines.resources.questdb import QuestDBResource
+from yats_pipelines.utils.run_recorder import record_finish, record_start
 
 logger = logging.getLogger(__name__)
 
@@ -368,26 +369,42 @@ _DOMAIN_FNS = {
 @op
 def ingest_financialdatasets_op(context: OpExecutionContext, config: IngestFinancialdatasetsConfig):
     """Fetch data from financialdatasets.ai and write to raw_fd_* tables via ILP."""
-    fd = FinancialDatasetsResource()
-    qdb = QuestDBResource()
-    now = datetime.now(timezone.utc)
-    tickers = config.ticker_list
-    domains = config.data_domains
+    detail = f"domains={config.data_domains} tickers={len(config.ticker_list)}"
+    record_start("ingest_financialdatasets", context.run_id, detail)
+    _exc: Exception | None = None
+    _total_rows = 0
+    try:
+        fd = FinancialDatasetsResource()
+        qdb = QuestDBResource()
+        now = datetime.now(timezone.utc)
+        tickers = config.ticker_list
+        domains = config.data_domains
 
-    context.log.info("Ingesting domains=%s for tickers=%s", domains, tickers)
+        context.log.info("Ingesting domains=%s for tickers=%s", domains, tickers)
 
-    with _ilp_sender(qdb) as sender:
-        for domain in domains:
-            fn = _DOMAIN_FNS.get(domain)
-            if fn is None:
-                context.log.warning("Unknown domain: %s — skipping", domain)
-                continue
-            extra = {"run_id": context.run_id} if domain == "institutional_holdings" else {}
-            rows = fn(fd, sender, tickers, now, **extra)
-            context.log.info("Domain %s: %d rows ingested", domain, rows)
-        sender.flush()
+        with _ilp_sender(qdb) as sender:
+            for domain in domains:
+                fn = _DOMAIN_FNS.get(domain)
+                if fn is None:
+                    context.log.warning("Unknown domain: %s — skipping", domain)
+                    continue
+                extra = {"run_id": context.run_id} if domain == "institutional_holdings" else {}
+                rows = fn(fd, sender, tickers, now, **extra)
+                _total_rows += rows
+                context.log.info("Domain %s: %d rows ingested", domain, rows)
+            sender.flush()
 
-    context.log.info("ingest_financialdatasets complete")
+        context.log.info("ingest_financialdatasets complete")
+    except Exception as exc:
+        _exc = exc
+        raise
+    finally:
+        record_finish(
+            "ingest_financialdatasets", context.run_id,
+            "failed" if _exc else "success",
+            rows_written=None if _exc else _total_rows,
+            failure_cause=str(_exc)[:200] if _exc else None,
+        )
 
 
 @job(tags={"yats/concurrency_pool": "ingest", "dagster/priority": "10"})
