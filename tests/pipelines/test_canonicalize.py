@@ -1211,6 +1211,39 @@ class TestCanonicalizeInstitutionalHoldings:
         assert agg_cols["total_value_usd"] == pytest.approx(175_000_000.0)
         assert agg_cols["filer_count"] == 3
 
+    def test_amendment_supersedes_not_sums(self):
+        """A 13F amendment (same filer_cik + report_period, later filing_date)
+        REPLACES the original in the aggregate — summing would double-count.
+        Regression: observed live filers 3x per quarter, NVDA aggregate at
+        2x market cap."""
+        rp = datetime(2023, 12, 31, tzinfo=timezone.utc)
+        original = _make_holdings_row(filer_cik="0001", shares=1_000_000.0,
+                                      value_usd=100_000_000.0,
+                                      filing_date=datetime(2024, 2, 1, tzinfo=timezone.utc),
+                                      report_period=rp)
+        amendment = _make_holdings_row(filer_cik="0001", shares=800_000.0,
+                                       value_usd=80_000_000.0,
+                                       filing_date=datetime(2024, 3, 10, tzinfo=timezone.utc),
+                                       report_period=rp)
+        other = _make_holdings_row(filer_cik="0002", filer_name="BlackRock",
+                                   shares=500_000.0, value_usd=50_000_000.0,
+                                   filing_date=datetime(2024, 2, 5, tzinfo=timezone.utc),
+                                   report_period=rp)
+        conn = _make_holdings_conn([original, amendment, other])
+        sender = MagicMock()
+        log = MagicMock()
+        now = datetime(2024, 4, 1, tzinfo=timezone.utc)
+
+        _canonicalize_institutional_holdings(conn, sender, self._config(), now, "run-am", log)
+
+        agg_calls = [c for c in sender.row.call_args_list if c[0][0] == "canonical_inst_ownership"]
+        assert len(agg_calls) == 1
+        cols = agg_calls[0][1]["columns"]
+        # amendment (800k) supersedes original (1M); other filer adds 500k
+        assert cols["total_shares"] == pytest.approx(1_300_000.0)
+        assert cols["total_value_usd"] == pytest.approx(130_000_000.0)
+        assert cols["filer_count"] == 2
+
     def test_aggregate_uses_max_filing_date(self):
         """The aggregate's filing_date = latest filing_date across filers for that period."""
         rp = datetime(2023, 12, 31, tzinfo=timezone.utc)
