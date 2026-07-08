@@ -23,6 +23,7 @@ from dagster import Config, OpExecutionContext, job, op
 from questdb.ingress import Protocol, Sender, TimestampNanos
 
 from yats_pipelines.resources.questdb import QuestDBResource
+from yats_pipelines.utils.run_recorder import record_finish, record_start
 
 logger = logging.getLogger(__name__)
 
@@ -1039,6 +1040,11 @@ def canonicalize_op(context: OpExecutionContext, config: CanonicalizeConfig):
     """
     from research.data.canonical_integrity import process_canonical_integrity
 
+    detail = f"domains={config.domains}"
+    record_start("canonicalize", context.run_id, detail)
+    _exc: Exception | None = None
+    _total_rows = 0
+
     qdb = QuestDBResource()
     now = datetime.now(timezone.utc)
     run_id = context.run_id
@@ -1066,6 +1072,7 @@ def canonicalize_op(context: OpExecutionContext, config: CanonicalizeConfig):
                 else:
                     count = fn(conn, sender, config, now, run_id, context.log)
                 context.log.info("Domain %s: %d canonical rows written", domain, count)
+                _total_rows += count
 
             sender.flush()
 
@@ -1101,8 +1108,17 @@ def canonicalize_op(context: OpExecutionContext, config: CanonicalizeConfig):
                 summary["symbols_changed"],
                 summary["stale_experiments"],
             )
+    except Exception as exc:
+        _exc = exc
+        raise
     finally:
         conn.close()
+        record_finish(
+            "canonicalize", context.run_id,
+            "failed" if _exc else "success",
+            rows_written=None if _exc else _total_rows,
+            failure_cause=str(_exc)[:200] if _exc else None,
+        )
 
     context.log.info("Canonicalization complete")
 

@@ -9,6 +9,7 @@ from questdb.ingress import Protocol, Sender, TimestampNanos
 
 from yats_pipelines.resources.questdb import QuestDBResource
 from yats_pipelines.resources.thetadata import ThetaDataResource
+from yats_pipelines.utils.run_recorder import record_finish, record_start
 from yats_pipelines.utils.schema_guard import assert_table_schema
 
 logger = logging.getLogger(__name__)
@@ -183,9 +184,12 @@ def fetch_thetadata_options(
     context: OpExecutionContext, config: IngestThetadataConfig
 ) -> dict:
     """Fetch option chain snapshots (and optional EOD data) from ThetaData API."""
-    td = ThetaDataResource()
+    detail = f"{','.join(config.underlyings[:5])} eod={bool(config.start_date)}"
+    record_start("ingest_thetadata", context.run_id, detail)
+    try:
+        td = ThetaDataResource()
 
-    now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
     today = now.date()
     cutoff = today + timedelta(days=config.expiry_window_days)
     today_str = today.strftime("%Y%m%d")
@@ -288,13 +292,16 @@ def fetch_thetadata_options(
                     underlying, eod_count, len(eod_exps), start_ymd, end_ymd,
                 )
 
-    context.log.info(
-        "Fetched %d chain rows, %d EOD rows for %d underlyings",
-        len(chain_rows),
-        len(eod_rows),
-        len(config.underlyings),
-    )
-    return {"chain_rows": chain_rows, "eod_rows": eod_rows}
+        context.log.info(
+            "Fetched %d chain rows, %d EOD rows for %d underlyings",
+            len(chain_rows),
+            len(eod_rows),
+            len(config.underlyings),
+        )
+        return {"chain_rows": chain_rows, "eod_rows": eod_rows}
+    except Exception as exc:
+        record_finish("ingest_thetadata", context.run_id, "failed", failure_cause=str(exc)[:200])
+        raise
 
 
 @op
@@ -443,6 +450,9 @@ def write_raw_thetadata(
                 "Wrote %d rows to raw_thetadata_options_eod", eod_written
             )
 
+    except Exception as exc:
+        record_finish("ingest_thetadata", context.run_id, "failed", failure_cause=str(exc)[:200])
+        raise
     finally:
         conn.close()
 
@@ -466,6 +476,8 @@ def canonicalize_options(
     conn = _pg_conn(qdb)
     conn.autocommit = True
 
+    _exc: Exception | None = None
+    _written = 0
     try:
         assert_table_schema(conn, "canonical_options_chain", _CANONICAL_REQUIRED_COLS)
 
@@ -491,7 +503,6 @@ def canonicalize_options(
         context.log.info("Read %d raw chain rows for canonicalization", len(raw_rows))
 
         canonical_rows = _pick_latest_per_contract(raw_rows)
-        written = 0
         rejected = 0
 
         with _ilp_sender(qdb) as sender:
@@ -552,16 +563,24 @@ def canonicalize_options(
                     columns={k: v for k, v in cols.items() if v is not None},
                     at=_ts_nanos(quote_date_dt),
                 )
-                written += 1
+                _written += 1
 
             sender.flush()
 
         context.log.info(
-            "Canonicalized %d contracts, rejected %d", written, rejected
+            "Canonicalized %d contracts, rejected %d", _written, rejected
         )
-
+    except Exception as exc:
+        _exc = exc
+        raise
     finally:
         conn.close()
+        record_finish(
+            "ingest_thetadata", context.run_id,
+            "failed" if _exc else "success",
+            rows_written=None if _exc else _written,
+            failure_cause=str(_exc)[:200] if _exc else None,
+        )
 
 
 # ---------------------------------------------------------------------------
