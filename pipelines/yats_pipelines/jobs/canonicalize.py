@@ -982,36 +982,49 @@ def _canonicalize_institutional_holdings(
                 "symbol": symbol,
                 "report_period": report_period,
                 "max_filing_date": filing_ts,
-                "filers": {},
+                "events": [],
             }
         a = agg[agg_k]
         if filing_ts > a["max_filing_date"]:
             a["max_filing_date"] = filing_ts
-        prev = a["filers"].get(filer)
-        if prev is None or filing_ts >= prev[0]:
-            a["filers"][filer] = (filing_ts, shares, value_usd)
+        a.setdefault("events", []).append((filing_ts, filer, shares, value_usd))
 
-    # --- Write aggregate rows (latest filing per filer already selected) ---
+    # --- Write aggregate rows: AS-OF EVOLUTION per (symbol, report_period) ---
+    # One row per distinct filing date, with cumulative supersede-totals as of
+    # that date. Keying a single row at max(filing_date) is wrong: one late
+    # amender (observed: 2024-Q1 amendments filed 2026-06) pushes the whole
+    # quarter's visibility years forward, so as-of consumers see nothing until
+    # then. With the evolution, the totals at time t reflect exactly the
+    # filings the market had seen by t. Dedup key (filing_date, symbol,
+    # report_period) keeps reruns idempotent.
     for a in agg.values():
-        agg_filing_ts = a["max_filing_date"]
         report_period = a.get("report_period")
         rp_nanos = _ts_nanos(report_period) if report_period is not None else None
-        total_shares = sum(v[1] for v in a["filers"].values())
-        total_value = sum(v[2] for v in a["filers"].values())
-
-        _row(sender, "canonical_inst_ownership",
-             symbols={
-                 "symbol": a["symbol"],
-                 "source_vendor": vendor,
-             },
-             columns={
-                 "report_period": rp_nanos,
-                 "total_shares": total_shares,
-                 "total_value_usd": total_value,
-                 "filer_count": len(a["filers"]),
-                 "canonicalized_at": _ts_nanos(now),
-             },
-             at=agg_filing_ts)
+        events = sorted(a["events"], key=lambda e: e[0])
+        filers: dict[str, tuple] = {}
+        i = 0
+        while i < len(events):
+            f_ts = events[i][0]
+            # apply all events sharing this filing date (supersede per filer)
+            while i < len(events) and events[i][0] == f_ts:
+                _, filer, sh, val = events[i]
+                prev = filers.get(filer)
+                if prev is None or f_ts >= prev[0]:
+                    filers[filer] = (f_ts, sh, val)
+                i += 1
+            _row(sender, "canonical_inst_ownership",
+                 symbols={
+                     "symbol": a["symbol"],
+                     "source_vendor": vendor,
+                 },
+                 columns={
+                     "report_period": rp_nanos,
+                     "total_shares": sum(v[1] for v in filers.values()),
+                     "total_value_usd": sum(v[2] for v in filers.values()),
+                     "filer_count": len(filers),
+                     "canonicalized_at": _ts_nanos(now),
+                 },
+                 at=f_ts)
 
     return written
 

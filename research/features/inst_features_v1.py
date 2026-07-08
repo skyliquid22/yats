@@ -74,7 +74,13 @@ def compute_inst_features(
     if not ownership_df.empty and not np.isnan(shares_outstanding) and shares_outstanding > 0:
         eligible_own = ownership_df[ownership_df["filing_date"] <= as_of_date]
         if not eligible_own.empty:
-            latest = eligible_own.iloc[-1]  # last row = most recent (sorted asc)
+            # Select the freshest QUARTER visible as of this date, then its
+            # latest evolution row. iloc[-1] by filing order is wrong: with
+            # as-of evolution rows, the most recently FILED row can be a
+            # years-old quarter's late amendment.
+            latest = eligible_own.sort_values(
+                ["report_period", "filing_date"]
+            ).iloc[-1]
             total_shares = latest["total_shares"]
             if not pd.isna(total_shares) and float(total_shares) >= 0:
                 result["inst_ownership_pct"] = float(total_shares) / float(shares_outstanding)
@@ -86,11 +92,17 @@ def compute_inst_features(
     if not holdings_df.empty:
         eligible_hold = holdings_df[holdings_df["filing_date"] <= as_of_date]
         if not eligible_hold.empty:
-            # Get the most recent filing_date's report_period
-            latest_filing_date = eligible_hold["filing_date"].max()
-            quarter_rows = eligible_hold[
-                eligible_hold["filing_date"] == latest_filing_date
-            ].copy()
+            # Freshest QUARTER visible as of this date — NOT the rows of the
+            # single latest filing date (that computes concentration over just
+            # the last day's filers; observed top10_share == 1.0). Within the
+            # quarter, one row per filer: the latest filing supersedes.
+            latest_rp = eligible_hold["report_period"].max()
+            quarter_rows = (
+                eligible_hold[eligible_hold["report_period"] == latest_rp]
+                .sort_values("filing_date")
+                .drop_duplicates(subset=["filer_cik"], keep="last")
+                .copy()
+            )
 
             quarter_rows = quarter_rows.dropna(subset=["value_usd"])
             quarter_rows = quarter_rows[quarter_rows["value_usd"] > 0]

@@ -1237,12 +1237,17 @@ class TestCanonicalizeInstitutionalHoldings:
         _canonicalize_institutional_holdings(conn, sender, self._config(), now, "run-am", log)
 
         agg_calls = [c for c in sender.row.call_args_list if c[0][0] == "canonical_inst_ownership"]
-        assert len(agg_calls) == 1
-        cols = agg_calls[0][1]["columns"]
-        # amendment (800k) supersedes original (1M); other filer adds 500k
+        # as-of evolution: one aggregate row per distinct filing date
+        assert len(agg_calls) == 3
+        # final row (latest filing date) carries superseded totals:
+        # amendment (800k) REPLACES original (1M); other filer adds 500k
+        cols = agg_calls[-1][1]["columns"]
         assert cols["total_shares"] == pytest.approx(1_300_000.0)
         assert cols["total_value_usd"] == pytest.approx(130_000_000.0)
         assert cols["filer_count"] == 2
+        # intermediate as-of state (after original + other, before amendment)
+        mid = agg_calls[1][1]["columns"]
+        assert mid["total_shares"] == pytest.approx(1_500_000.0)
 
     def test_aggregate_uses_max_filing_date(self):
         """The aggregate's filing_date = latest filing_date across filers for that period."""
@@ -1262,10 +1267,14 @@ class TestCanonicalizeInstitutionalHoldings:
         _canonicalize_institutional_holdings(conn, sender, self._config(), now, "run-4", log)
 
         agg_calls = [c for c in sender.row.call_args_list if c[0][0] == "canonical_inst_ownership"]
-        assert len(agg_calls) == 1
+        # as-of evolution: one row per distinct filing date, in filing order;
+        # the final row is keyed at the LATEST filing date with full totals.
+        assert len(agg_calls) == 2
         from yats_pipelines.jobs.canonicalize import _ts_nanos
         expected_at = _ts_nanos(datetime(2024, 2, 20, tzinfo=timezone.utc))
-        assert str(agg_calls[0][1]["at"]) == str(expected_at)
+        assert str(agg_calls[-1][1]["at"]) == str(expected_at)
+        assert agg_calls[-1][1]["columns"]["filer_count"] == 2
+        assert agg_calls[0][1]["columns"]["filer_count"] == 1  # as-of first filing
 
     def test_dedup_collapse_same_filer_reingested_one_row(self):
         """Two raw rows for the same (filing_date, symbol, filer_cik, report_period) → one canonical row."""
