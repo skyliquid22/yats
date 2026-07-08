@@ -432,7 +432,9 @@ class TestExperimentsSearch:
         with patch("dashboard.queries._get_data_root", return_value=tmp_path):
             result = experiments_search(conn, "ppo")
 
-        assert result["deflation_clock"] == 10
+        # clock counts actual trials (len(configs)) — multi-arm sweeps run
+        # grid_size PER arm, so grid_size undercounts
+        assert result["deflation_clock"] == 1
         wfo_results = [r for r in result["results"] if r.get("evaluation_regime") == "wfo-oos"]
         assert len(wfo_results) == 1
         assert wfo_results[0]["dsr"] == 0.8

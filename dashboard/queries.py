@@ -514,7 +514,8 @@ def experiments_search(conn, q: str = "") -> dict:
                 summary = json.loads(summary_path.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            deflation_clock += summary.get("grid_size", 0)
+            # actual trials = len(configs) (multi-arm sweeps run grid_size PER arm)
+            deflation_clock += len(summary.get("configs", []))
             sweep_name = summary.get("sweep", summary_path.parent.name)
             for cfg in summary.get("configs", []):
                 policy = cfg.get("policy", "")
