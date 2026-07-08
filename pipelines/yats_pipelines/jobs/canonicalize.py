@@ -966,34 +966,38 @@ def _canonicalize_institutional_holdings(
              at=filing_ts)
         written += 1
 
-        # Accumulate aggregate
+        # Accumulate aggregate — SUPERSEDE semantics per filer: a 13F amendment
+        # (same filer_cik + report_period, later filing_date) REPLACES the
+        # original. Summing original+amendments double/triple-counts amenders
+        # (observed live: filers appear 3x per quarter; NVDA aggregate reached
+        # 2x market cap). Keep latest-filing-per-filer, aggregate at write time.
         symbol = str(row.get("symbol", ""))
         rp_str = str(report_period) if report_period is not None else ""
         agg_k = (symbol, rp_str)
         shares = row.get("shares") or 0.0
         value_usd = row.get("value_usd") or 0.0
+        filer = str(row.get("filer_cik", ""))
         if agg_k not in agg:
             agg[agg_k] = {
                 "symbol": symbol,
                 "report_period": report_period,
                 "max_filing_date": filing_ts,
-                "total_shares": shares,
-                "total_value_usd": value_usd,
-                "filer_count": 1,
+                "filers": {},
             }
-        else:
-            a = agg[agg_k]
-            a["total_shares"] += shares
-            a["total_value_usd"] += value_usd
-            a["filer_count"] += 1
-            if filing_ts > a["max_filing_date"]:
-                a["max_filing_date"] = filing_ts
+        a = agg[agg_k]
+        if filing_ts > a["max_filing_date"]:
+            a["max_filing_date"] = filing_ts
+        prev = a["filers"].get(filer)
+        if prev is None or filing_ts >= prev[0]:
+            a["filers"][filer] = (filing_ts, shares, value_usd)
 
-    # --- Write aggregate rows ---
+    # --- Write aggregate rows (latest filing per filer already selected) ---
     for a in agg.values():
         agg_filing_ts = a["max_filing_date"]
         report_period = a.get("report_period")
         rp_nanos = _ts_nanos(report_period) if report_period is not None else None
+        total_shares = sum(v[1] for v in a["filers"].values())
+        total_value = sum(v[2] for v in a["filers"].values())
 
         _row(sender, "canonical_inst_ownership",
              symbols={
@@ -1002,9 +1006,9 @@ def _canonicalize_institutional_holdings(
              },
              columns={
                  "report_period": rp_nanos,
-                 "total_shares": a["total_shares"],
-                 "total_value_usd": a["total_value_usd"],
-                 "filer_count": int(a["filer_count"]),
+                 "total_shares": total_shares,
+                 "total_value_usd": total_value,
+                 "filer_count": len(a["filers"]),
                  "canonicalized_at": _ts_nanos(now),
              },
              at=agg_filing_ts)
