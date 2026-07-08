@@ -1,0 +1,18 @@
+name: regime_v2
+description: >
+  Standalone regime_v2 feature set for isolated verification.
+  9 market-implied (options-priced) regime features from SPY EOD chains.
+  Max lookback 61 bars (60d z-score windows) — purge-compatible with
+  sweep geometry (64-bar bound). Requires canonical_options_chain with
+  source_vendor=thetadata_eod for SPY.
+
+regime:
+  - spy_atm_iv
+  - spy_iv_zscore_60d
+  - spy_vrp
+  - spy_iv_term_slope
+  - spy_skew_zscore_60d
+  - spy_gex_sign
+  - spy_gex_norm
+  - spy_iv_delta_5d
+  - spy_slope_delta_5d
