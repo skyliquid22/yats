@@ -640,12 +640,16 @@ def _compute_inst_features_pipeline(
             merged_metrics["shares_outstanding"] = np.nan
 
         rows = []
-        for _, row in merged_metrics.iterrows():
-            ts = row["timestamp"]
+        # NOTE: no iterrows() here — on an ETF frame whose shares_outstanding
+        # column is ALL-NaN, iterrows coerces the mixed row [Timestamp, NaN]
+        # to datetime64, silently turning NaN into NaT (float(NaT) raises).
+        # Iterating the columns as arrays preserves dtypes.
+        shares_arr = merged_metrics["shares_outstanding"].to_numpy()
+        for ts, sh in zip(merged_metrics["timestamp"], shares_arr):
             feats = compute_inst_features(
                 sym_own,
                 sym_hold,
-                shares_outstanding=float(row.get("shares_outstanding", np.nan) or np.nan),
+                shares_outstanding=float(sh) if pd.notna(sh) else float("nan"),
                 as_of_date=ts,
                 symbol=symbol,
             )

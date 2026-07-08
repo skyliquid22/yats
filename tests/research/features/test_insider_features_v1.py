@@ -36,7 +36,7 @@ def _make_trades(
         "insider_name": "John Doe",
         "insider_title": "SVP",
         "is_board_director": False,
-        "transaction_type": "P",
+        "transaction_type": "Open market purchase",
         "total_value": 100_000.0,
     }
     records = []
@@ -62,7 +62,7 @@ class TestNoLookahead:
     def test_filing_after_asof_excluded(self):
         """A filing dated after as_of_date must NOT affect the feature."""
         trades = _make_trades([
-            {"filing_date": "2024-02-01", "transaction_type": "P", "total_value": 100_000},
+            {"filing_date": "2024-02-01", "transaction_type": "Open market purchase", "total_value": 100_000},
         ])
         as_of = _ts("2024-01-31")  # one day before the filing
         result = compute_insider_features(trades, as_of, 1_000_000, 100.0)
@@ -75,7 +75,7 @@ class TestNoLookahead:
     def test_filing_on_asof_included(self):
         """A filing dated exactly on as_of_date must be included."""
         trades = _make_trades([
-            {"filing_date": "2024-01-31", "transaction_type": "P", "total_value": 100_000},
+            {"filing_date": "2024-01-31", "transaction_type": "Open market purchase", "total_value": 100_000},
         ])
         as_of = _ts("2024-01-31")
         result = compute_insider_features(trades, as_of, 1_000_000, 100.0)
@@ -91,10 +91,10 @@ class TestOpenMarketFilter:
     def test_only_p_and_s_codes_included(self):
         """Award (A), exercise (M), gift (G), etc. must be excluded."""
         trades = _make_trades([
-            {"filing_date": "2024-01-15", "transaction_type": "A", "total_value": 500_000},  # award
-            {"filing_date": "2024-01-15", "transaction_type": "M", "total_value": 500_000},  # exercise
-            {"filing_date": "2024-01-15", "transaction_type": "G", "total_value": 500_000},  # gift
-            {"filing_date": "2024-01-15", "transaction_type": "P", "total_value": 100_000},  # open-market buy
+            {"filing_date": "2024-01-15", "transaction_type": "Company grant or award", "total_value": 500_000},  # award
+            {"filing_date": "2024-01-15", "transaction_type": "Option exercise or derivative conversion", "total_value": 500_000},  # exercise
+            {"filing_date": "2024-01-15", "transaction_type": "Gift", "total_value": 500_000},  # gift
+            {"filing_date": "2024-01-15", "transaction_type": "Open market purchase", "total_value": 100_000},  # open-market buy
         ])
         as_of = _ts("2024-01-31")
         result = compute_insider_features(trades, as_of, 10_000_000, 100.0)
@@ -102,11 +102,11 @@ class TestOpenMarketFilter:
         assert result["insider_net_buy_90d"] == pytest.approx(1.0)
 
     def test_open_market_codes_set(self):
-        assert "P" in OPEN_MARKET_CODES
-        assert "S" in OPEN_MARKET_CODES
-        assert "A" not in OPEN_MARKET_CODES
-        assert "M" not in OPEN_MARKET_CODES
-        assert "G" not in OPEN_MARKET_CODES
+        assert "Open market purchase" in OPEN_MARKET_CODES
+        assert "Open market sale" in OPEN_MARKET_CODES
+        assert "Company grant or award" not in OPEN_MARKET_CODES
+        assert "Option exercise or derivative conversion" not in OPEN_MARKET_CODES
+        assert "Gift" not in OPEN_MARKET_CODES
 
 
 # ---------------------------------------------------------------------------
@@ -116,23 +116,23 @@ class TestOpenMarketFilter:
 class TestInsiderNetBuy90d:
     def test_pure_buy_returns_one(self):
         trades = _make_trades([
-            {"filing_date": "2024-01-10", "transaction_type": "P", "total_value": 200_000},
-            {"filing_date": "2024-01-15", "transaction_type": "P", "total_value": 100_000},
+            {"filing_date": "2024-01-10", "transaction_type": "Open market purchase", "total_value": 200_000},
+            {"filing_date": "2024-01-15", "transaction_type": "Open market purchase", "total_value": 100_000},
         ])
         result = compute_insider_features(trades, _ts("2024-01-31"), 1_000_000, 100.0)
         assert result["insider_net_buy_90d"] == pytest.approx(1.0)
 
     def test_pure_sell_returns_minus_one(self):
         trades = _make_trades([
-            {"filing_date": "2024-01-10", "transaction_type": "S", "total_value": 200_000},
+            {"filing_date": "2024-01-10", "transaction_type": "Open market sale", "total_value": 200_000},
         ])
         result = compute_insider_features(trades, _ts("2024-01-31"), 1_000_000, 100.0)
         assert result["insider_net_buy_90d"] == pytest.approx(-1.0)
 
     def test_equal_buy_sell_returns_zero(self):
         trades = _make_trades([
-            {"filing_date": "2024-01-10", "transaction_type": "P", "total_value": 100_000},
-            {"filing_date": "2024-01-10", "transaction_type": "S", "total_value": 100_000},
+            {"filing_date": "2024-01-10", "transaction_type": "Open market purchase", "total_value": 100_000},
+            {"filing_date": "2024-01-10", "transaction_type": "Open market sale", "total_value": 100_000},
         ])
         result = compute_insider_features(trades, _ts("2024-01-31"), 1_000_000, 100.0)
         assert result["insider_net_buy_90d"] == pytest.approx(0.0)
@@ -141,9 +141,9 @@ class TestInsiderNetBuy90d:
         as_of = _ts("2024-01-31")
         trades = _make_trades([
             # 91 days before as_of — outside 90d window
-            {"filing_date": "2023-11-01", "transaction_type": "S", "total_value": 999_999},
+            {"filing_date": "2023-11-01", "transaction_type": "Open market sale", "total_value": 999_999},
             # 30 days before as_of — inside 90d window
-            {"filing_date": "2024-01-01", "transaction_type": "P", "total_value": 100_000},
+            {"filing_date": "2024-01-01", "transaction_type": "Open market purchase", "total_value": 100_000},
         ])
         result = compute_insider_features(trades, as_of, 1_000_000, 100.0)
         # Only the buy in the 90d window → ratio = 1.0 (sell too old)
@@ -165,7 +165,7 @@ class TestInsiderBuyIntensity30d:
         shares = 10_000_000.0
         close = 100.0
         trades = _make_trades([
-            {"filing_date": "2024-01-20", "transaction_type": "P", "total_value": net_buy},
+            {"filing_date": "2024-01-20", "transaction_type": "Open market purchase", "total_value": net_buy},
         ])
         result = compute_insider_features(trades, _ts("2024-01-31"), shares, close)
         expected = net_buy / (shares * close)
@@ -175,8 +175,8 @@ class TestInsiderBuyIntensity30d:
         shares = 10_000_000.0
         close = 100.0
         trades = _make_trades([
-            {"filing_date": "2024-01-20", "transaction_type": "P", "total_value": 2_000_000},
-            {"filing_date": "2024-01-21", "transaction_type": "S", "total_value": 500_000},
+            {"filing_date": "2024-01-20", "transaction_type": "Open market purchase", "total_value": 2_000_000},
+            {"filing_date": "2024-01-21", "transaction_type": "Open market sale", "total_value": 500_000},
         ])
         result = compute_insider_features(trades, _ts("2024-01-31"), shares, close)
         expected = 1_500_000 / (shares * close)
@@ -188,9 +188,9 @@ class TestInsiderBuyIntensity30d:
         close = 100.0
         trades = _make_trades([
             # 35 days ago — outside 30d window but inside 90d
-            {"filing_date": "2023-12-27", "transaction_type": "S", "total_value": 999_999},
+            {"filing_date": "2023-12-27", "transaction_type": "Open market sale", "total_value": 999_999},
             # 10 days ago — inside 30d window
-            {"filing_date": "2024-01-21", "transaction_type": "P", "total_value": 100_000},
+            {"filing_date": "2024-01-21", "transaction_type": "Open market purchase", "total_value": 100_000},
         ])
         result = compute_insider_features(trades, as_of, shares, close)
         # Only the buy inside 30d → intensity = 100_000 / (10M × 100)
@@ -199,7 +199,7 @@ class TestInsiderBuyIntensity30d:
 
     def test_nan_when_invalid_market_cap(self):
         trades = _make_trades([
-            {"filing_date": "2024-01-20", "transaction_type": "P", "total_value": 100_000},
+            {"filing_date": "2024-01-20", "transaction_type": "Open market purchase", "total_value": 100_000},
         ])
         result = compute_insider_features(trades, _ts("2024-01-31"), shares_outstanding=0.0, close=100.0)
         assert np.isnan(result["insider_buy_intensity_30d"])
@@ -217,8 +217,8 @@ class TestInsiderCluster30d:
     def test_counts_distinct_net_buyers(self):
         """Two insiders net-buying → cluster = 2."""
         trades = _make_trades([
-            {"filing_date": "2024-01-20", "insider_name": "Alice", "transaction_type": "P", "total_value": 100_000},
-            {"filing_date": "2024-01-21", "insider_name": "Bob", "transaction_type": "P", "total_value": 50_000},
+            {"filing_date": "2024-01-20", "insider_name": "Alice", "transaction_type": "Open market purchase", "total_value": 100_000},
+            {"filing_date": "2024-01-21", "insider_name": "Bob", "transaction_type": "Open market purchase", "total_value": 50_000},
         ])
         result = compute_insider_features(trades, _ts("2024-01-31"), 10_000_000, 100.0)
         assert result["insider_cluster_30d"] == pytest.approx(2.0)
@@ -226,8 +226,8 @@ class TestInsiderCluster30d:
     def test_net_seller_not_counted(self):
         """One net buyer, one net seller → cluster = 1."""
         trades = _make_trades([
-            {"filing_date": "2024-01-20", "insider_name": "Alice", "transaction_type": "P", "total_value": 100_000},
-            {"filing_date": "2024-01-21", "insider_name": "Bob", "transaction_type": "S", "total_value": 200_000},
+            {"filing_date": "2024-01-20", "insider_name": "Alice", "transaction_type": "Open market purchase", "total_value": 100_000},
+            {"filing_date": "2024-01-21", "insider_name": "Bob", "transaction_type": "Open market sale", "total_value": 200_000},
         ])
         result = compute_insider_features(trades, _ts("2024-01-31"), 10_000_000, 100.0)
         assert result["insider_cluster_30d"] == pytest.approx(1.0)
@@ -235,15 +235,15 @@ class TestInsiderCluster30d:
     def test_same_insider_mixed_trades_net_is_correct(self):
         """Alice buys 300k and sells 100k → net = +200k → counted as buyer."""
         trades = _make_trades([
-            {"filing_date": "2024-01-20", "insider_name": "Alice", "transaction_type": "P", "total_value": 300_000},
-            {"filing_date": "2024-01-20", "insider_name": "Alice", "transaction_type": "S", "total_value": 100_000},
+            {"filing_date": "2024-01-20", "insider_name": "Alice", "transaction_type": "Open market purchase", "total_value": 300_000},
+            {"filing_date": "2024-01-20", "insider_name": "Alice", "transaction_type": "Open market sale", "total_value": 100_000},
         ])
         result = compute_insider_features(trades, _ts("2024-01-31"), 10_000_000, 100.0)
         assert result["insider_cluster_30d"] == pytest.approx(1.0)
 
     def test_zero_when_all_sell(self):
         trades = _make_trades([
-            {"filing_date": "2024-01-20", "insider_name": "Alice", "transaction_type": "S", "total_value": 100_000},
+            {"filing_date": "2024-01-20", "insider_name": "Alice", "transaction_type": "Open market sale", "total_value": 100_000},
         ])
         result = compute_insider_features(trades, _ts("2024-01-31"), 10_000_000, 100.0)
         assert result["insider_cluster_30d"] == pytest.approx(0.0)
@@ -265,7 +265,7 @@ class TestExecNetBuy90d:
                 "insider_name": "Dir A",
                 "is_board_director": True,
                 "insider_title": "Director",
-                "transaction_type": "P",
+                "transaction_type": "Open market purchase",
                 "total_value": 100_000,
             },
         ])
@@ -279,7 +279,7 @@ class TestExecNetBuy90d:
                 "insider_name": "CEO",
                 "is_board_director": False,
                 "insider_title": "Chief Executive Officer",
-                "transaction_type": "P",
+                "transaction_type": "Open market purchase",
                 "total_value": 500_000,
             },
         ])
@@ -293,7 +293,7 @@ class TestExecNetBuy90d:
                 "insider_name": "CFO",
                 "is_board_director": False,
                 "insider_title": "Chief Financial Officer",
-                "transaction_type": "P",
+                "transaction_type": "Open market purchase",
                 "total_value": 500_000,
             },
         ])
@@ -308,7 +308,7 @@ class TestExecNetBuy90d:
                 "insider_name": "SVP Sales",
                 "is_board_director": False,
                 "insider_title": "Senior VP Sales",
-                "transaction_type": "P",
+                "transaction_type": "Open market purchase",
                 "total_value": 100_000,
             },
         ])
@@ -323,7 +323,7 @@ class TestExecNetBuy90d:
                 "insider_name": "CEO",
                 "is_board_director": False,
                 "insider_title": "ceo",
-                "transaction_type": "P",
+                "transaction_type": "Open market purchase",
                 "total_value": 200_000,
             },
             {
@@ -331,7 +331,7 @@ class TestExecNetBuy90d:
                 "insider_name": "SVP",
                 "is_board_director": False,
                 "insider_title": "SVP",
-                "transaction_type": "S",
+                "transaction_type": "Open market sale",
                 "total_value": 100_000,
             },
         ])

@@ -10,7 +10,7 @@ transaction_date — filing date is the point-in-time gate for no-lookahead):
                              (Cohen-Malloy-Pomorski cluster signal)
   exec_net_buy_90d         — insider_net_buy_90d restricted to execs / directors
 
-Open-market transaction codes (INCLUDE): P (purchase), S (sale).
+Open-market transaction types (INCLUDE): 'Open market purchase' / 'Open market sale'.
 All other codes are EXCLUDED: A (award), M (exercise), G (gift), F (tax
 withholding), D (company disposition), J (other), I (discretionary),
 K (equity swap), W (will/bequest), U (tender offer), Z (trust).
@@ -41,8 +41,15 @@ from research.features.feature_registry import feature
 
 logger = logging.getLogger(__name__)
 
-# Open-market codes only — P = purchase, S = sale
-OPEN_MARKET_CODES: frozenset[str] = frozenset({"P", "S"})
+# Open-market transaction types only. LIVE VALUES from canonical_insider_trades
+# are human-readable strings from FinancialDatasets (NOT SEC Form-4 letter codes):
+#   'Open market purchase' / 'Open market sale'  <- INCLUDE
+#   'Option exercise or derivative conversion', 'Company grant or award',
+#   'Tax or exercise-price share withholding', 'Conversion of a derivative
+#   security', 'Gift', 'Disposition back to the company'  <- EXCLUDE
+BUY_TYPES: frozenset[str] = frozenset({"Open market purchase"})
+SELL_TYPES: frozenset[str] = frozenset({"Open market sale"})
+OPEN_MARKET_CODES: frozenset[str] = BUY_TYPES | SELL_TYPES
 
 # Title substrings that qualify as exec/director (case-insensitive)
 _EXEC_TITLES: tuple[str, ...] = (
@@ -113,8 +120,8 @@ def compute_insider_features(
     w90 = eligible[eligible["filing_date"] >= cutoff_90d]
 
     if not w90.empty:
-        buys_90 = w90.loc[w90["transaction_type"] == "P", "total_value"].sum()
-        sells_90 = w90.loc[w90["transaction_type"] == "S", "total_value"].sum()
+        buys_90 = w90.loc[w90["transaction_type"].isin(BUY_TYPES), "total_value"].sum()
+        sells_90 = w90.loc[w90["transaction_type"].isin(SELL_TYPES), "total_value"].sum()
         denom_90 = buys_90 + sells_90
         if denom_90 > 0:
             result["insider_net_buy_90d"] = float((buys_90 - sells_90) / denom_90)
@@ -123,8 +130,8 @@ def compute_insider_features(
         exec_mask = w90.apply(_is_exec, axis=1)
         w90_exec = w90[exec_mask]
         if not w90_exec.empty:
-            buys_e = w90_exec.loc[w90_exec["transaction_type"] == "P", "total_value"].sum()
-            sells_e = w90_exec.loc[w90_exec["transaction_type"] == "S", "total_value"].sum()
+            buys_e = w90_exec.loc[w90_exec["transaction_type"].isin(BUY_TYPES), "total_value"].sum()
+            sells_e = w90_exec.loc[w90_exec["transaction_type"].isin(SELL_TYPES), "total_value"].sum()
             denom_e = buys_e + sells_e
             if denom_e > 0:
                 result["exec_net_buy_90d"] = float((buys_e - sells_e) / denom_e)
@@ -137,8 +144,8 @@ def compute_insider_features(
 
     if not w30.empty:
         net_buy_30 = (
-            w30.loc[w30["transaction_type"] == "P", "total_value"].sum()
-            - w30.loc[w30["transaction_type"] == "S", "total_value"].sum()
+            w30.loc[w30["transaction_type"].isin(BUY_TYPES), "total_value"].sum()
+            - w30.loc[w30["transaction_type"].isin(SELL_TYPES), "total_value"].sum()
         )
 
         # insider_buy_intensity_30d: net buy value / market cap
@@ -156,7 +163,7 @@ def compute_insider_features(
         per_insider = (
             w30.assign(
                 signed_value=w30.apply(
-                    lambda r: r["total_value"] if r["transaction_type"] == "P"
+                    lambda r: r["total_value"] if r["transaction_type"] in BUY_TYPES
                     else -r["total_value"],
                     axis=1,
                 )
