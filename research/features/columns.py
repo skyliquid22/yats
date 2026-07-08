@@ -21,7 +21,8 @@ def load_feature_columns(
 
     Returns:
         observation_columns: ["close"] + all non-regime, non-close features
-            in the order defined by the YAML (ohlcv → cross_sectional → fundamental)
+            in the order defined by the YAML
+            (ohlcv → cross_sectional → fundamental → options)
         regime_columns: regime features from the YAML's "regime" section,
             in YAML order; empty list if no "regime" section exists
     """
@@ -35,9 +36,10 @@ def load_feature_columns(
     ohlcv_cols: list[str] = fs_config.get("ohlcv", [])
     cs_cols: list[str] = fs_config.get("cross_sectional", [])
     fund_cols: list[str] = fs_config.get("fundamental", [])
+    options_cols: list[str] = fs_config.get("options", [])
     regime_cols: list[str] = fs_config.get("regime", [])
 
-    all_feature_cols = ohlcv_cols + cs_cols + fund_cols
+    all_feature_cols = ohlcv_cols + cs_cols + fund_cols + options_cols
     observation_columns = ["close"] + [c for c in all_feature_cols if c != "close"]
 
     return observation_columns, regime_cols

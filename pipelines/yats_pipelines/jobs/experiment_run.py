@@ -92,10 +92,17 @@ def fetch_features(context: OpExecutionContext, config: ExperimentRunConfig, spe
             q_params.append(end_date)
         where_clause = " AND ".join(q_parts)
 
+        # feature_set MUST be filtered (features query only — the closes query
+        # below reuses where_clause against canonical_equity_ohlcv, which has
+        # no feature_set column): multiple sets coexist in the features table
+        # (core_v1/options_v1/full_v1), and without the filter each
+        # (symbol, timestamp) yields one row per set — two of them partially
+        # null — corrupting the env rows.
         cur = conn.cursor()
         cur.execute(
-            f"SELECT * FROM features WHERE {where_clause} ORDER BY timestamp, symbol",
-            q_params,
+            f"SELECT * FROM features WHERE {where_clause} AND feature_set = %s "
+            "ORDER BY timestamp, symbol",
+            [*q_params, feature_set_name],
         )
         col_names = [desc[0] for desc in cur.description]
         rows = cur.fetchall()

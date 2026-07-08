@@ -1,0 +1,48 @@
+name: full_v1
+description: >
+  Complete feature matrix for the WFO sweep (Stage 2d): core price/vol features,
+  cross-sectional + fundamentals, market regime, and options-implied features.
+  Options features computed from EOD chains within max_dte=210 / strike_range=60
+  (server-side vendor filters — documented dataset scope).
+
+ohlcv:
+  - ret_1d
+  - ret_5d
+  - ret_21d
+  - rv_21d
+  - rv_63d
+  - dist_20d_high
+  - dist_20d_low
+
+cross_sectional:
+  - mom_3m
+  - mom_12m_excl_1m
+  - log_mkt_cap
+  - size_rank
+  - value_rank
+
+fundamental:
+  - pe_ttm
+  - ps_ttm
+  - pb
+  - ev_ebitda
+  - roe
+  - gross_margin
+  - operating_margin
+  - fcf_margin
+  - debt_equity
+  - eps_growth_1y
+  - revenue_growth_1y
+
+regime:
+  - market_vol_20d
+  - market_trend_20d
+  - dispersion_20d
+  - corr_mean_20d
+
+options:
+  - atm_iv
+  - skew_25d
+  - iv_term_slope
+  - put_call_oi_ratio
+  - net_gamma_exposure

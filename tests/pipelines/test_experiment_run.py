@@ -811,3 +811,37 @@ class TestFetchFeaturesLiveDB:
             assert "close" in row, (
                 f"fetch_features env row missing 'close'; keys present: {list(row.keys())}"
             )
+
+    def test_fetch_features_filters_by_feature_set(self):
+        """Multiple feature sets coexist in the features table; the query must
+        filter by the spec's feature_set or each (symbol, timestamp) yields one
+        row per set - two of them partially null - corrupting env rows."""
+        from dagster import build_op_context
+        from pipelines.yats_pipelines.jobs.experiment_run import (
+            ExperimentRunConfig,
+            fetch_features,
+        )
+
+        context = build_op_context()
+        config = ExperimentRunConfig(experiment_id="live_fs_filter_test", allow_empty_data=True)
+        spec_data = {
+            "symbols": ["AAPL"],
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-30",
+            "feature_set": "full_v1",
+            "policy": "ppo",
+            "policy_params": {},
+        }
+
+        result = fetch_features(context, config, spec_data)
+        if not result["data"]:
+            pytest.skip("no full_v1 rows in live DB for the window")
+
+        # Exactly one env row per timestamp; without the feature_set filter,
+        # core_v1/options_v1/full_v1 rows for the same (symbol, timestamp)
+        # would all be fetched.
+        timestamps = [r["timestamp"] for r in result["data"]]
+        assert len(timestamps) == len(set(timestamps)), "duplicate env rows per timestamp"
+        # full_v1 rows carry BOTH core and options columns
+        assert "atm_iv" in result["observation_columns"]
+        assert "ret_1d" in result["observation_columns"]
