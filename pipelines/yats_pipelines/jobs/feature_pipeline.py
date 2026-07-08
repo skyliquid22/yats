@@ -539,10 +539,10 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
     tickers = _load_universe(config.universe)
     context.log.info("Universe '%s': %d tickers", config.universe, len(tickers))
 
-    conn = _pg_conn(qdb)
-    conn.autocommit = True
-
+    conn = None
     try:
+        conn = _pg_conn(qdb)
+        conn.autocommit = True
         # Load canonical data
         context.log.info("Loading canonical OHLCV data...")
         ohlcv_df = _load_ohlcv(conn, tickers, config.start_date, config.end_date)
@@ -689,7 +689,8 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
         _exc = exc
         raise
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
         record_finish(
             "feature_pipeline", context.run_id,
             "failed" if _exc else "success",

@@ -190,115 +190,115 @@ def fetch_thetadata_options(
         td = ThetaDataResource()
 
         now = datetime.now(timezone.utc)
-    today = now.date()
-    cutoff = today + timedelta(days=config.expiry_window_days)
-    today_str = today.strftime("%Y%m%d")
-    cutoff_str = cutoff.strftime("%Y%m%d")
+        today = now.date()
+        cutoff = today + timedelta(days=config.expiry_window_days)
+        today_str = today.strftime("%Y%m%d")
+        cutoff_str = cutoff.strftime("%Y%m%d")
 
-    chain_rows: list[dict] = []
-    eod_rows: list[dict] = []
+        chain_rows: list[dict] = []
+        eod_rows: list[dict] = []
 
-    start_ymd = config.start_date.replace("-", "") if config.start_date else ""
-    end_ymd = config.end_date.replace("-", "") if config.end_date else ""
+        start_ymd = config.start_date.replace("-", "") if config.start_date else ""
+        end_ymd = config.end_date.replace("-", "") if config.end_date else ""
 
-    for underlying in config.underlyings:
-        context.log.info("Fetching expirations for %s", underlying)
-        try:
-            exps = td.list_expirations(underlying)
-        except Exception as exc:
-            context.log.warning(
-                "Failed to list expirations for %s: %s", underlying, exc
-            )
-            continue
-
-        # Chain snapshots: upcoming expirations only
-        relevant_exps = [e for e in exps if today_str <= e <= cutoff_str]
-        context.log.info(
-            "%s: %d expirations within %d-day window",
-            underlying,
-            len(relevant_exps),
-            config.expiry_window_days,
-        )
-
-        chain_count = 0
-        for exp in relevant_exps:
+        for underlying in config.underlyings:
+            context.log.info("Fetching expirations for %s", underlying)
             try:
-                raw_chain = td.get_option_chain_snapshot(underlying, exp)
-                chain_rows.extend(td.normalize_chain_snapshot(raw_chain, now, ""))
-                chain_count += len(raw_chain)
+                exps = td.list_expirations(underlying)
             except Exception as exc:
                 context.log.warning(
-                    "Chain snapshot failed for %s exp=%s: %s", underlying, exp, exc
+                    "Failed to list expirations for %s: %s", underlying, exc
                 )
-        context.log.info(
-            "%s: fetched %d chain rows across %d expirations",
-            underlying, chain_count, len(relevant_exps),
-        )
+                continue
 
-        # EOD historical backfill: use ALL expirations active during [start_ymd, end_ymd].
-        # relevant_exps only contains upcoming expirations — historical expirations (which
-        # have the actual EOD data) are filtered out by the today_str <= e cutoff. The EOD
-        # loop must use its own expiration set derived from start_ymd.
-        if start_ymd and end_ymd and config.eod_by_date:
-            # Bulk by-date mode: one expiration=* request per weekday.
-            # Non-trading days return 472/empty and are skipped naturally.
-            eod_count = 0
-            day = datetime.strptime(start_ymd, "%Y%m%d")
-            end_day = datetime.strptime(end_ymd, "%Y%m%d")
-            n_days = 0
-            while day <= end_day:
-                if day.weekday() < 5:  # skip Sat/Sun
-                    n_days += 1
-                    date_str = day.strftime("%Y%m%d")
+            # Chain snapshots: upcoming expirations only
+            relevant_exps = [e for e in exps if today_str <= e <= cutoff_str]
+            context.log.info(
+                "%s: %d expirations within %d-day window",
+                underlying,
+                len(relevant_exps),
+                config.expiry_window_days,
+            )
+
+            chain_count = 0
+            for exp in relevant_exps:
+                try:
+                    raw_chain = td.get_option_chain_snapshot(underlying, exp)
+                    chain_rows.extend(td.normalize_chain_snapshot(raw_chain, now, ""))
+                    chain_count += len(raw_chain)
+                except Exception as exc:
+                    context.log.warning(
+                        "Chain snapshot failed for %s exp=%s: %s", underlying, exp, exc
+                    )
+            context.log.info(
+                "%s: fetched %d chain rows across %d expirations",
+                underlying, chain_count, len(relevant_exps),
+            )
+
+            # EOD historical backfill: use ALL expirations active during [start_ymd, end_ymd].
+            # relevant_exps only contains upcoming expirations — historical expirations (which
+            # have the actual EOD data) are filtered out by the today_str <= e cutoff. The EOD
+            # loop must use its own expiration set derived from start_ymd.
+            if start_ymd and end_ymd and config.eod_by_date:
+                # Bulk by-date mode: one expiration=* request per weekday.
+                # Non-trading days return 472/empty and are skipped naturally.
+                eod_count = 0
+                day = datetime.strptime(start_ymd, "%Y%m%d")
+                end_day = datetime.strptime(end_ymd, "%Y%m%d")
+                n_days = 0
+                while day <= end_day:
+                    if day.weekday() < 5:  # skip Sat/Sun
+                        n_days += 1
+                        date_str = day.strftime("%Y%m%d")
+                        try:
+                            raw_eod = td.get_historical_eod_by_date(
+                                underlying, date_str,
+                                max_dte=config.eod_max_dte,
+                                strike_range=config.eod_strike_range,
+                            )
+                            eod_rows.extend(td.normalize_eod(raw_eod, now, ""))
+                            eod_count += len(raw_eod)
+                        except Exception as exc:
+                            context.log.warning(
+                                "EOD by-date fetch failed for %s %s: %s",
+                                underlying, date_str, exc,
+                            )
+                    day += timedelta(days=1)
+                context.log.info(
+                    "%s: EOD by-date backfill fetched %d rows across %d weekdays (%s to %s)",
+                    underlying, eod_count, n_days, start_ymd, end_ymd,
+                )
+            elif start_ymd and end_ymd:
+                eod_exps = [e for e in exps if e >= start_ymd]
+                eod_count = 0
+                for exp in eod_exps:
                     try:
-                        raw_eod = td.get_historical_eod_by_date(
-                            underlying, date_str,
-                            max_dte=config.eod_max_dte,
-                            strike_range=config.eod_strike_range,
-                        )
+                        raw_eod = td.get_historical_eod(underlying, exp, start_ymd, end_ymd)
                         eod_rows.extend(td.normalize_eod(raw_eod, now, ""))
                         eod_count += len(raw_eod)
                     except Exception as exc:
                         context.log.warning(
-                            "EOD by-date fetch failed for %s %s: %s",
-                            underlying, date_str, exc,
+                            "EOD fetch failed for %s exp=%s: %s", underlying, exp, exc
                         )
-                day += timedelta(days=1)
-            context.log.info(
-                "%s: EOD by-date backfill fetched %d rows across %d weekdays (%s to %s)",
-                underlying, eod_count, n_days, start_ymd, end_ymd,
-            )
-        elif start_ymd and end_ymd:
-            eod_exps = [e for e in exps if e >= start_ymd]
-            eod_count = 0
-            for exp in eod_exps:
-                try:
-                    raw_eod = td.get_historical_eod(underlying, exp, start_ymd, end_ymd)
-                    eod_rows.extend(td.normalize_eod(raw_eod, now, ""))
-                    eod_count += len(raw_eod)
-                except Exception as exc:
+                if eod_count == 0:
                     context.log.warning(
-                        "EOD fetch failed for %s exp=%s: %s", underlying, exp, exc
+                        "%s: EOD backfill (%s to %s) queried %d expirations but fetched 0 rows"
+                        " — verify terminal subscription covers historical options data",
+                        underlying, start_ymd, end_ymd, len(eod_exps),
                     )
-            if eod_count == 0:
-                context.log.warning(
-                    "%s: EOD backfill (%s to %s) queried %d expirations but fetched 0 rows"
-                    " — verify terminal subscription covers historical options data",
-                    underlying, start_ymd, end_ymd, len(eod_exps),
-                )
-            else:
-                context.log.info(
-                    "%s: EOD backfill fetched %d rows across %d expirations (%s to %s)",
-                    underlying, eod_count, len(eod_exps), start_ymd, end_ymd,
-                )
+                else:
+                    context.log.info(
+                        "%s: EOD backfill fetched %d rows across %d expirations (%s to %s)",
+                        underlying, eod_count, len(eod_exps), start_ymd, end_ymd,
+                    )
 
-        context.log.info(
-            "Fetched %d chain rows, %d EOD rows for %d underlyings",
-            len(chain_rows),
-            len(eod_rows),
-            len(config.underlyings),
-        )
-        return {"chain_rows": chain_rows, "eod_rows": eod_rows}
+            context.log.info(
+                "Fetched %d chain rows, %d EOD rows for %d underlyings",
+                len(chain_rows),
+                len(eod_rows),
+                len(config.underlyings),
+            )
+            return {"chain_rows": chain_rows, "eod_rows": eod_rows}
     except Exception as exc:
         record_finish("ingest_thetadata", context.run_id, "failed", failure_cause=str(exc)[:200])
         raise

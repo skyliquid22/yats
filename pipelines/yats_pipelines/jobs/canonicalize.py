@@ -1044,18 +1044,18 @@ def canonicalize_op(context: OpExecutionContext, config: CanonicalizeConfig):
     record_start("canonicalize", context.run_id, detail)
     _exc: Exception | None = None
     _total_rows = 0
-
-    qdb = QuestDBResource()
-    now = datetime.now(timezone.utc)
-    run_id = context.run_id
-
-    conn = _pg_conn(qdb)
-    conn.autocommit = True
-
-    # Collect canonical rows for hash computation
-    canonical_rows: dict[str, list[dict]] = {}
+    conn = None
 
     try:
+        qdb = QuestDBResource()
+        now = datetime.now(timezone.utc)
+        run_id = context.run_id
+
+        conn = _pg_conn(qdb)
+        conn.autocommit = True
+
+        # Collect canonical rows for hash computation
+        canonical_rows: dict[str, list[dict]] = {}
         with _ilp_sender(qdb) as sender:
             for domain in config.domains:
                 fn = _DOMAIN_FNS.get(domain)
@@ -1112,7 +1112,8 @@ def canonicalize_op(context: OpExecutionContext, config: CanonicalizeConfig):
         _exc = exc
         raise
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
         record_finish(
             "canonicalize", context.run_id,
             "failed" if _exc else "success",

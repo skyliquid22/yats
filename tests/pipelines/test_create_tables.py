@@ -22,6 +22,7 @@ from yats_pipelines.utils.create_tables import (
     CANONICAL_INSTITUTIONAL_HOLDINGS,
     CANONICAL_OPTIONS_CHAIN,
     FEATURES,
+    JOB_RUNS,
     MIGRATIONS,
 )
 
@@ -186,3 +187,43 @@ class TestMigrationsStage3b:
     def test_enables_dedup_on_canonical_inst_ownership(self):
         joined = " ".join(_norm(m) for m in MIGRATIONS)
         assert "ALTER TABLE CANONICAL_INST_OWNERSHIP DEDUP ENABLE UPSERT KEYS(FILING_DATE, SYMBOL, REPORT_PERIOD)" in joined
+
+
+class TestJobRunsDDL:
+    """Guards ya-vs9a1: job_runs instrumentation table DDL and migration."""
+
+    def test_declares_dedup_upsert_keys(self):
+        ddl = _norm(JOB_RUNS)
+        assert "DEDUP UPSERT KEYS(STARTED_AT, JOB_NAME, DAGSTER_RUN_ID)" in ddl, (
+            "job_runs must declare DEDUP UPSERT KEYS so start-write is replaced by finish-write"
+        )
+
+    def test_is_a_wal_table(self):
+        assert " WAL" in _norm(JOB_RUNS)
+
+    def test_designated_timestamp_is_started_at(self):
+        ddl = _norm(JOB_RUNS)
+        assert "TIMESTAMP(STARTED_AT)" in ddl
+
+    def test_partition_by_month(self):
+        assert "PARTITION BY MONTH" in _norm(JOB_RUNS)
+
+    def test_has_required_columns(self):
+        ddl = _norm(JOB_RUNS)
+        for col in ("JOB_NAME", "DAGSTER_RUN_ID", "STATUS", "FINISHED_AT",
+                    "DURATION_S", "ROWS_WRITTEN", "DETAIL", "FAILURE_CAUSE"):
+            assert col in ddl, f"job_runs DDL missing column: {col}"
+
+    def test_status_is_symbol(self):
+        ddl = _norm(JOB_RUNS)
+        assert "STATUS SYMBOL" in ddl
+
+    def test_rows_written_is_long(self):
+        ddl = _norm(JOB_RUNS)
+        assert "ROWS_WRITTEN LONG" in ddl
+
+
+class TestMigrationsD0:
+    def test_enables_dedup_on_job_runs(self):
+        joined = " ".join(_norm(m) for m in MIGRATIONS)
+        assert "ALTER TABLE JOB_RUNS DEDUP ENABLE UPSERT KEYS(STARTED_AT, JOB_NAME, DAGSTER_RUN_ID)" in joined
