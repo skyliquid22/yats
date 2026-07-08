@@ -289,6 +289,59 @@ CREATE TABLE IF NOT EXISTS canonical_options_chain (
   DEDUP UPSERT KEYS(quote_date, underlying, expiry, strike, right, source_vendor);
 """
 
+CANONICAL_INSIDER_TRADES = """
+CREATE TABLE IF NOT EXISTS canonical_insider_trades (
+    filing_date TIMESTAMP,
+    symbol SYMBOL,
+    insider_name STRING,
+    insider_title STRING,
+    is_board_director BOOLEAN,
+    transaction_date TIMESTAMP,
+    transaction_type SYMBOL,
+    shares DOUBLE,
+    price_per_share DOUBLE,
+    total_value DOUBLE,
+    shares_owned_before DOUBLE,
+    shares_owned_after DOUBLE,
+    security_title STRING,
+    source_vendor SYMBOL,
+    canonicalized_at TIMESTAMP,
+    dagster_run_id STRING
+) TIMESTAMP(filing_date) PARTITION BY YEAR WAL
+  DEDUP UPSERT KEYS(filing_date, symbol, insider_name, transaction_date, transaction_type, shares);
+"""
+
+CANONICAL_INSTITUTIONAL_HOLDINGS = """
+CREATE TABLE IF NOT EXISTS canonical_institutional_holdings (
+    filing_date TIMESTAMP,
+    symbol SYMBOL,
+    report_period TIMESTAMP,
+    accession_number STRING,
+    filer_cik SYMBOL,
+    filer_name STRING,
+    shares DOUBLE,
+    value_usd DOUBLE,
+    source_vendor SYMBOL,
+    canonicalized_at TIMESTAMP,
+    dagster_run_id STRING
+) TIMESTAMP(filing_date) PARTITION BY YEAR WAL
+  DEDUP UPSERT KEYS(filing_date, symbol, filer_cik, report_period);
+"""
+
+CANONICAL_INST_OWNERSHIP = """
+CREATE TABLE IF NOT EXISTS canonical_inst_ownership (
+    filing_date TIMESTAMP,
+    symbol SYMBOL,
+    report_period TIMESTAMP,
+    total_shares DOUBLE,
+    total_value_usd DOUBLE,
+    filer_count LONG,
+    source_vendor SYMBOL,
+    canonicalized_at TIMESTAMP
+) TIMESTAMP(filing_date) PARTITION BY YEAR WAL
+  DEDUP UPSERT KEYS(filing_date, symbol, report_period);
+"""
+
 # ---------------------------------------------------------------------------
 # Feature tables
 # ---------------------------------------------------------------------------
@@ -605,6 +658,9 @@ ALL_TABLES: list[str] = [
     CANONICAL_FUNDAMENTALS,
     CANONICAL_FINANCIAL_METRICS,
     CANONICAL_OPTIONS_CHAIN,
+    CANONICAL_INSIDER_TRADES,
+    CANONICAL_INSTITUTIONAL_HOLDINGS,
+    CANONICAL_INST_OWNERSHIP,
     # Features
     FEATURES,
     FEATURE_WATERMARKS,
