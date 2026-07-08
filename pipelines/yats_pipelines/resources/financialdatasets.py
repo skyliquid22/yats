@@ -129,21 +129,50 @@ class FinancialDatasetsResource:
     # Domain: Institutional Holdings (Form 13F)
     # ------------------------------------------------------------------
 
-    def get_institutional_holdings(self, ticker: str, limit: int = 100) -> list[dict]:
+    def get_institutional_holdings(
+        self, ticker: str, report_periods: list[str] | None = None
+    ) -> list[dict]:
         """Fetch institutional holdings (Form 13F filings) for a ticker.
 
-        Paginates using offset until the response returns fewer records than
-        the page limit (exhaustion). subsidiaries detail is omitted (v1).
+        VERIFIED LIVE (2026-07-08): the endpoint IGNORES the offset param — an
+        offset loop refetches the same page forever (observed: 3.8 GB RSS
+        runaway). It also hard-caps responses at 200 rows regardless of limit.
+        The working cursor is report_period=YYYY-MM-DD (exact quarter filter);
+        the <=200 rows returned per quarter sum to ~75% of market cap for
+        mega-caps, i.e. the top of the book — sufficient for ownership-level
+        features, NOT for raw holder counts (breadth saturates at the cap).
+
+        Args:
+            ticker: Underlying ticker.
+            report_periods: Quarter-end dates as YYYY-MM-DD. Defaults to the
+                last 10 calendar quarter-ends.
+
+        Returns:
+            List of holding dicts across all requested quarters.
+            subsidiaries detail is omitted (v1).
         """
+        if report_periods is None:
+            report_periods = _recent_quarter_ends(10)
         all_holdings: list[dict] = []
-        offset = 0
-        while True:
+        for rp in report_periods:
             data = self._get("/institutional-holdings", {
-                "ticker": ticker, "limit": limit, "offset": offset,
+                "ticker": ticker, "limit": 1000, "report_period": rp,
             })
-            page = data.get("institutional_holdings", [])
-            all_holdings.extend(page)
-            if len(page) < limit:
-                break
-            offset += limit
+            all_holdings.extend(data.get("institutional_holdings", []))
         return all_holdings
+
+def _recent_quarter_ends(n: int) -> list[str]:
+    """Last n calendar quarter-end dates (YYYY-MM-DD), oldest first."""
+    from datetime import date
+    today = date.today()
+    ends: list[str] = []
+    y, q = today.year, (today.month - 1) // 3  # most recent COMPLETED quarter
+    if q == 0:
+        y, q = y - 1, 4
+    for _ in range(n):
+        month, day = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}[q]
+        ends.append(f"{y:04d}-{month:02d}-{day:02d}")
+        q -= 1
+        if q == 0:
+            y, q = y - 1, 4
+    return list(reversed(ends))

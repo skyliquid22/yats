@@ -258,34 +258,43 @@ class TestIngestInstitutionalHoldings:
 # ---------------------------------------------------------------------------
 
 
-class TestGetInstitutionalHoldingsPagination:
-    def test_single_page_returned_when_below_limit(self):
-        fd = FinancialDatasetsResource(api_key="test")
-        page = [{"ticker": "AAPL", "filing_date": "2024-03-31"}] * 3
-        with patch.object(fd, "_get", return_value={"institutional_holdings": page}) as mock_get:
-            result = fd.get_institutional_holdings("AAPL", limit=100)
-        assert len(result) == 3
-        mock_get.assert_called_once_with("/institutional-holdings", {"ticker": "AAPL", "limit": 100, "offset": 0})
+class TestGetInstitutionalHoldingsQuarterCursor:
+    """The endpoint IGNORES offset (verified live — an offset loop refetches
+    the same page forever) and hard-caps at 200 rows. The working cursor is
+    one request per report_period quarter-end."""
 
-    def test_paginates_until_exhaustion(self):
+    def test_one_request_per_quarter_no_offset(self):
         fd = FinancialDatasetsResource(api_key="test")
-        full_page = [{"ticker": "AAPL", "filing_date": "2024-03-31"}] * 2
-        partial_page = [{"ticker": "AAPL", "filing_date": "2024-06-30"}] * 1
-        responses = [
-            {"institutional_holdings": full_page},
-            {"institutional_holdings": partial_page},
-        ]
-        with patch.object(fd, "_get", side_effect=responses) as mock_get:
-            result = fd.get_institutional_holdings("AAPL", limit=2)
-        assert len(result) == 3
+        page = [{"ticker": "AAPL", "filing_date": "2025-05-01"}] * 2
+        with patch.object(fd, "_get", return_value={"institutional_holdings": page}) as mock_get:
+            result = fd.get_institutional_holdings("AAPL", report_periods=["2025-03-31", "2025-06-30"])
+        assert len(result) == 4
         assert mock_get.call_count == 2
-        mock_get.assert_any_call("/institutional-holdings", {"ticker": "AAPL", "limit": 2, "offset": 0})
-        mock_get.assert_any_call("/institutional-holdings", {"ticker": "AAPL", "limit": 2, "offset": 2})
+        for call in mock_get.call_args_list:
+            params = call[0][1]
+            assert "offset" not in params, "offset is ignored by the API — must not be used"
+            assert params["report_period"] in ("2025-03-31", "2025-06-30")
+
+    def test_terminates_even_when_api_repeats_identical_pages(self):
+        """Regression for the runaway: identical full pages must NOT loop."""
+        fd = FinancialDatasetsResource(api_key="test")
+        same_page = [{"ticker": "AAPL", "filing_date": "2025-05-01"}] * 200
+        with patch.object(fd, "_get", return_value={"institutional_holdings": same_page}) as mock_get:
+            result = fd.get_institutional_holdings("AAPL", report_periods=["2025-03-31"])
+        assert mock_get.call_count == 1
+        assert len(result) == 200
+
+    def test_default_quarters_cover_recent_history(self):
+        from yats_pipelines.resources.financialdatasets import _recent_quarter_ends
+        qs = _recent_quarter_ends(10)
+        assert len(qs) == 10
+        assert qs == sorted(qs)
+        assert all(q.endswith(("03-31", "06-30", "09-30", "12-31")) for q in qs)
 
     def test_empty_response_returns_empty_list(self):
         fd = FinancialDatasetsResource(api_key="test")
         with patch.object(fd, "_get", return_value={"institutional_holdings": []}):
-            result = fd.get_institutional_holdings("AAPL")
+            result = fd.get_institutional_holdings("AAPL", report_periods=["2025-03-31"])
         assert result == []
 
 
