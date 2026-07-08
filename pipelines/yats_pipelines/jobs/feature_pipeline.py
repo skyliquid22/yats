@@ -27,12 +27,16 @@ import research.features.cross_sectional_features  # noqa: F401
 import research.features.fundamental_features  # noqa: F401
 import research.features.regime_features_v1  # noqa: F401
 import research.features.options_features_v1  # noqa: F401
+import research.features.insider_features_v1  # noqa: F401
+import research.features.inst_features_v1  # noqa: F401
 from research.features.feature_registry import registry
 from research.features.regime_features_v1 import (
     DEFAULT_REGIME_UNIVERSE,
     compute_regime_features,
 )
 from research.features.options_features_v1 import compute_options_features
+from research.features.insider_features_v1 import compute_insider_features
+from research.features.inst_features_v1 import compute_inst_features
 
 logger = logging.getLogger(__name__)
 
@@ -433,6 +437,231 @@ def _compute_options_features_pipeline(
     return results
 
 
+def _load_insider_trades(
+    conn, tickers: list[str], start_date: str, end_date: str, lookback_days: int = 90
+) -> pd.DataFrame:
+    """Load canonical insider trades for given symbols; extends range backward by lookback_days."""
+    fields = [
+        "filing_date", "symbol", "insider_name", "insider_title",
+        "is_board_director", "transaction_type", "total_value",
+    ]
+    field_str = ", ".join(fields)
+
+    params: list = [tuple(tickers)]
+    where = "WHERE symbol IN %s"
+    if start_date:
+        # Pull extra lookback so 90d windows are fully populated at start_date
+        where += " AND filing_date >= dateadd('d', %s, %s)"
+        params.extend([-lookback_days, f"{start_date}T00:00:00.000000Z"])
+    if end_date:
+        where += " AND filing_date <= %s"
+        params.append(f"{end_date}T23:59:59.999999Z")
+
+    query = (
+        f"SELECT {field_str} FROM canonical_insider_trades "
+        f"{where} ORDER BY symbol, filing_date"
+    )
+    cur = conn.cursor()
+    cur.execute(query, params)
+    columns = [desc[0] for desc in cur.description]
+    rows = cur.fetchall()
+    cur.close()
+
+    if not rows:
+        return pd.DataFrame(columns=fields)
+
+    df = pd.DataFrame(rows, columns=columns)
+    df["filing_date"] = pd.to_datetime(df["filing_date"], utc=True)
+    return df
+
+
+def _load_inst_ownership(
+    conn, tickers: list[str], start_date: str, end_date: str, lookback_days: int = 150
+) -> pd.DataFrame:
+    """Load canonical_inst_ownership for given symbols."""
+    fields = ["filing_date", "symbol", "report_period", "total_shares", "filer_count"]
+    field_str = ", ".join(fields)
+
+    params: list = [tuple(tickers)]
+    where = "WHERE symbol IN %s"
+    if start_date:
+        where += " AND filing_date >= dateadd('d', %s, %s)"
+        params.extend([-lookback_days, f"{start_date}T00:00:00.000000Z"])
+    if end_date:
+        where += " AND filing_date <= %s"
+        params.append(f"{end_date}T23:59:59.999999Z")
+
+    query = (
+        f"SELECT {field_str} FROM canonical_inst_ownership "
+        f"{where} ORDER BY symbol, filing_date"
+    )
+    cur = conn.cursor()
+    cur.execute(query, params)
+    columns = [desc[0] for desc in cur.description]
+    rows = cur.fetchall()
+    cur.close()
+
+    if not rows:
+        return pd.DataFrame(columns=fields)
+
+    df = pd.DataFrame(rows, columns=columns)
+    df["filing_date"] = pd.to_datetime(df["filing_date"], utc=True)
+    return df
+
+
+def _load_inst_holdings(
+    conn, tickers: list[str], start_date: str, end_date: str, lookback_days: int = 150
+) -> pd.DataFrame:
+    """Load canonical_institutional_holdings for given symbols."""
+    fields = [
+        "filing_date", "symbol", "report_period",
+        "filer_cik", "filer_name", "shares", "value_usd",
+    ]
+    field_str = ", ".join(fields)
+
+    params: list = [tuple(tickers)]
+    where = "WHERE symbol IN %s"
+    if start_date:
+        where += " AND filing_date >= dateadd('d', %s, %s)"
+        params.extend([-lookback_days, f"{start_date}T00:00:00.000000Z"])
+    if end_date:
+        where += " AND filing_date <= %s"
+        params.append(f"{end_date}T23:59:59.999999Z")
+
+    query = (
+        f"SELECT {field_str} FROM canonical_institutional_holdings "
+        f"{where} ORDER BY symbol, filing_date"
+    )
+    cur = conn.cursor()
+    cur.execute(query, params)
+    columns = [desc[0] for desc in cur.description]
+    rows = cur.fetchall()
+    cur.close()
+
+    if not rows:
+        return pd.DataFrame(columns=fields)
+
+    df = pd.DataFrame(rows, columns=columns)
+    df["filing_date"] = pd.to_datetime(df["filing_date"], utc=True)
+    return df
+
+
+def _compute_insider_features_pipeline(
+    insider_df: pd.DataFrame,
+    ohlcv_by_symbol: dict[str, pd.DataFrame],
+    metrics_by_symbol: dict[str, pd.DataFrame],
+    feature_names: list[str],
+) -> dict[str, pd.DataFrame]:
+    """Compute insider features per (symbol, date).
+
+    Returns dict: symbol → DataFrame with timestamp + insider feature columns.
+    """
+    results: dict[str, pd.DataFrame] = {}
+
+    grouped = insider_df.groupby("symbol") if not insider_df.empty else {}
+
+    for symbol, ohlcv_df in ohlcv_by_symbol.items():
+        sym_trades = grouped.get_group(symbol) if (not insider_df.empty and symbol in insider_df["symbol"].values) else pd.DataFrame()
+        metrics_df = metrics_by_symbol.get(symbol)
+
+        # Merge shares_outstanding and close per OHLCV date
+        if metrics_df is not None and not metrics_df.empty:
+            merged_metrics = pd.merge_asof(
+                ohlcv_df[["timestamp", "close"]].sort_values("timestamp"),
+                metrics_df[["timestamp", "shares_outstanding"]].sort_values("timestamp"),
+                on="timestamp",
+                direction="backward",
+            )
+        else:
+            merged_metrics = ohlcv_df[["timestamp", "close"]].copy()
+            merged_metrics["shares_outstanding"] = np.nan
+
+        rows = []
+        for _, ohlcv_row in merged_metrics.iterrows():
+            ts = ohlcv_row["timestamp"]
+            feats = compute_insider_features(
+                sym_trades,
+                as_of_date=ts,
+                shares_outstanding=float(ohlcv_row.get("shares_outstanding", np.nan) or np.nan),
+                close=float(ohlcv_row["close"]),
+                symbol=symbol,
+            )
+            feats["timestamp"] = ts
+            rows.append(feats)
+
+        if not rows:
+            continue
+
+        feat_df = pd.DataFrame(rows)
+        feat_df["timestamp"] = pd.to_datetime(feat_df["timestamp"], utc=True)
+        results[symbol] = feat_df
+
+    return results
+
+
+def _compute_inst_features_pipeline(
+    ownership_df: pd.DataFrame,
+    holdings_df: pd.DataFrame,
+    ohlcv_by_symbol: dict[str, pd.DataFrame],
+    metrics_by_symbol: dict[str, pd.DataFrame],
+    feature_names: list[str],
+) -> dict[str, pd.DataFrame]:
+    """Compute institutional features per (symbol, date).
+
+    Returns dict: symbol → DataFrame with timestamp + inst feature columns.
+    """
+    results: dict[str, pd.DataFrame] = {}
+
+    own_grouped = ownership_df.groupby("symbol") if not ownership_df.empty else {}
+    hold_grouped = holdings_df.groupby("symbol") if not holdings_df.empty else {}
+
+    for symbol, ohlcv_df in ohlcv_by_symbol.items():
+        sym_own = (
+            own_grouped.get_group(symbol)
+            if (not ownership_df.empty and symbol in ownership_df["symbol"].values)
+            else pd.DataFrame()
+        )
+        sym_hold = (
+            hold_grouped.get_group(symbol)
+            if (not holdings_df.empty and symbol in holdings_df["symbol"].values)
+            else pd.DataFrame()
+        )
+        metrics_df = metrics_by_symbol.get(symbol)
+
+        if metrics_df is not None and not metrics_df.empty:
+            merged_metrics = pd.merge_asof(
+                ohlcv_df[["timestamp"]].sort_values("timestamp"),
+                metrics_df[["timestamp", "shares_outstanding"]].sort_values("timestamp"),
+                on="timestamp",
+                direction="backward",
+            )
+        else:
+            merged_metrics = ohlcv_df[["timestamp"]].copy()
+            merged_metrics["shares_outstanding"] = np.nan
+
+        rows = []
+        for _, row in merged_metrics.iterrows():
+            ts = row["timestamp"]
+            feats = compute_inst_features(
+                sym_own,
+                sym_hold,
+                shares_outstanding=float(row.get("shares_outstanding", np.nan) or np.nan),
+                as_of_date=ts,
+                symbol=symbol,
+            )
+            feats["timestamp"] = ts
+            rows.append(feats)
+
+        if not rows:
+            continue
+
+        feat_df = pd.DataFrame(rows)
+        feat_df["timestamp"] = pd.to_datetime(feat_df["timestamp"], utc=True)
+        results[symbol] = feat_df
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # ILP writing
 # ---------------------------------------------------------------------------
@@ -447,6 +676,8 @@ _FEATURE_COLUMNS = [
     "revenue_growth_1y",
     "market_vol_20d", "market_trend_20d", "dispersion_20d", "corr_mean_20d",
     "atm_iv", "skew_25d", "iv_term_slope", "put_call_oi_ratio", "net_gamma_exposure",
+    "insider_net_buy_90d", "insider_buy_intensity_30d", "insider_cluster_30d", "exec_net_buy_90d",
+    "inst_ownership_pct", "inst_top10_share",
 ]
 
 
@@ -529,10 +760,11 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
     fs = registry.load_feature_set(config.feature_set)
     context.log.info(
         "Feature set '%s': %d features (%d ohlcv, %d cross-sectional, "
-        "%d fundamental, %d regime, %d options)",
+        "%d fundamental, %d regime, %d options, %d insider, %d institutional)",
         fs.name, len(fs.all_features),
         len(fs.ohlcv), len(fs.cross_sectional),
         len(fs.fundamental), len(fs.regime), len(fs.options),
+        len(fs.insider), len(fs.institutional),
     )
 
     # Load universe
@@ -618,6 +850,36 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
                 "Computed options features for %d underlyings", len(options_features)
             )
 
+        # Compute insider features
+        insider_features: dict[str, pd.DataFrame] = {}
+        if fs.insider:
+            context.log.info("Loading canonical insider trades...")
+            insider_df = _load_insider_trades(conn, tickers, config.start_date, config.end_date)
+            context.log.info("Loaded %d insider trade rows", len(insider_df))
+            insider_features = _compute_insider_features_pipeline(
+                insider_df, ohlcv_by_symbol, metrics_by_symbol, fs.insider
+            )
+            context.log.info(
+                "Computed insider features for %d symbols", len(insider_features)
+            )
+
+        # Compute institutional features
+        inst_features: dict[str, pd.DataFrame] = {}
+        if fs.institutional:
+            context.log.info("Loading canonical inst_ownership and inst_holdings...")
+            ownership_df = _load_inst_ownership(conn, tickers, config.start_date, config.end_date)
+            holdings_df = _load_inst_holdings(conn, tickers, config.start_date, config.end_date)
+            context.log.info(
+                "Loaded %d inst_ownership rows, %d holdings rows",
+                len(ownership_df), len(holdings_df),
+            )
+            inst_features = _compute_inst_features_pipeline(
+                ownership_df, holdings_df, ohlcv_by_symbol, metrics_by_symbol, fs.institutional
+            )
+            context.log.info(
+                "Computed inst features for %d symbols", len(inst_features)
+            )
+
         # Write all features to QuestDB
         context.log.info("Writing features to QuestDB...")
         total_written = 0
@@ -658,7 +920,6 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
                 if symbol in options_features:
                     opt_df = options_features[symbol]
                     sym_ts = ohlcv_df_sym["timestamp"].reset_index(drop=True)
-                    opt_ts = opt_df["timestamp"].reset_index(drop=True)
                     # Align options timestamps to OHLCV timestamps via merge
                     aligned = pd.merge_asof(
                         pd.DataFrame({"timestamp": sym_ts}),
@@ -670,6 +931,36 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
                     for fname in fs.options:
                         if fname in aligned.columns:
                             all_features[fname] = aligned[fname].reset_index(drop=True)
+
+                # Insider (per-symbol, aligned by timestamp)
+                if symbol in insider_features:
+                    ins_df = insider_features[symbol]
+                    sym_ts = ohlcv_df_sym["timestamp"].reset_index(drop=True)
+                    aligned_ins = pd.merge_asof(
+                        pd.DataFrame({"timestamp": sym_ts}),
+                        ins_df.sort_values("timestamp"),
+                        on="timestamp",
+                        direction="nearest",
+                        tolerance=pd.Timedelta("1d"),
+                    )
+                    for fname in fs.insider:
+                        if fname in aligned_ins.columns:
+                            all_features[fname] = aligned_ins[fname].reset_index(drop=True)
+
+                # Institutional (per-symbol, aligned by timestamp)
+                if symbol in inst_features:
+                    inst_df_sym = inst_features[symbol]
+                    sym_ts = ohlcv_df_sym["timestamp"].reset_index(drop=True)
+                    aligned_inst = pd.merge_asof(
+                        pd.DataFrame({"timestamp": sym_ts}),
+                        inst_df_sym.sort_values("timestamp"),
+                        on="timestamp",
+                        direction="nearest",
+                        tolerance=pd.Timedelta("1d"),
+                    )
+                    for fname in fs.institutional:
+                        if fname in aligned_inst.columns:
+                            all_features[fname] = aligned_inst[fname].reset_index(drop=True)
 
                 written = _write_features(
                     sender, symbol, ohlcv_df_sym["timestamp"],

@@ -35,10 +35,15 @@ class FeatureSet:
     fundamental: list[str] = field(default_factory=list)
     regime: list[str] = field(default_factory=list)
     options: list[str] = field(default_factory=list)
+    insider: list[str] = field(default_factory=list)
+    institutional: list[str] = field(default_factory=list)
 
     @property
     def all_features(self) -> list[str]:
-        return self.ohlcv + self.cross_sectional + self.fundamental + self.regime + self.options
+        return (
+            self.ohlcv + self.cross_sectional + self.fundamental
+            + self.regime + self.options + self.insider + self.institutional
+        )
 
     def config_hash(self) -> str:
         """Deterministic hash for experiment lineage."""
@@ -49,6 +54,8 @@ class FeatureSet:
             "fundamental": self.fundamental,
             "regime": self.regime,
             "options": self.options,
+            "insider": self.insider,
+            "institutional": self.institutional,
         }, sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
@@ -95,6 +102,9 @@ class FeatureRegistry:
             + data.get("cross_sectional", [])
             + data.get("fundamental", [])
             + data.get("regime", [])
+            + data.get("options", [])
+            + data.get("insider", [])
+            + data.get("institutional", [])
         )
         result = max((self._lookbacks.get(n, 0) for n in all_names), default=0)
         if result == 0 and all_names:
@@ -124,6 +134,8 @@ class FeatureRegistry:
             fundamental=data.get("fundamental", []),
             regime=data.get("regime", []),
             options=data.get("options", []),
+            insider=data.get("insider", []),
+            institutional=data.get("institutional", []),
         )
 
         # Validate all features have implementations

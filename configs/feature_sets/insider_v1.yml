@@ -1,0 +1,18 @@
+name: insider_v1
+description: >
+  Insider + institutional signal features v1 (Stage 3c). Six features across
+  two groups; max lookback ~105 bars so purge_buffer=105 remains feasible on the
+  502-bar span. insider_* are NaN for ETFs (no insider-trades data — natural
+  consequence; env skips NaN per-symbol). inst_* cover ETFs via 13F filings.
+  inst_ownership_chg_qoq is DEFERRED — needs 2 quarters (~180-bar memory),
+  infeasible purge on 502 bars; unlocks with the span-extension bead.
+
+insider:
+  - insider_net_buy_90d
+  - insider_buy_intensity_30d
+  - insider_cluster_30d
+  - exec_net_buy_90d
+
+institutional:
+  - inst_ownership_pct
+  - inst_top10_share

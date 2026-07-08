@@ -384,6 +384,12 @@ CREATE TABLE IF NOT EXISTS features (
     iv_term_slope DOUBLE,
     put_call_oi_ratio DOUBLE,
     net_gamma_exposure DOUBLE,
+    insider_net_buy_90d DOUBLE,
+    insider_buy_intensity_30d DOUBLE,
+    insider_cluster_30d DOUBLE,
+    exec_net_buy_90d DOUBLE,
+    inst_ownership_pct DOUBLE,
+    inst_top10_share DOUBLE,
     computed_at TIMESTAMP,
     dagster_run_id STRING
 ) TIMESTAMP(timestamp) PARTITION BY MONTH WAL
@@ -738,6 +744,13 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE canonical_inst_ownership DEDUP ENABLE UPSERT KEYS(filing_date, symbol, report_period)",
     # ya-vs9a1: job_runs instrumentation table — DEDUP from day one; migrate any pre-existing table.
     "ALTER TABLE job_runs DEDUP ENABLE UPSERT KEYS(started_at, job_name, dagster_run_id)",
+    # ya-tvaa0: Stage 3c — insider/institutional feature columns added to features table.
+    "ALTER TABLE features ADD COLUMN insider_net_buy_90d DOUBLE",
+    "ALTER TABLE features ADD COLUMN insider_buy_intensity_30d DOUBLE",
+    "ALTER TABLE features ADD COLUMN insider_cluster_30d DOUBLE",
+    "ALTER TABLE features ADD COLUMN exec_net_buy_90d DOUBLE",
+    "ALTER TABLE features ADD COLUMN inst_ownership_pct DOUBLE",
+    "ALTER TABLE features ADD COLUMN inst_top10_share DOUBLE",
 ]
 
 
