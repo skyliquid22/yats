@@ -17,6 +17,9 @@ import re
 
 from yats_pipelines.utils.create_tables import (
     CANONICAL_EQUITY_OHLCV,
+    CANONICAL_INST_OWNERSHIP,
+    CANONICAL_INSIDER_TRADES,
+    CANONICAL_INSTITUTIONAL_HOLDINGS,
     CANONICAL_OPTIONS_CHAIN,
     FEATURES,
     MIGRATIONS,
@@ -97,3 +100,89 @@ class TestFeaturesDedupDDL:
 
     def test_is_a_wal_table(self):
         assert " WAL" in _norm(FEATURES)
+
+
+class TestCanonicalInsiderTradesDDL:
+    def test_declares_dedup_upsert_keys(self):
+        ddl = _norm(CANONICAL_INSIDER_TRADES)
+        assert "DEDUP UPSERT KEYS(FILING_DATE, SYMBOL, INSIDER_NAME, TRANSACTION_DATE, TRANSACTION_TYPE, SHARES)" in ddl, (
+            "canonical_insider_trades must declare the 6-column dedup key"
+        )
+
+    def test_is_a_wal_table(self):
+        assert " WAL" in _norm(CANONICAL_INSIDER_TRADES)
+
+    def test_designated_timestamp_is_filing_date(self):
+        ddl = _norm(CANONICAL_INSIDER_TRADES)
+        assert "TIMESTAMP(FILING_DATE)" in ddl
+
+    def test_dedup_key_includes_designated_timestamp(self):
+        ddl = _norm(CANONICAL_INSIDER_TRADES)
+        keys = ddl.split("UPSERT KEYS(")[1].split(")")[0]
+        assert "FILING_DATE" in keys
+
+    def test_partition_by_year(self):
+        assert "PARTITION BY YEAR" in _norm(CANONICAL_INSIDER_TRADES)
+
+
+class TestCanonicalInstitutionalHoldingsDDL:
+    def test_declares_dedup_upsert_keys(self):
+        ddl = _norm(CANONICAL_INSTITUTIONAL_HOLDINGS)
+        assert "DEDUP UPSERT KEYS(FILING_DATE, SYMBOL, FILER_CIK, REPORT_PERIOD)" in ddl, (
+            "canonical_institutional_holdings must declare the 4-column dedup key"
+        )
+
+    def test_is_a_wal_table(self):
+        assert " WAL" in _norm(CANONICAL_INSTITUTIONAL_HOLDINGS)
+
+    def test_designated_timestamp_is_filing_date(self):
+        ddl = _norm(CANONICAL_INSTITUTIONAL_HOLDINGS)
+        assert "TIMESTAMP(FILING_DATE)" in ddl
+
+    def test_accession_number_is_a_column(self):
+        assert "ACCESSION_NUMBER" in _norm(CANONICAL_INSTITUTIONAL_HOLDINGS)
+
+    def test_partition_by_year(self):
+        assert "PARTITION BY YEAR" in _norm(CANONICAL_INSTITUTIONAL_HOLDINGS)
+
+
+class TestCanonicalInstOwnershipDDL:
+    def test_declares_dedup_upsert_keys(self):
+        ddl = _norm(CANONICAL_INST_OWNERSHIP)
+        assert "DEDUP UPSERT KEYS(FILING_DATE, SYMBOL, REPORT_PERIOD)" in ddl, (
+            "canonical_inst_ownership must declare the 3-column dedup key"
+        )
+
+    def test_is_a_wal_table(self):
+        assert " WAL" in _norm(CANONICAL_INST_OWNERSHIP)
+
+    def test_designated_timestamp_is_filing_date(self):
+        ddl = _norm(CANONICAL_INST_OWNERSHIP)
+        assert "TIMESTAMP(FILING_DATE)" in ddl
+
+    def test_has_aggregate_columns(self):
+        ddl = _norm(CANONICAL_INST_OWNERSHIP)
+        assert "TOTAL_SHARES" in ddl
+        assert "TOTAL_VALUE_USD" in ddl
+        assert "FILER_COUNT" in ddl
+
+    def test_filer_count_is_long(self):
+        ddl = _norm(CANONICAL_INST_OWNERSHIP)
+        assert "FILER_COUNT LONG" in ddl
+
+    def test_partition_by_year(self):
+        assert "PARTITION BY YEAR" in _norm(CANONICAL_INST_OWNERSHIP)
+
+
+class TestMigrationsStage3b:
+    def test_enables_dedup_on_canonical_insider_trades(self):
+        joined = " ".join(_norm(m) for m in MIGRATIONS)
+        assert "ALTER TABLE CANONICAL_INSIDER_TRADES DEDUP ENABLE UPSERT KEYS(FILING_DATE, SYMBOL, INSIDER_NAME, TRANSACTION_DATE, TRANSACTION_TYPE, SHARES)" in joined
+
+    def test_enables_dedup_on_canonical_institutional_holdings(self):
+        joined = " ".join(_norm(m) for m in MIGRATIONS)
+        assert "ALTER TABLE CANONICAL_INSTITUTIONAL_HOLDINGS DEDUP ENABLE UPSERT KEYS(FILING_DATE, SYMBOL, FILER_CIK, REPORT_PERIOD)" in joined
+
+    def test_enables_dedup_on_canonical_inst_ownership(self):
+        joined = " ".join(_norm(m) for m in MIGRATIONS)
+        assert "ALTER TABLE CANONICAL_INST_OWNERSHIP DEDUP ENABLE UPSERT KEYS(FILING_DATE, SYMBOL, REPORT_PERIOD)" in joined

@@ -13,6 +13,8 @@ from yats_pipelines.jobs.canonicalize import (
     _canonicalize_equity_ohlcv,
     _canonicalize_financial_metrics,
     _canonicalize_fundamentals,
+    _canonicalize_insider_trades,
+    _canonicalize_institutional_holdings,
     _canonicalize_option_eod,
     _load_fundamentals_weighted_shares,
     _pick_latest_eod_per_contract,
@@ -871,3 +873,453 @@ class TestCanonicalizeOptionEod:
         assert cols.get("iv") == pytest.approx(0.30)
         assert cols.get("open_interest") == 1000
         assert cols.get("gamma") == pytest.approx(0.005)
+
+
+# ---------------------------------------------------------------------------
+# _canonicalize_insider_trades
+# ---------------------------------------------------------------------------
+
+
+def _make_insider_trade_row(
+    symbol: str = "AAPL",
+    insider_name: str = "John Doe",
+    transaction_type: str = "buy",
+    shares: float = 1000.0,
+    filed_at: datetime | None = None,
+    transaction_date: datetime | None = None,
+    filing_date: datetime | None = None,
+    ingested_at: datetime | None = None,
+    price_per_share: float = 150.0,
+    total_value: float = 150000.0,
+    shares_owned_after: float = 5000.0,
+    shares_owned_before: float = 4000.0,
+    insider_title: str = "CEO",
+    is_board_director: bool = False,
+    security_title: str = "Common Stock",
+) -> dict:
+    base_ts = datetime(2024, 2, 15, tzinfo=timezone.utc)
+    return {
+        "filed_at": filed_at or base_ts,
+        "filing_date": filing_date,
+        "transaction_date": transaction_date or datetime(2024, 2, 10, tzinfo=timezone.utc),
+        "symbol": symbol,
+        "insider_name": insider_name,
+        "insider_title": insider_title,
+        "is_board_director": is_board_director,
+        "transaction_type": transaction_type,
+        "shares": shares,
+        "price_per_share": price_per_share,
+        "total_value": total_value,
+        "shares_owned_before": shares_owned_before,
+        "shares_owned_after": shares_owned_after,
+        "security_title": security_title,
+        "ingested_at": ingested_at or base_ts,
+    }
+
+
+def _make_insider_conn(rows: list[dict]):
+    """Mock connection for _canonicalize_insider_trades.
+
+    First cursor: dedup check returns 0 (not yet written).
+    Second cursor: returns the raw insider trade rows.
+    """
+    if not rows:
+        columns: list[str] = []
+        raw_rows: list[tuple] = []
+    else:
+        columns = list(rows[0].keys())
+        raw_rows = [tuple(r.get(c) for c in columns) for r in rows]
+
+    call_count = [0]
+
+    def cursor_factory():
+        call_count[0] += 1
+        cur = MagicMock()
+        if call_count[0] == 1:
+            cur.fetchone.return_value = (0,)
+        else:
+            cur.description = [(col, None, None, None, None, None, None) for col in columns]
+            cur.fetchall.return_value = raw_rows
+        return cur
+
+    conn = MagicMock()
+    conn.cursor.side_effect = cursor_factory
+    return conn
+
+
+class TestCanonicalizeInsiderTrades:
+    def _config(self) -> CanonicalizeConfig:
+        return CanonicalizeConfig(domains=["insider_trades"])
+
+    def test_empty_rows_returns_zero(self):
+        conn = _make_insider_conn([])
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_insider_trades(conn, sender, self._config(), now, "run-1", log)
+
+        assert count == 0
+        sender.row.assert_not_called()
+
+    def test_dedup_skips_on_second_run(self):
+        cur = MagicMock()
+        cur.fetchone.return_value = (1,)
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_insider_trades(conn, sender, self._config(), now, "run-dup", log)
+
+        assert count == 0
+        sender.row.assert_not_called()
+
+    def test_writes_canonical_and_reconciliation_rows(self):
+        rows = [_make_insider_trade_row()]
+        conn = _make_insider_conn(rows)
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_insider_trades(conn, sender, self._config(), now, "run-2", log)
+
+        assert count == 1
+        assert sender.row.call_count == 2  # canonical + reconciliation_log
+
+    def test_source_vendor_is_financialdatasets(self):
+        rows = [_make_insider_trade_row()]
+        conn = _make_insider_conn(rows)
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        _canonicalize_insider_trades(conn, sender, self._config(), now, "run-3", log)
+
+        canonical_call = sender.row.call_args_list[0]
+        assert canonical_call[1]["symbols"]["source_vendor"] == "financialdatasets"
+
+    def test_dedup_collapse_same_filing_reingested_one_row(self):
+        """Two raw rows for the same logical transaction collapse to one canonical row.
+
+        Guards the 'dedup collapse' requirement: same (filing_date, symbol, insider_name,
+        transaction_date, transaction_type, shares) in raw → one canonical write.
+        """
+        filed = datetime(2024, 2, 15, tzinfo=timezone.utc)
+        txn = datetime(2024, 2, 10, tzinfo=timezone.utc)
+        early = _make_insider_trade_row(
+            filed_at=filed, transaction_date=txn,
+            ingested_at=datetime(2024, 2, 15, 9, tzinfo=timezone.utc),
+            price_per_share=149.0,
+        )
+        late = _make_insider_trade_row(
+            filed_at=filed, transaction_date=txn,
+            ingested_at=datetime(2024, 2, 15, 18, tzinfo=timezone.utc),
+            price_per_share=150.0,
+        )
+        conn = _make_insider_conn([early, late])
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_insider_trades(conn, sender, self._config(), now, "run-4", log)
+
+        assert count == 1  # same key collapsed to one row
+        canonical_calls = [
+            c for c in sender.row.call_args_list
+            if c[0][0] == "canonical_insider_trades"
+        ]
+        assert len(canonical_calls) == 1
+        # Latest-ingested row wins
+        assert canonical_calls[0][1]["columns"]["price_per_share"] == pytest.approx(150.0)
+
+    def test_filing_date_column_preferred_over_filed_at(self):
+        """When filing_date column is set (ya-2gqv7+), it is used as the canonical timestamp."""
+        filed_at = datetime(2024, 2, 10, tzinfo=timezone.utc)  # old value (wrong date)
+        filing_date = datetime(2024, 2, 15, tzinfo=timezone.utc)  # corrected filing date
+        row = _make_insider_trade_row(filed_at=filed_at, filing_date=filing_date)
+        conn = _make_insider_conn([row])
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        _canonicalize_insider_trades(conn, sender, self._config(), now, "run-5", log)
+
+        canonical_call = sender.row.call_args_list[0]
+        from yats_pipelines.jobs.canonicalize import _ts_nanos
+        expected_ts = _ts_nanos(datetime(2024, 2, 15, tzinfo=timezone.utc))
+        assert str(canonical_call[1]["at"]) == str(expected_ts)
+
+    def test_different_transactions_written_separately(self):
+        """Two distinct trades for the same insider on different days → two rows."""
+        row1 = _make_insider_trade_row(
+            filed_at=datetime(2024, 2, 15, tzinfo=timezone.utc),
+            transaction_date=datetime(2024, 2, 10, tzinfo=timezone.utc),
+            shares=1000.0,
+        )
+        row2 = _make_insider_trade_row(
+            filed_at=datetime(2024, 3, 15, tzinfo=timezone.utc),
+            transaction_date=datetime(2024, 3, 10, tzinfo=timezone.utc),
+            shares=500.0,
+        )
+        conn = _make_insider_conn([row1, row2])
+        sender = MagicMock()
+        now = datetime(2024, 4, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_insider_trades(conn, sender, self._config(), now, "run-6", log)
+
+        assert count == 2
+
+
+# ---------------------------------------------------------------------------
+# _canonicalize_institutional_holdings
+# ---------------------------------------------------------------------------
+
+
+def _make_holdings_row(
+    symbol: str = "AAPL",
+    filer_cik: str = "0001234567",
+    filer_name: str = "Vanguard Group",
+    filing_date: datetime | None = None,
+    report_period: datetime | None = None,
+    shares: float = 1_000_000.0,
+    value_usd: float = 175_000_000.0,
+    accession_number: str = "0001234567-24-000001",
+    ingested_at: datetime | None = None,
+) -> dict:
+    base_ts = datetime(2024, 2, 15, tzinfo=timezone.utc)
+    return {
+        "filing_date": filing_date or base_ts,
+        "symbol": symbol,
+        "report_period": report_period or datetime(2023, 12, 31, tzinfo=timezone.utc),
+        "accession_number": accession_number,
+        "filer_cik": filer_cik,
+        "filer_name": filer_name,
+        "cusip": "037833100",
+        "title_of_class": "COM",
+        "shares": shares,
+        "value_usd": value_usd,
+        "reported_price": value_usd / shares if shares else None,
+        "ingested_at": ingested_at or base_ts,
+        "dagster_run_id": "raw-run-001",
+    }
+
+
+def _make_holdings_conn(rows: list[dict]):
+    """Mock connection for _canonicalize_institutional_holdings.
+
+    First cursor: dedup check returns 0.
+    Second cursor: returns the raw holdings rows.
+    """
+    if not rows:
+        columns: list[str] = []
+        raw_rows: list[tuple] = []
+    else:
+        columns = list(rows[0].keys())
+        raw_rows = [tuple(r.get(c) for c in columns) for r in rows]
+
+    call_count = [0]
+
+    def cursor_factory():
+        call_count[0] += 1
+        cur = MagicMock()
+        if call_count[0] == 1:
+            cur.fetchone.return_value = (0,)
+        else:
+            cur.description = [(col, None, None, None, None, None, None) for col in columns]
+            cur.fetchall.return_value = raw_rows
+        return cur
+
+    conn = MagicMock()
+    conn.cursor.side_effect = cursor_factory
+    return conn
+
+
+class TestCanonicalizeInstitutionalHoldings:
+    def _config(self) -> CanonicalizeConfig:
+        return CanonicalizeConfig(domains=["institutional_holdings"])
+
+    def test_empty_rows_returns_zero(self):
+        conn = _make_holdings_conn([])
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_institutional_holdings(conn, sender, self._config(), now, "run-1", log)
+
+        assert count == 0
+        sender.row.assert_not_called()
+
+    def test_dedup_skips_on_second_run(self):
+        cur = MagicMock()
+        cur.fetchone.return_value = (1,)
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_institutional_holdings(conn, sender, self._config(), now, "run-dup", log)
+
+        assert count == 0
+        sender.row.assert_not_called()
+
+    def test_writes_per_filer_canonical_and_reconciliation_and_aggregate(self):
+        """One filer → one canonical_institutional_holdings + one reconciliation_log + one canonical_inst_ownership."""
+        rows = [_make_holdings_row()]
+        conn = _make_holdings_conn(rows)
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_institutional_holdings(conn, sender, self._config(), now, "run-2", log)
+
+        assert count == 1
+        tables = [c[0][0] for c in sender.row.call_args_list]
+        assert tables.count("canonical_institutional_holdings") == 1
+        assert tables.count("reconciliation_log") == 1
+        assert tables.count("canonical_inst_ownership") == 1
+
+    def test_aggregate_math_multiple_filers(self):
+        """Multiple filers for the same (symbol, report_period) → correct totals and filer_count."""
+        rp = datetime(2023, 12, 31, tzinfo=timezone.utc)
+        fd = datetime(2024, 2, 15, tzinfo=timezone.utc)
+        rows = [
+            _make_holdings_row(filer_cik="0001", shares=1_000_000.0, value_usd=100_000_000.0,
+                               filing_date=fd, report_period=rp),
+            _make_holdings_row(filer_cik="0002", filer_name="BlackRock",
+                               shares=500_000.0, value_usd=50_000_000.0,
+                               filing_date=fd, report_period=rp),
+            _make_holdings_row(filer_cik="0003", filer_name="StateStreet",
+                               shares=250_000.0, value_usd=25_000_000.0,
+                               filing_date=fd, report_period=rp),
+        ]
+        conn = _make_holdings_conn(rows)
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_institutional_holdings(conn, sender, self._config(), now, "run-3", log)
+
+        assert count == 3
+        agg_calls = [c for c in sender.row.call_args_list if c[0][0] == "canonical_inst_ownership"]
+        assert len(agg_calls) == 1  # one aggregate row for this (symbol, report_period)
+        agg_cols = agg_calls[0][1]["columns"]
+        assert agg_cols["total_shares"] == pytest.approx(1_750_000.0)
+        assert agg_cols["total_value_usd"] == pytest.approx(175_000_000.0)
+        assert agg_cols["filer_count"] == 3
+
+    def test_aggregate_uses_max_filing_date(self):
+        """The aggregate's filing_date = latest filing_date across filers for that period."""
+        rp = datetime(2023, 12, 31, tzinfo=timezone.utc)
+        early_fd = datetime(2024, 2, 10, tzinfo=timezone.utc)
+        late_fd = datetime(2024, 2, 20, tzinfo=timezone.utc)
+        rows = [
+            _make_holdings_row(filer_cik="0001", filing_date=early_fd, report_period=rp),
+            _make_holdings_row(filer_cik="0002", filer_name="BlackRock",
+                               filing_date=late_fd, report_period=rp),
+        ]
+        conn = _make_holdings_conn(rows)
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        _canonicalize_institutional_holdings(conn, sender, self._config(), now, "run-4", log)
+
+        agg_calls = [c for c in sender.row.call_args_list if c[0][0] == "canonical_inst_ownership"]
+        assert len(agg_calls) == 1
+        from yats_pipelines.jobs.canonicalize import _ts_nanos
+        expected_at = _ts_nanos(datetime(2024, 2, 20, tzinfo=timezone.utc))
+        assert str(agg_calls[0][1]["at"]) == str(expected_at)
+
+    def test_dedup_collapse_same_filer_reingested_one_row(self):
+        """Two raw rows for the same (filing_date, symbol, filer_cik, report_period) → one canonical row."""
+        fd = datetime(2024, 2, 15, tzinfo=timezone.utc)
+        rp = datetime(2023, 12, 31, tzinfo=timezone.utc)
+        early = _make_holdings_row(
+            filer_cik="0001", filing_date=fd, report_period=rp,
+            shares=900_000.0,
+            ingested_at=datetime(2024, 2, 15, 9, tzinfo=timezone.utc),
+        )
+        late = _make_holdings_row(
+            filer_cik="0001", filing_date=fd, report_period=rp,
+            shares=1_000_000.0,
+            ingested_at=datetime(2024, 2, 15, 18, tzinfo=timezone.utc),
+        )
+        conn = _make_holdings_conn([early, late])
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_institutional_holdings(conn, sender, self._config(), now, "run-5", log)
+
+        assert count == 1  # same key collapsed to one row
+        holdings_calls = [c for c in sender.row.call_args_list
+                          if c[0][0] == "canonical_institutional_holdings"]
+        assert len(holdings_calls) == 1
+        # Latest-ingested row wins
+        assert holdings_calls[0][1]["columns"]["shares"] == pytest.approx(1_000_000.0)
+
+    def test_idempotent_rerun_aggregate_count_equals_distinct_periods(self):
+        """Two different (symbol, report_period) pairs → two aggregate rows (idempotency check).
+
+        This verifies that the aggregate produces exactly one row per (symbol, report_period)
+        with the correct filer_count — the foundation for 'count==distinct after 2 runs'
+        when combined with QuestDB DEDUP UPSERT.
+        """
+        rp1 = datetime(2023, 12, 31, tzinfo=timezone.utc)
+        rp2 = datetime(2023, 9, 30, tzinfo=timezone.utc)
+        fd = datetime(2024, 2, 15, tzinfo=timezone.utc)
+        rows = [
+            _make_holdings_row(filer_cik="0001", report_period=rp1, filing_date=fd),
+            _make_holdings_row(filer_cik="0002", filer_name="BR", report_period=rp1,
+                               filing_date=fd),
+            _make_holdings_row(symbol="MSFT", filer_cik="0001", report_period=rp2,
+                               filing_date=fd),
+        ]
+        conn = _make_holdings_conn(rows)
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        count = _canonicalize_institutional_holdings(conn, sender, self._config(), now, "run-6", log)
+
+        assert count == 3  # three per-filer rows
+        agg_calls = [c for c in sender.row.call_args_list if c[0][0] == "canonical_inst_ownership"]
+        # Two distinct (symbol, report_period) pairs → two aggregate rows
+        assert len(agg_calls) == 2
+
+    def test_filer_count_written_as_integer(self):
+        """filer_count must be an int (LONG type in QuestDB) — not a float."""
+        rows = [
+            _make_holdings_row(filer_cik="0001"),
+            _make_holdings_row(filer_cik="0002", filer_name="BR"),
+        ]
+        conn = _make_holdings_conn(rows)
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        _canonicalize_institutional_holdings(conn, sender, self._config(), now, "run-7", log)
+
+        agg_calls = [c for c in sender.row.call_args_list if c[0][0] == "canonical_inst_ownership"]
+        assert len(agg_calls) == 1
+        filer_count = agg_calls[0][1]["columns"]["filer_count"]
+        assert isinstance(filer_count, int)
+        assert filer_count == 2
+
+    def test_accession_number_carried_in_per_filer_row(self):
+        """accession_number must appear as a column in canonical_institutional_holdings."""
+        rows = [_make_holdings_row(accession_number="0001234567-24-000099")]
+        conn = _make_holdings_conn(rows)
+        sender = MagicMock()
+        now = datetime(2024, 3, 1, tzinfo=timezone.utc)
+        log = MagicMock()
+
+        _canonicalize_institutional_holdings(conn, sender, self._config(), now, "run-8", log)
+
+        holdings_calls = [c for c in sender.row.call_args_list
+                          if c[0][0] == "canonical_institutional_holdings"]
+        assert holdings_calls[0][1]["columns"].get("accession_number") == "0001234567-24-000099"
