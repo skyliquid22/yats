@@ -113,3 +113,9 @@ def get_trading():
 
 _STATIC = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def index():
+    from fastapi.responses import FileResponse
+    return FileResponse(_STATIC / "index.html")
