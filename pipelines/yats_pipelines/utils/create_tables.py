@@ -108,6 +108,24 @@ CREATE TABLE IF NOT EXISTS raw_fd_analyst_estimates (
 ) TIMESTAMP(timestamp) PARTITION BY YEAR;
 """
 
+RAW_FD_INSTITUTIONAL_HOLDINGS = """
+CREATE TABLE IF NOT EXISTS raw_fd_institutional_holdings (
+    filing_date TIMESTAMP,
+    symbol SYMBOL,
+    report_period TIMESTAMP,
+    accession_number STRING,
+    filer_cik SYMBOL,
+    filer_name STRING,
+    cusip SYMBOL,
+    title_of_class SYMBOL,
+    shares DOUBLE,
+    value_usd DOUBLE,
+    reported_price DOUBLE,
+    ingested_at TIMESTAMP,
+    dagster_run_id STRING
+) TIMESTAMP(filing_date) PARTITION BY YEAR WAL;
+"""
+
 RAW_FD_EARNINGS = """
 CREATE TABLE IF NOT EXISTS raw_fd_earnings (
     report_date TIMESTAMP,
@@ -579,6 +597,7 @@ ALL_TABLES: list[str] = [
     RAW_FD_INSIDER_TRADES,
     RAW_FD_ANALYST_ESTIMATES,
     RAW_FD_EARNINGS,
+    RAW_FD_INSTITUTIONAL_HOLDINGS,
     RAW_THETADATA_OPTIONS_CHAIN,
     RAW_THETADATA_OPTIONS_EOD,
     # Canonical
@@ -626,6 +645,14 @@ MIGRATIONS: list[str] = [
     # prior run for the same (timestamp, symbol, feature_set) would otherwise be
     # read alongside fresh ones (fetch_features does not filter by computed_at).
     "ALTER TABLE features DEDUP ENABLE UPSERT KEYS(timestamp, symbol, feature_set, feature_set_version)",
+    # ya-2gqv7: insider_trades — add filing_date, transaction_date, and 4 new signal columns.
+    # filed_at now truly = filing date (point-in-time fix); transaction_date preserved as column.
+    "ALTER TABLE raw_fd_insider_trades ADD COLUMN filing_date TIMESTAMP",
+    "ALTER TABLE raw_fd_insider_trades ADD COLUMN transaction_date TIMESTAMP",
+    "ALTER TABLE raw_fd_insider_trades ADD COLUMN is_board_director BOOLEAN",
+    "ALTER TABLE raw_fd_insider_trades ADD COLUMN shares_owned_before DOUBLE",
+    "ALTER TABLE raw_fd_insider_trades ADD COLUMN security_title STRING",
+    "ALTER TABLE raw_fd_insider_trades ADD COLUMN issuer STRING",
 ]
 
 

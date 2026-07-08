@@ -1,11 +1,12 @@
 """financialdatasets.ai REST vendor adapter.
 
-Covers 5 data domains:
+Covers 6 data domains:
 1. Fundamentals (income statements — annual/quarterly/TTM)
 2. Financial metrics (50+ pre-computed ratios)
 3. Earnings (results, estimates, surprise)
 4. Insider trades (Form 3/4/5 transactions)
 5. Analyst estimates (consensus forecasts)
+6. Institutional holdings (Form 13F filings)
 
 Auth via X-API-KEY header. Exponential backoff retry (3 attempts).
 Configurable request-per-second throttle.
@@ -123,3 +124,26 @@ class FinancialDatasetsResource:
             "ticker": ticker, "period": period, "limit": limit,
         })
         return data.get("analyst_estimates", [])
+
+    # ------------------------------------------------------------------
+    # Domain: Institutional Holdings (Form 13F)
+    # ------------------------------------------------------------------
+
+    def get_institutional_holdings(self, ticker: str, limit: int = 100) -> list[dict]:
+        """Fetch institutional holdings (Form 13F filings) for a ticker.
+
+        Paginates using offset until the response returns fewer records than
+        the page limit (exhaustion). subsidiaries detail is omitted (v1).
+        """
+        all_holdings: list[dict] = []
+        offset = 0
+        while True:
+            data = self._get("/institutional-holdings", {
+                "ticker": ticker, "limit": limit, "offset": offset,
+            })
+            page = data.get("institutional_holdings", [])
+            all_holdings.extend(page)
+            if len(page) < limit:
+                break
+            offset += limit
+        return all_holdings
