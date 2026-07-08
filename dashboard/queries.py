@@ -605,10 +605,10 @@ def experiment_detail(conn, experiment_id: str) -> dict:
             """,
             (experiment_id,),
         )
+        cols = [d[0] for d in cur.description]
         row = cur.fetchone()
         cur.close()
         if row:
-            cols = [d[0] for d in cur.description]
             result["index"] = dict(zip(cols, row))
     except Exception:
         pass
