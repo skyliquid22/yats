@@ -26,6 +26,7 @@ import research.features.ohlcv_features  # noqa: F401
 import research.features.cross_sectional_features  # noqa: F401
 import research.features.fundamental_features  # noqa: F401
 import research.features.regime_features_v1  # noqa: F401
+import research.features.regime_features_v2  # noqa: F401
 import research.features.options_features_v1  # noqa: F401
 import research.features.insider_features_v1  # noqa: F401
 import research.features.inst_features_v1  # noqa: F401
@@ -33,6 +34,10 @@ from research.features.feature_registry import registry
 from research.features.regime_features_v1 import (
     DEFAULT_REGIME_UNIVERSE,
     compute_regime_features,
+)
+from research.features.regime_features_v2 import (
+    REGIME_V2_FEATURES,
+    compute_regime_features_v2,
 )
 from research.features.options_features_v1 import compute_options_features
 from research.features.insider_features_v1 import compute_insider_features
@@ -329,13 +334,59 @@ def _compute_cross_sectional_features(
     return results
 
 
+def _load_options_chain_eod(
+    conn, underlyings: list[str], start_date: str, end_date: str
+) -> pd.DataFrame:
+    """Load EOD-only options chain (source_vendor='thetadata_eod') for regime symbols.
+
+    Separate from _load_options_chain (which loads all vendors for per-symbol
+    options features) so regime_v2 as-of discipline is enforced at the DB layer.
+    """
+    where, params = _date_clause(start_date, end_date, ts_col="quote_date")
+    if where:
+        where += " AND underlying IN %s AND source_vendor = 'thetadata_eod'"
+    else:
+        where = " WHERE underlying IN %s AND source_vendor = 'thetadata_eod'"
+    params.append(tuple(underlyings))
+
+    fields = [
+        "quote_date", "underlying", "expiry", "strike", "right",
+        "iv", "delta", "gamma", "open_interest",
+    ]
+    field_str = ", ".join(fields)
+    query = (
+        f"SELECT {field_str} FROM canonical_options_chain{where} "
+        f"ORDER BY underlying, quote_date, expiry, strike, right"
+    )
+
+    cur = conn.cursor()
+    cur.execute(query, params)
+    columns = [desc[0] for desc in cur.description]
+    rows = cur.fetchall()
+    cur.close()
+
+    if not rows:
+        return pd.DataFrame(columns=fields)
+
+    df = pd.DataFrame(rows, columns=columns)
+    df["quote_date"] = pd.to_datetime(df["quote_date"], utc=True)
+    df["expiry"] = pd.to_datetime(df["expiry"], utc=True)
+    return df
+
+
 def _compute_regime_features_pipeline(
     conn, regime_universe: list[str], start_date: str, end_date: str
-) -> pd.DataFrame:
-    """Compute regime features from regime universe close prices."""
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Compute regime v1 features from regime universe close prices.
+
+    Returns:
+        (regime_df, regime_ohlcv_df): v1 feature DataFrame and raw OHLCV
+        (regime_ohlcv_df is returned so the caller can reuse SPY prices for v2
+        without issuing a second DB query).
+    """
     ohlcv = _load_ohlcv(conn, regime_universe, start_date, end_date)
     if ohlcv.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     # Pivot to wide format: dates × symbols
     pivot = ohlcv.pivot_table(
@@ -343,7 +394,7 @@ def _compute_regime_features_pipeline(
     )
 
     regime_df = compute_regime_features(pivot)
-    return regime_df
+    return regime_df, ohlcv
 
 
 def _load_options_chain(
@@ -682,6 +733,10 @@ _FEATURE_COLUMNS = [
     "atm_iv", "skew_25d", "iv_term_slope", "put_call_oi_ratio", "net_gamma_exposure",
     "insider_net_buy_90d", "insider_buy_intensity_30d", "insider_cluster_30d", "exec_net_buy_90d",
     "inst_ownership_pct", "inst_top10_share",
+    # ya-3rkix: Stage 4a regime_v2 columns
+    "spy_atm_iv", "spy_iv_zscore_60d", "spy_vrp", "spy_iv_term_slope",
+    "spy_skew_zscore_60d", "spy_gex_sign", "spy_gex_norm",
+    "spy_iv_delta_5d", "spy_slope_delta_5d",
 ]
 
 
@@ -831,15 +886,42 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
             ohlcv_by_symbol, metrics_by_symbol, fs.cross_sectional
         )
 
-        # Compute regime features
+        # Compute regime features (v1 price-based + v2 options-implied)
         regime_df = pd.DataFrame()
         if fs.regime:
-            context.log.info("Computing regime features for universe: %s",
+            context.log.info("Computing regime v1 features for universe: %s",
                              config.regime_universe)
-            regime_df = _compute_regime_features_pipeline(
+            regime_df, regime_ohlcv_df = _compute_regime_features_pipeline(
                 conn, config.regime_universe, config.start_date, config.end_date
             )
-            context.log.info("Computed regime features: %d rows", len(regime_df))
+            context.log.info("Computed regime v1 features: %d rows", len(regime_df))
+
+            # regime_v2: options-implied features from SPY EOD chain
+            has_regime_v2 = bool(set(fs.regime) & REGIME_V2_FEATURES)
+            if has_regime_v2:
+                context.log.info("Computing regime_v2 features (SPY EOD options chain)...")
+                spy_ohlcv = (
+                    regime_ohlcv_df[regime_ohlcv_df["symbol"] == "SPY"]
+                    if not regime_ohlcv_df.empty else pd.DataFrame()
+                )
+                spy_prices = (
+                    spy_ohlcv.set_index("timestamp")["close"]
+                    if not spy_ohlcv.empty else pd.Series(dtype=float)
+                )
+                spy_chain = _load_options_chain_eod(
+                    conn, ["SPY"], config.start_date, config.end_date
+                )
+                context.log.info("Loaded %d SPY EOD options rows for regime_v2", len(spy_chain))
+                regime_v2_df = compute_regime_features_v2(spy_chain, spy_prices)
+                context.log.info(
+                    "Computed regime_v2 features: %d rows, %d columns",
+                    len(regime_v2_df), len(regime_v2_df.columns),
+                )
+                if not regime_v2_df.empty:
+                    if regime_df.empty:
+                        regime_df = regime_v2_df
+                    else:
+                        regime_df = regime_df.join(regime_v2_df, how="outer")
 
         # Compute options features
         options_features: dict[str, pd.DataFrame] = {}

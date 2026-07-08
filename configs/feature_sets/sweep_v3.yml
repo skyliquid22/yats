@@ -1,0 +1,68 @@
+name: sweep_v3
+description: >
+  Stage 4a WFO sweep: sweep_v2 + 9 regime_v2 options-implied features (Stage 4a).
+  Max lookback ~105 bars (inst_ownership_pct/inst_top10_share at ~105; regime_v2
+  at 61). purge_buffer=105 keeps anchored-fold WFO feasible on the 502-bar span.
+  This is the A/B sweep counterpart to sweep_v2 for the regime_v2 marginal-signal
+  verdict (Stage 4b). Regime_v2 features require SPY EOD options chain
+  (source_vendor=thetadata_eod).
+
+ohlcv:
+  - ret_1d
+  - ret_5d
+  - ret_21d
+  - rv_21d
+  - rv_63d
+  - dist_20d_high
+  - dist_20d_low
+
+cross_sectional:
+  - mom_3m
+  - log_mkt_cap
+  - size_rank
+  - value_rank
+
+fundamental:
+  - pe_ttm
+  - ps_ttm
+  - pb
+  - ev_ebitda
+  - roe
+  - gross_margin
+  - operating_margin
+  - fcf_margin
+  - debt_equity
+  - eps_growth_1y
+  - revenue_growth_1y
+
+regime:
+  - market_vol_20d
+  - market_trend_20d
+  - dispersion_20d
+  - corr_mean_20d
+  - spy_atm_iv
+  - spy_iv_zscore_60d
+  - spy_vrp
+  - spy_iv_term_slope
+  - spy_skew_zscore_60d
+  - spy_gex_sign
+  - spy_gex_norm
+  - spy_iv_delta_5d
+  - spy_slope_delta_5d
+
+options:
+  - atm_iv
+  - skew_25d
+  - iv_term_slope
+  - put_call_oi_ratio
+  - net_gamma_exposure
+
+insider:
+  - insider_net_buy_90d
+  - insider_buy_intensity_30d
+  - insider_cluster_30d
+  - exec_net_buy_90d
+
+institutional:
+  - inst_ownership_pct
+  - inst_top10_share

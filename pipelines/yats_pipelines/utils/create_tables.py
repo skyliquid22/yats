@@ -390,6 +390,15 @@ CREATE TABLE IF NOT EXISTS features (
     exec_net_buy_90d DOUBLE,
     inst_ownership_pct DOUBLE,
     inst_top10_share DOUBLE,
+    spy_atm_iv DOUBLE,
+    spy_iv_zscore_60d DOUBLE,
+    spy_vrp DOUBLE,
+    spy_iv_term_slope DOUBLE,
+    spy_skew_zscore_60d DOUBLE,
+    spy_gex_sign DOUBLE,
+    spy_gex_norm DOUBLE,
+    spy_iv_delta_5d DOUBLE,
+    spy_slope_delta_5d DOUBLE,
     computed_at TIMESTAMP,
     dagster_run_id STRING
 ) TIMESTAMP(timestamp) PARTITION BY MONTH WAL
@@ -751,6 +760,16 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE features ADD COLUMN exec_net_buy_90d DOUBLE",
     "ALTER TABLE features ADD COLUMN inst_ownership_pct DOUBLE",
     "ALTER TABLE features ADD COLUMN inst_top10_share DOUBLE",
+    # ya-3rkix: Stage 4a — regime_v2 options-implied feature columns added to features table.
+    "ALTER TABLE features ADD COLUMN spy_atm_iv DOUBLE",
+    "ALTER TABLE features ADD COLUMN spy_iv_zscore_60d DOUBLE",
+    "ALTER TABLE features ADD COLUMN spy_vrp DOUBLE",
+    "ALTER TABLE features ADD COLUMN spy_iv_term_slope DOUBLE",
+    "ALTER TABLE features ADD COLUMN spy_skew_zscore_60d DOUBLE",
+    "ALTER TABLE features ADD COLUMN spy_gex_sign DOUBLE",
+    "ALTER TABLE features ADD COLUMN spy_gex_norm DOUBLE",
+    "ALTER TABLE features ADD COLUMN spy_iv_delta_5d DOUBLE",
+    "ALTER TABLE features ADD COLUMN spy_slope_delta_5d DOUBLE",
 ]
 
 
