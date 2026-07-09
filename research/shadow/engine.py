@@ -129,6 +129,15 @@ class ShadowEngine:
         # Track daily returns for Sharpe computation
         self._daily_returns: list[float] = []
 
+        # Per-symbol returns buffer for portfolio risk layer beta computation
+        self._symbol_returns_buffer: list[np.ndarray] = []
+        self._spy_col_idx: int | None = None
+        if spec.portfolio_risk is not None and spec.portfolio_risk.beta_neutral:
+            spy_sym = spec.portfolio_risk.spy_symbol
+            syms = list(self._symbols)
+            if spy_sym in syms:
+                self._spy_col_idx = syms.index(spy_sym)
+
         # Track execution halts for promotion criteria
         self._execution_halts: int = 0
         # Sim execution mode: broker adapter + position tracking
@@ -254,6 +263,21 @@ class ShadowEngine:
         returns = self._compute_returns(prev_snap, curr_snap)
         weighted_return = float(np.dot(self._portfolio.weights, returns))
 
+        # 4b. Portfolio risk layer (vol targeting + optional beta-cap)
+        if self._spec.portfolio_risk is not None:
+            from research.portfolio.risk_layer import apply_risk_layer
+
+            pr = self._spec.portfolio_risk
+            port_hist = np.array(self._daily_returns[-pr.vol_lookback :], dtype=np.float64)
+            sym_hist: np.ndarray | None = None
+            spy_hist: np.ndarray | None = None
+            if pr.beta_neutral and self._symbol_returns_buffer:
+                buf = self._symbol_returns_buffer[-pr.beta_lookback :]
+                sym_hist = np.stack(buf, axis=0)
+                if self._spy_col_idx is not None:
+                    spy_hist = sym_hist[:, self._spy_col_idx]
+            projected = apply_risk_layer(projected, port_hist, sym_hist, spy_hist, pr)
+
         # 5. Transaction cost
         turnover = float(np.abs(projected - self._portfolio.weights).sum())
         cost = turnover * self._spec.cost_config.transaction_cost_bp / 10_000
@@ -262,6 +286,7 @@ class ShadowEngine:
         prev_weights = self._portfolio.weights.tolist()
         self._portfolio.apply_step(projected, weighted_return, cost)
         self._daily_returns.append(weighted_return - cost)
+        self._symbol_returns_buffer.append(returns.copy())
 
         # 7. Log step to JSONL
         entry = build_step_entry(
@@ -327,6 +352,21 @@ class ShadowEngine:
             self._effective_risk_config,
             self._portfolio.weights,
         )
+
+        # 2b. Portfolio risk layer (vol targeting + optional beta-cap)
+        if self._spec.portfolio_risk is not None:
+            from research.portfolio.risk_layer import apply_risk_layer
+
+            pr = self._spec.portfolio_risk
+            port_hist = np.array(self._daily_returns[-pr.vol_lookback :], dtype=np.float64)
+            sym_hist: np.ndarray | None = None
+            spy_hist: np.ndarray | None = None
+            if pr.beta_neutral and self._symbol_returns_buffer:
+                buf = self._symbol_returns_buffer[-pr.beta_lookback :]
+                sym_hist = np.stack(buf, axis=0)
+                if self._spy_col_idx is not None:
+                    spy_hist = sym_hist[:, self._spy_col_idx]
+            projected = apply_risk_layer(projected, port_hist, sym_hist, spy_hist, pr)
 
         # 3. Compile weight deltas into order signals
         current_prices: dict[str, float] = {}
@@ -434,6 +474,7 @@ class ShadowEngine:
         prev_weights = self._portfolio.weights.tolist()
         self._portfolio.apply_step(realized_weights, weighted_return, cost)
         self._daily_returns.append(weighted_return - cost)
+        self._symbol_returns_buffer.append(returns.copy())
 
         # 8. Log step
         entry = build_step_entry(

@@ -171,6 +171,40 @@ class ExecutionSimConfig:
             raise ValueError("range_shrink must be in (0, 1]")
 
 
+@dataclass(frozen=True)
+class PortfolioRiskConfig:
+    """Portfolio-level risk transforms applied as a post-policy step.
+
+    Vol targeting scales weights so trailing portfolio vol ≈ vol_target.
+    Scale DOWN only (max_leverage = 1.0 in v1).
+
+    Beta-neutral option (off by default) caps portfolio beta vs SPY.
+    True β=0 requires shorting; in long-only mode this is beta-capped
+    (scale weights until portfolio β ≤ beta_cap). Document: to achieve
+    β=0, enable short-selling in the execution environment.
+
+    New optional field on ExperimentSpec — defaults to None so existing
+    experiment_ids are unaffected when portfolio_risk is not set.
+    """
+
+    vol_target: float = 0.10   # annualized target portfolio vol (10%)
+    vol_lookback: int = 20     # trailing bars for vol estimate (trading days)
+    beta_neutral: bool = False  # enable beta-cap adjustment (off by default)
+    beta_lookback: int = 60    # trailing bars for beta regression (trading days)
+    beta_cap: float = 1.0      # max allowed portfolio beta in long-only mode
+    spy_symbol: str = "SPY"   # market proxy for beta computation
+
+    def __post_init__(self) -> None:
+        if self.vol_target <= 0:
+            raise ValueError("vol_target must be > 0")
+        if self.vol_lookback < 2:
+            raise ValueError("vol_lookback must be >= 2")
+        if self.beta_lookback < 2:
+            raise ValueError("beta_lookback must be >= 2")
+        if self.beta_cap <= 0:
+            raise ValueError("beta_cap must be > 0")
+
+
 # ---------------------------------------------------------------------------
 # Allowed policies
 # ---------------------------------------------------------------------------
@@ -207,7 +241,7 @@ class ExperimentSpec:
     cost_config: CostConfig
     seed: int
 
-    # Optional fields (10)
+    # Optional fields (11)
     evaluation_split: EvaluationSplitConfig | None = None
     wfo_config: WFOConfig | None = None
     risk_config: RiskConfig = field(default_factory=RiskConfig)
@@ -218,6 +252,7 @@ class ExperimentSpec:
     hierarchy_enabled: bool = False
     controller_config: Mapping[str, Any] | None = None
     allocator_by_mode: Mapping[str, Mapping[str, Any]] | None = None
+    portfolio_risk: PortfolioRiskConfig | None = None
 
     # Frozen hashes (6, set at creation time)
     regime_thresholds_hash: str = ""
