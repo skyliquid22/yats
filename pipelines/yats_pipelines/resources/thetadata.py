@@ -1,9 +1,10 @@
-"""ThetaData REST API v3 vendor adapter — options chains, greeks, IV, open interest."""
+"""ThetaData vendor adapter — gRPC (default) or REST terminal fallback."""
 
 import csv
 import io
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,48 @@ RETRY_DELAYS = [1, 5, 30]  # seconds — exponential backoff
 # ThetaData v3 REST is served by the local Theta Terminal v3 process.
 # Override with THETADATA_BASE_URL env var if the terminal runs on a non-default address.
 BASE_URL = os.environ.get("THETADATA_BASE_URL", "http://127.0.0.1:25503/v3")
+
+# ---------------------------------------------------------------------------
+# gRPC singleton — ONE ThetaClient per process. Concurrent logins fail with
+# UNAUTHENTICATED 'Invalid session' (single-session account limit).
+# ---------------------------------------------------------------------------
+
+_grpc_client = None
+_grpc_client_lock = threading.Lock()
+
+
+def _get_grpc_client():
+    """Return the process-wide ThetaClient singleton, initializing on first call."""
+    global _grpc_client
+    if _grpc_client is None:
+        with _grpc_client_lock:
+            if _grpc_client is None:
+                from thetadata import ThetaClient  # optional dependency
+                api_key = os.environ.get("THETADATA_API_KEY", "")
+                _grpc_client = ThetaClient(api_key=api_key, dataframe_type="pandas")
+    return _grpc_client
+
+
+def _grpc_normalize_right(right: str) -> str:
+    """Map gRPC 'CALL'/'PUT' to short form 'C'/'P'; pass through anything else."""
+    upper = right.upper()
+    if upper == "CALL":
+        return "C"
+    if upper == "PUT":
+        return "P"
+    return right
+
+
+def _grpc_ts_to_datetime(ts) -> "datetime | None":
+    """Coerce a gRPC response timestamp (already a datetime) to UTC datetime."""
+    if ts is None:
+        return None
+    if isinstance(ts, datetime):
+        return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts.astimezone(timezone.utc)
+    try:
+        return _parse_iso_timestamp(str(ts))
+    except Exception:
+        return None
 
 
 @dataclass
@@ -223,10 +266,7 @@ class ThetaDataResource:
     ) -> list[dict]:
         """Get historical EOD option data for all contracts of a root + expiry.
 
-        Calls /option/history/greeks/eod — one row per contract per day with OHLCV,
-        bid/ask, and all greeks (iv, delta, gamma, theta, vega, rho) in a single call.
-        Open interest is fetched separately from /option/history/open_interest and
-        joined by (strike, right, date); greeks/eod has no OI column.
+        Dispatches to gRPC (default) or terminal REST based on THETADATA_TRANSPORT env var.
 
         Args:
             root: Underlying ticker (e.g. "AAPL").
@@ -239,6 +279,83 @@ class ThetaDataResource:
             right, open, high, low, close, volume, trade_count, bid, ask,
             iv, delta, gamma, theta, vega, rho, open_interest, quote_date.
         """
+        if os.environ.get("THETADATA_TRANSPORT", "grpc").lower() == "grpc":
+            return self._grpc_get_historical_eod(root, exp, start_date, end_date)
+        return self._terminal_get_historical_eod(root, exp, start_date, end_date)
+
+    def _grpc_get_historical_eod(
+        self, root: str, exp: str, start_date: str, end_date: str
+    ) -> list[dict]:
+        from datetime import date as _date
+        from thetadata.errors import NoDataFoundError
+
+        client = _get_grpc_client()
+        start = _date(int(start_date[:4]), int(start_date[4:6]), int(start_date[6:8]))
+        end = _date(int(end_date[:4]), int(end_date[4:6]), int(end_date[6:8]))
+        exp_arg = f"{exp[:4]}-{exp[4:6]}-{exp[6:8]}"
+
+        try:
+            greeks_df = client.option_history_greeks_eod(root, exp_arg, start, end)
+        except NoDataFoundError:
+            logger.info("gRPC EOD: no data for %s exp=%s (%s to %s)", root, exp, start_date, end_date)
+            return []
+
+        if greeks_df.empty:
+            return []
+
+        rows = []
+        for _, row in greeks_df.iterrows():
+            rows.append({
+                "root": root,
+                "exp": exp,
+                "strike": _f(row.get("strike")),
+                "right": _grpc_normalize_right(str(row.get("right", ""))),
+                "open": _f(row.get("open")),
+                "high": _f(row.get("high")),
+                "low": _f(row.get("low")),
+                "close": _f(row.get("close")),
+                "volume": _i(row.get("volume")),
+                "trade_count": _i(row.get("count")),
+                "bid": _f(row.get("bid")),
+                "ask": _f(row.get("ask")),
+                "iv": _f(row.get("implied_vol")),
+                "delta": _f(row.get("delta")),
+                "gamma": _f(row.get("gamma")),
+                "theta": _f(row.get("theta")),
+                "vega": _f(row.get("vega")),
+                "rho": _f(row.get("rho")),
+                "open_interest": None,
+                "quote_date": _grpc_ts_to_datetime(row.get("timestamp")),
+            })
+
+        logger.info("gRPC EOD: %s exp=%s %s to %s — %d rows", root, exp, start_date, end_date, len(rows))
+
+        # Enrich with OI — greeks/eod has no OI column
+        try:
+            oi_df = client.option_history_open_interest(root, exp_arg, start_date=start, end_date=end)
+        except NoDataFoundError:
+            oi_df = None
+
+        if oi_df is not None and not oi_df.empty:
+            oi_by_key: dict[tuple, int | None] = {}
+            for _, oi_row in oi_df.iterrows():
+                ts = _grpc_ts_to_datetime(oi_row.get("timestamp"))
+                date_str = ts.strftime("%Y-%m-%d") if ts is not None else ""
+                key = (str(_f(oi_row.get("strike"))), _grpc_normalize_right(str(oi_row.get("right", ""))), date_str)
+                oi_by_key[key] = _i(oi_row.get("open_interest"))
+            for row in rows:
+                qd = row["quote_date"]
+                date_str = qd.strftime("%Y-%m-%d") if qd is not None else ""
+                key = (str(row["strike"]), row["right"], date_str)
+                if key in oi_by_key:
+                    row["open_interest"] = oi_by_key[key]
+
+        return rows
+
+    def _terminal_get_historical_eod(
+        self, root: str, exp: str, start_date: str, end_date: str
+    ) -> list[dict]:
+        """Terminal REST backend for get_historical_eod."""
         url = f"{self.base_url}/option/history/greeks/eod"
         params = {
             "symbol": root,
@@ -313,19 +430,14 @@ class ThetaDataResource:
     ) -> list[dict]:
         """Get historical EOD data for ALL expirations of a root on ONE trade date.
 
-        Uses /option/history/greeks/eod with expiration=* — the vendor-documented
-        bulk shape ("any expiration=* must be requested day by day"). A single
-        cold 2024 day answers in ~2-4s, versus minutes per expiry-history slice;
-        this is the only shape that scales to a multi-year backfill.
+        Dispatches to gRPC (default) or terminal REST based on THETADATA_TRANSPORT env var.
+        gRPC measured at 2-3s/cold-day vs terminal 4.8-27s.
 
         Args:
             root: Underlying ticker (e.g. "AAPL").
             date_ymd: Trade date as YYYYMMDD string (start_date == end_date).
-            max_dte: Server-side tenor filter — drop contracts with more days to
-                expiration (0 = no filter). Bounds payload; LEAPS carry ~zero
-                gamma/OI signal for the options_v1 features.
-            strike_range: Server-side strike window around spot — returns at most
-                2n+1 strikes per expiry (0 = no filter).
+            max_dte: Server-side tenor filter (0 = no filter).
+            strike_range: Server-side strike window around spot (0 = no filter).
 
         Returns:
             Same row shape as get_historical_eod (root, exp, strike, right,
@@ -333,6 +445,87 @@ class ThetaDataResource:
             gamma, theta, vega, rho, open_interest, quote_date), with exp taken
             from each row's expiration column (YYYYMMDD).
         """
+        if os.environ.get("THETADATA_TRANSPORT", "grpc").lower() == "grpc":
+            return self._grpc_get_historical_eod_by_date(root, date_ymd, max_dte, strike_range)
+        return self._terminal_get_historical_eod_by_date(root, date_ymd, max_dte, strike_range)
+
+    def _grpc_get_historical_eod_by_date(
+        self, root: str, date_ymd: str, max_dte: int = 0, strike_range: int = 0
+    ) -> list[dict]:
+        from datetime import date as _date
+        from thetadata.errors import NoDataFoundError
+
+        client = _get_grpc_client()
+        d = _date(int(date_ymd[:4]), int(date_ymd[4:6]), int(date_ymd[6:8]))
+
+        kwargs: dict = {}
+        if max_dte > 0:
+            kwargs["max_dte"] = max_dte
+        if strike_range > 0:
+            kwargs["strike_range"] = strike_range
+
+        try:
+            greeks_df = client.option_history_greeks_eod(root, "*", d, d, **kwargs)
+        except NoDataFoundError:
+            logger.info("gRPC EOD by-date: no data for %s on %s (holiday/non-trading day)", root, date_ymd)
+            return []
+
+        if greeks_df.empty:
+            return []
+
+        rows = []
+        for _, row in greeks_df.iterrows():
+            exp_norm = str(row.get("expiration", "")).replace("-", "")
+            right_norm = _grpc_normalize_right(str(row.get("right", "")))
+            rows.append({
+                "root": root,
+                "exp": exp_norm,
+                "strike": _f(row.get("strike")),
+                "right": right_norm,
+                "open": _f(row.get("open")),
+                "high": _f(row.get("high")),
+                "low": _f(row.get("low")),
+                "close": _f(row.get("close")),
+                "volume": _i(row.get("volume")),
+                "trade_count": _i(row.get("count")),
+                "bid": _f(row.get("bid")),
+                "ask": _f(row.get("ask")),
+                "iv": _f(row.get("implied_vol")),
+                "delta": _f(row.get("delta")),
+                "gamma": _f(row.get("gamma")),
+                "theta": _f(row.get("theta")),
+                "vega": _f(row.get("vega")),
+                "rho": _f(row.get("rho")),
+                "open_interest": None,
+                "quote_date": _grpc_ts_to_datetime(row.get("timestamp")),
+            })
+
+        # Enrich with OI — join per (expiration, strike, right)
+        try:
+            oi_df = client.option_history_open_interest(root, "*", date=d, **kwargs)
+        except NoDataFoundError:
+            oi_df = None
+
+        matched = 0
+        if oi_df is not None and not oi_df.empty:
+            oi_by_key: dict[tuple, int | None] = {}
+            for _, oi_row in oi_df.iterrows():
+                exp_str = str(oi_row.get("expiration", "")).replace("-", "")
+                key = (exp_str, str(_f(oi_row.get("strike"))), _grpc_normalize_right(str(oi_row.get("right", ""))))
+                oi_by_key[key] = _i(oi_row.get("open_interest"))
+            for row in rows:
+                key = (row["exp"], str(row["strike"]), row["right"])
+                if key in oi_by_key:
+                    row["open_interest"] = oi_by_key[key]
+                    matched += 1
+
+        logger.info("gRPC EOD by-date: %s %s — %d rows, %d with OI", root, date_ymd, len(rows), matched)
+        return rows
+
+    def _terminal_get_historical_eod_by_date(
+        self, root: str, date_ymd: str, max_dte: int = 0, strike_range: int = 0
+    ) -> list[dict]:
+        """Terminal REST backend for get_historical_eod_by_date."""
         params: dict = {
             "symbol": root,
             "expiration": "*",
