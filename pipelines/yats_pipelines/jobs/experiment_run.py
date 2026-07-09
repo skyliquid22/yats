@@ -309,6 +309,19 @@ def evaluate_experiment(
     weights_df = weights_df.loc[common_idx]
     returns_df = returns_df.loc[common_idx]
 
+    # Apply portfolio risk layer (vol targeting + optional beta-cap) if configured
+    if spec.portfolio_risk is not None:
+        from research.portfolio.risk_layer import apply_risk_layer_batch
+
+        pr = spec.portfolio_risk
+        spy_sym = pr.spy_symbol
+        spy_ret_series = returns_df[spy_sym] if spy_sym in returns_df.columns else None
+        weights_df = apply_risk_layer_batch(weights_df, returns_df, spy_ret_series, pr)
+        context.log.info(
+            "Portfolio risk layer applied: vol_target=%.1f%%, beta_neutral=%s",
+            pr.vol_target * 100, pr.beta_neutral,
+        )
+
     # Build regime features DataFrame if available
     regime_df = None
     regime_cols = features.get("regime_feature_names", [])
@@ -587,6 +600,7 @@ def _reconstruct_spec(spec_data: dict) -> Any:
         EvaluationSplitConfig,
         ExperimentSpec,
         ExecutionSimConfig,
+        PortfolioRiskConfig,
         RiskConfig,
     )
 
@@ -615,6 +629,11 @@ def _reconstruct_spec(spec_data: dict) -> Any:
     if isinstance(exec_sim_raw, dict):
         exec_sim = ExecutionSimConfig(**exec_sim_raw)
 
+    portfolio_risk_raw = spec_data.get("portfolio_risk")
+    portfolio_risk = None
+    if isinstance(portfolio_risk_raw, dict):
+        portfolio_risk = PortfolioRiskConfig(**portfolio_risk_raw)
+
     # Convert date strings
     start_date = spec_data["start_date"]
     end_date = spec_data["end_date"]
@@ -641,6 +660,7 @@ def _reconstruct_spec(spec_data: dict) -> Any:
         evaluation_split=eval_split,
         risk_config=risk_config,
         execution_sim=exec_sim,
+        portfolio_risk=portfolio_risk,
         notes=spec_data.get("notes"),
         regime_feature_set=spec_data.get("regime_feature_set"),
         regime_labeling=spec_data.get("regime_labeling"),
