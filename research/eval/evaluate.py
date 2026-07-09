@@ -18,6 +18,7 @@ import pandas as pd
 from scipy import stats as sp_stats
 
 from compute.stats.deflated_sharpe import probabilistic_sharpe_ratio
+from research.eval.attribution import compute_factor_attribution
 from research.eval.metrics import (
     compute_performance_metrics,
     compute_trading_metrics,
@@ -48,6 +49,7 @@ def evaluate(
     data_hash: str | None = None,
     feature_versions: dict[str, str] | None = None,
     split_metadata: dict[str, Any] | None = None,
+    factor_returns: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Run deterministic evaluation pipeline.
 
@@ -60,6 +62,10 @@ def evaluate(
         feature_versions: Optional dict of feature name → version for lineage.
         split_metadata: Optional dict with purge/embargo metadata from _apply_evaluation_split.
             When provided, merged into the metadata section and used for DSR (if num_trials set).
+        factor_returns: Optional DataFrame of daily factor returns (date-indexed, one column per
+            factor, e.g. "market" for SPY returns and "momentum" for a long-short spread).
+            When provided, OLS regression is run and results appear under
+            performance.attribution.  None leaves performance.attribution as null.
 
     Returns:
         Complete metrics dict matching PRD §8.3 schema, ready for JSON serialization.
@@ -147,6 +153,11 @@ def evaluate(
     perf_dict["deflated_sharpe"] = (
         dsr_result["deflated_sharpe_ratio"] if dsr_result is not None else None
     )
+    perf_dict["attribution"] = (
+        compute_factor_attribution(portfolio_returns, factor_returns)
+        if factor_returns is not None
+        else None
+    )
 
     metadata: dict[str, Any] = {
         "experiment_id": spec.experiment_id,
@@ -193,6 +204,7 @@ def evaluate_to_json(
     feature_versions: dict[str, str] | None = None,
     timeseries_path: Path | str | None = None,
     split_metadata: dict[str, Any] | None = None,
+    factor_returns: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Run evaluation and write metrics.json (and optionally timeseries.json).
 
@@ -200,6 +212,8 @@ def evaluate_to_json(
         output_path: Path to write metrics.json.
         timeseries_path: Optional path to write timeseries.json (equity, drawdown, weights).
         split_metadata: Optional purge/embargo metadata to embed in metrics.json.
+        factor_returns: Optional factor returns DataFrame for attribution regression.
+            See evaluate() for full description.
         Other args: same as evaluate().
 
     Returns:
@@ -213,6 +227,7 @@ def evaluate_to_json(
         data_hash=data_hash,
         feature_versions=feature_versions,
         split_metadata=split_metadata,
+        factor_returns=factor_returns,
     )
 
     output_path = Path(output_path)
