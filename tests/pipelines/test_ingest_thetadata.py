@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import socket
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from yats_pipelines.jobs.ingest_thetadata import (
@@ -239,6 +241,13 @@ class TestGetOptionChainSnapshot:
 
 
 class TestGetHistoricalEod:
+    def setup_method(self):
+        self._tp = patch.dict(os.environ, {"THETADATA_TRANSPORT": "terminal"})
+        self._tp.start()
+
+    def teardown_method(self):
+        self._tp.stop()
+
     # Fixture: representative greeks/eod response
     # GET /v3/option/history/greeks/eod?symbol=AAPL&expiration=...&start_date=...&end_date=...
     GREEKS_EOD_CSV = (
@@ -369,6 +378,13 @@ class TestGetHistoricalEod:
 
 class TestGetHistoricalEodByDate:
     """Bulk by-date mode: one expiration=* request per trading day (ya-i6nvo)."""
+
+    def setup_method(self):
+        self._tp = patch.dict(os.environ, {"THETADATA_TRANSPORT": "terminal"})
+        self._tp.start()
+
+    def teardown_method(self):
+        self._tp.stop()
 
     HEADER = (
         "symbol,expiration,strike,right,timestamp,open,high,low,close,"
@@ -837,6 +853,223 @@ class TestAssertTableSchema:
 
 # ---------------------------------------------------------------------------
 # Live integration tests (require Theta Terminal v3 on 127.0.0.1:25503)
+# ---------------------------------------------------------------------------
+# gRPC transport tests
+# ---------------------------------------------------------------------------
+
+
+def _make_greeks_df(rows: list[dict]) -> pd.DataFrame:
+    """Build a minimal greeks_eod DataFrame the way ThetaClient would return it."""
+    defaults = {
+        "expiration": "2024-09-20",
+        "strike": 150.0,
+        "right": "CALL",
+        "open": 1.0,
+        "high": 2.0,
+        "low": 0.5,
+        "close": 1.5,
+        "volume": 100,
+        "count": 10,
+        "bid": 1.4,
+        "ask": 1.6,
+        "implied_vol": 0.25,
+        "delta": 0.5,
+        "gamma": 0.02,
+        "theta": -0.01,
+        "vega": 0.1,
+        "rho": 0.05,
+        "timestamp": datetime(2024, 9, 20, 16, 0, tzinfo=timezone.utc),
+    }
+    return pd.DataFrame([{**defaults, **r} for r in rows])
+
+
+def _make_oi_df(rows: list[dict]) -> pd.DataFrame:
+    defaults = {
+        "expiration": "2024-09-20",
+        "strike": 150.0,
+        "right": "CALL",
+        "open_interest": 500,
+        "timestamp": datetime(2024, 9, 20, 16, 0, tzinfo=timezone.utc),
+    }
+    return pd.DataFrame([{**defaults, **r} for r in rows])
+
+
+class TestGrpcTransportSelection:
+    def test_grpc_selected_by_default(self, monkeypatch):
+        monkeypatch.delenv("THETADATA_TRANSPORT", raising=False)
+        td = ThetaDataResource()
+        mock_client = MagicMock()
+        mock_client.option_history_greeks_eod.return_value = _make_greeks_df([{}])
+        mock_client.option_history_open_interest.return_value = pd.DataFrame()
+        with patch("yats_pipelines.resources.thetadata._get_grpc_client", return_value=mock_client):
+            rows = td.get_historical_eod_by_date("AAPL", "20240920")
+        mock_client.option_history_greeks_eod.assert_called_once()
+        assert len(rows) == 1
+
+    def test_terminal_selected_when_env_set(self, monkeypatch):
+        monkeypatch.setenv("THETADATA_TRANSPORT", "terminal")
+        td = ThetaDataResource()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 472
+        mock_resp.headers = {}
+        with patch("requests.get", return_value=mock_resp):
+            rows = td.get_historical_eod_by_date("AAPL", "20240920")
+        assert rows == []
+
+    def test_grpc_explicit(self, monkeypatch):
+        monkeypatch.setenv("THETADATA_TRANSPORT", "grpc")
+        td = ThetaDataResource()
+        mock_client = MagicMock()
+        mock_client.option_history_greeks_eod.return_value = pd.DataFrame()
+        with patch("yats_pipelines.resources.thetadata._get_grpc_client", return_value=mock_client):
+            rows = td.get_historical_eod_by_date("AAPL", "20240920")
+        assert rows == []
+
+
+class TestGrpcNoDataMapping:
+    def test_no_data_found_error_maps_to_empty_list_by_date(self, monkeypatch):
+        monkeypatch.delenv("THETADATA_TRANSPORT", raising=False)
+        from thetadata.errors import NoDataFoundError
+        td = ThetaDataResource()
+        mock_client = MagicMock()
+        mock_client.option_history_greeks_eod.side_effect = NoDataFoundError("No data found")
+        with patch("yats_pipelines.resources.thetadata._get_grpc_client", return_value=mock_client):
+            rows = td.get_historical_eod_by_date("AAPL", "20240704")
+        assert rows == [], "NoDataFoundError (holiday/non-trading day) must map to empty list"
+
+    def test_no_data_found_error_maps_to_empty_list_eod(self, monkeypatch):
+        monkeypatch.delenv("THETADATA_TRANSPORT", raising=False)
+        from thetadata.errors import NoDataFoundError
+        td = ThetaDataResource()
+        mock_client = MagicMock()
+        mock_client.option_history_greeks_eod.side_effect = NoDataFoundError("No data found")
+        with patch("yats_pipelines.resources.thetadata._get_grpc_client", return_value=mock_client):
+            rows = td.get_historical_eod("AAPL", "20241220", "20241220", "20241220")
+        assert rows == []
+
+    def test_oi_no_data_does_not_raise(self, monkeypatch):
+        monkeypatch.delenv("THETADATA_TRANSPORT", raising=False)
+        from thetadata.errors import NoDataFoundError
+        td = ThetaDataResource()
+        mock_client = MagicMock()
+        mock_client.option_history_greeks_eod.return_value = _make_greeks_df([{}])
+        mock_client.option_history_open_interest.side_effect = NoDataFoundError("No OI")
+        with patch("yats_pipelines.resources.thetadata._get_grpc_client", return_value=mock_client):
+            rows = td.get_historical_eod_by_date("AAPL", "20240920")
+        assert len(rows) == 1
+        assert rows[0]["open_interest"] is None
+
+
+class TestGrpcSharedClientSingleton:
+    def test_same_client_returned_on_multiple_calls(self, monkeypatch):
+        monkeypatch.setenv("THETADATA_API_KEY", "test-key")
+        import yats_pipelines.resources.thetadata as td_module
+        original = td_module._grpc_client
+        try:
+            td_module._grpc_client = None
+            mock_instance = MagicMock()
+            with patch("thetadata.ThetaClient", return_value=mock_instance) as mock_cls:
+                c1 = td_module._get_grpc_client()
+                c2 = td_module._get_grpc_client()
+            assert c1 is c2, "Singleton must return the same instance"
+            assert mock_cls.call_count == 1, "ThetaClient must be constructed exactly once"
+        finally:
+            td_module._grpc_client = original
+
+    def test_client_constructed_with_api_key_and_pandas(self, monkeypatch):
+        monkeypatch.setenv("THETADATA_API_KEY", "my-secret-key")
+        import yats_pipelines.resources.thetadata as td_module
+        original = td_module._grpc_client
+        try:
+            td_module._grpc_client = None
+            mock_instance = MagicMock()
+            with patch("thetadata.ThetaClient", return_value=mock_instance) as mock_cls:
+                td_module._get_grpc_client()
+            mock_cls.assert_called_once_with(api_key="my-secret-key", dataframe_type="pandas")
+        finally:
+            td_module._grpc_client = original
+
+
+class TestGrpcDataMapping:
+    def test_right_normalized_call_to_c(self, monkeypatch):
+        monkeypatch.delenv("THETADATA_TRANSPORT", raising=False)
+        td = ThetaDataResource()
+        mock_client = MagicMock()
+        mock_client.option_history_greeks_eod.return_value = _make_greeks_df([{"right": "CALL"}])
+        mock_client.option_history_open_interest.return_value = pd.DataFrame()
+        with patch("yats_pipelines.resources.thetadata._get_grpc_client", return_value=mock_client):
+            rows = td.get_historical_eod_by_date("AAPL", "20240920")
+        assert rows[0]["right"] == "C"
+
+    def test_right_normalized_put_to_p(self, monkeypatch):
+        monkeypatch.delenv("THETADATA_TRANSPORT", raising=False)
+        td = ThetaDataResource()
+        mock_client = MagicMock()
+        mock_client.option_history_greeks_eod.return_value = _make_greeks_df([{"right": "PUT"}])
+        mock_client.option_history_open_interest.return_value = pd.DataFrame()
+        with patch("yats_pipelines.resources.thetadata._get_grpc_client", return_value=mock_client):
+            rows = td.get_historical_eod_by_date("AAPL", "20240920")
+        assert rows[0]["right"] == "P"
+
+    def test_implied_vol_mapped_to_iv(self, monkeypatch):
+        monkeypatch.delenv("THETADATA_TRANSPORT", raising=False)
+        td = ThetaDataResource()
+        mock_client = MagicMock()
+        mock_client.option_history_greeks_eod.return_value = _make_greeks_df([{"implied_vol": 0.33}])
+        mock_client.option_history_open_interest.return_value = pd.DataFrame()
+        with patch("yats_pipelines.resources.thetadata._get_grpc_client", return_value=mock_client):
+            rows = td.get_historical_eod_by_date("AAPL", "20240920")
+        assert rows[0]["iv"] == pytest.approx(0.33)
+
+    def test_expiration_stripped_to_yyyymmdd(self, monkeypatch):
+        monkeypatch.delenv("THETADATA_TRANSPORT", raising=False)
+        td = ThetaDataResource()
+        mock_client = MagicMock()
+        mock_client.option_history_greeks_eod.return_value = _make_greeks_df([{"expiration": "2024-09-20"}])
+        mock_client.option_history_open_interest.return_value = pd.DataFrame()
+        with patch("yats_pipelines.resources.thetadata._get_grpc_client", return_value=mock_client):
+            rows = td.get_historical_eod_by_date("AAPL", "20240920")
+        assert rows[0]["exp"] == "20240920"
+
+    def test_count_mapped_to_trade_count(self, monkeypatch):
+        monkeypatch.delenv("THETADATA_TRANSPORT", raising=False)
+        td = ThetaDataResource()
+        mock_client = MagicMock()
+        mock_client.option_history_greeks_eod.return_value = _make_greeks_df([{"count": 42}])
+        mock_client.option_history_open_interest.return_value = pd.DataFrame()
+        with patch("yats_pipelines.resources.thetadata._get_grpc_client", return_value=mock_client):
+            rows = td.get_historical_eod_by_date("AAPL", "20240920")
+        assert rows[0]["trade_count"] == 42
+
+    def test_oi_joined_by_expiration_strike_right(self, monkeypatch):
+        monkeypatch.delenv("THETADATA_TRANSPORT", raising=False)
+        td = ThetaDataResource()
+        mock_client = MagicMock()
+        mock_client.option_history_greeks_eod.return_value = _make_greeks_df([
+            {"expiration": "2024-09-20", "strike": 150.0, "right": "CALL"},
+        ])
+        mock_client.option_history_open_interest.return_value = _make_oi_df([
+            {"expiration": "2024-09-20", "strike": 150.0, "right": "CALL", "open_interest": 999},
+        ])
+        with patch("yats_pipelines.resources.thetadata._get_grpc_client", return_value=mock_client):
+            rows = td.get_historical_eod_by_date("AAPL", "20240920")
+        assert rows[0]["open_interest"] == 999
+
+    def test_oi_not_joined_when_key_mismatch(self, monkeypatch):
+        monkeypatch.delenv("THETADATA_TRANSPORT", raising=False)
+        td = ThetaDataResource()
+        mock_client = MagicMock()
+        mock_client.option_history_greeks_eod.return_value = _make_greeks_df([
+            {"expiration": "2024-09-20", "strike": 150.0, "right": "CALL"},
+        ])
+        mock_client.option_history_open_interest.return_value = _make_oi_df([
+            {"expiration": "2024-09-20", "strike": 155.0, "right": "CALL", "open_interest": 999},
+        ])
+        with patch("yats_pipelines.resources.thetadata._get_grpc_client", return_value=mock_client):
+            rows = td.get_historical_eod_by_date("AAPL", "20240920")
+        assert rows[0]["open_interest"] is None
+
+
 # ---------------------------------------------------------------------------
 
 _skip_if_no_theta = pytest.mark.skipif(
