@@ -11,6 +11,9 @@ import pandas as pd
 import pytest
 
 from yats_pipelines.jobs.ingest_thetadata import (
+    IngestThetadataConfig,
+    _fetch_eod_day,
+    _get_ingested_days,
     _ingested_after,
     _normalize_right,
     _parse_exp_to_datetime,

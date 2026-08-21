@@ -1,6 +1,8 @@
 """Dagster ingest job — ThetaData options chains and EOD data to QuestDB."""
 
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 import psycopg2
@@ -37,6 +39,8 @@ class IngestThetadataConfig(Config):
     eod_by_date: bool = False
     eod_max_dte: int = 0        # drop contracts with more days-to-expiry (0 = off)
     eod_strike_range: int = 0   # at most 2n+1 strikes around spot (0 = off)
+    # PRO plan allows 8 concurrent gRPC requests; override via THETADATA_MAX_CONCURRENT
+    max_concurrent: int = int(os.environ.get("THETADATA_MAX_CONCURRENT", "8"))
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +155,51 @@ def _run_already_written(conn, run_id: str, table: str) -> bool:
         return False
 
 
+def _get_ingested_days(
+    conn, underlyings: list[str], start_ymd: str, end_ymd: str
+) -> set[tuple[str, str]]:
+    """Return set of (underlying, 'YYYYMMDD') already present in raw_thetadata_options_eod.
+
+    Used for resume: skip (symbol, day) pairs that have already been fetched.
+    Returns empty set on any query failure so the caller falls back to full fetch.
+    """
+    if not underlyings:
+        return set()
+    result: set[tuple[str, str]] = set()
+    try:
+        start_ts = f"{start_ymd[:4]}-{start_ymd[4:6]}-{start_ymd[6:8]}T00:00:00Z"
+        end_ts = f"{end_ymd[:4]}-{end_ymd[4:6]}-{end_ymd[6:8]}T23:59:59Z"
+        safe = [u.replace("'", "''") for u in underlyings]
+        in_clause = ",".join(f"'{u}'" for u in safe)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                f"SELECT underlying, quote_date "
+                f"FROM raw_thetadata_options_eod "
+                f"WHERE underlying IN ({in_clause}) "
+                f"AND quote_date >= '{start_ts}' AND quote_date <= '{end_ts}' "
+                f"SAMPLE BY 1d FILL(NONE)"
+            )
+            for row in cur.fetchall():
+                sym, ts = row[0], row[1]
+                if sym and ts is not None and isinstance(ts, datetime):
+                    result.add((sym, ts.strftime("%Y%m%d")))
+        finally:
+            cur.close()
+    except Exception:
+        logger.debug("_get_ingested_days: query failed, resume disabled", exc_info=True)
+    return result
+
+
+def _fetch_eod_day(
+    td: ThetaDataResource, underlying: str, date_str: str, max_dte: int, strike_range: int
+) -> list[dict]:
+    """Fetch EOD data for one (underlying, day). Runs in a worker thread."""
+    return td.get_historical_eod_by_date(
+        underlying, date_str, max_dte=max_dte, strike_range=strike_range
+    )
+
+
 # ---------------------------------------------------------------------------
 # Infrastructure helpers
 # ---------------------------------------------------------------------------
@@ -201,6 +250,7 @@ def fetch_thetadata_options(
         start_ymd = config.start_date.replace("-", "") if config.start_date else ""
         end_ymd = config.end_date.replace("-", "") if config.end_date else ""
 
+        # --- Chain snapshots ---
         for underlying in config.underlyings:
             context.log.info("Fetching expirations for %s", underlying)
             try:
@@ -235,40 +285,98 @@ def fetch_thetadata_options(
                 underlying, chain_count, len(relevant_exps),
             )
 
-            # EOD historical backfill: use ALL expirations active during [start_ymd, end_ymd].
-            # relevant_exps only contains upcoming expirations — historical expirations (which
-            # have the actual EOD data) are filtered out by the today_str <= e cutoff. The EOD
-            # loop must use its own expiration set derived from start_ymd.
-            if start_ymd and end_ymd and config.eod_by_date:
-                # Bulk by-date mode: one expiration=* request per weekday.
-                # Non-trading days return 472/empty and are skipped naturally.
-                eod_count = 0
-                day = datetime.strptime(start_ymd, "%Y%m%d")
-                end_day = datetime.strptime(end_ymd, "%Y%m%d")
-                n_days = 0
-                while day <= end_day:
-                    if day.weekday() < 5:  # skip Sat/Sun
-                        n_days += 1
-                        date_str = day.strftime("%Y%m%d")
+        # --- EOD historical backfill ---
+        if start_ymd and end_ymd and config.eod_by_date:
+            # Concurrent by-date mode: N-worker day-queue over (symbol, day).
+            # RESUME: query which (symbol, day) pairs already exist in raw_thetadata_options_eod
+            # and skip them. Saves significant time on incremental backfills.
+            already_ingested: set[tuple[str, str]] = set()
+            conn_check = _pg_conn(QuestDBResource())
+            try:
+                already_ingested = _get_ingested_days(
+                    conn_check, config.underlyings, start_ymd, end_ymd
+                )
+            finally:
+                conn_check.close()
+
+            if already_ingested:
+                context.log.info(
+                    "Resume: skipping %d already-ingested (symbol, day) pairs",
+                    len(already_ingested),
+                )
+
+            # Build list of weekdays in range
+            all_weekdays: list[str] = []
+            day = datetime.strptime(start_ymd, "%Y%m%d")
+            end_day = datetime.strptime(end_ymd, "%Y%m%d")
+            while day <= end_day:
+                if day.weekday() < 5:
+                    all_weekdays.append(day.strftime("%Y%m%d"))
+                day += timedelta(days=1)
+            n_weekdays = len(all_weekdays)
+
+            for underlying in config.underlyings:
+                days_to_fetch = [
+                    d for d in all_weekdays
+                    if (underlying, d) not in already_ingested
+                ]
+                skipped = n_weekdays - len(days_to_fetch)
+                context.log.info(
+                    "%s: EOD by-date — %d days to fetch, %d skipped (resume)",
+                    underlying, len(days_to_fetch), skipped,
+                )
+
+                record_start(
+                    f"ingest_thetadata.eod.{underlying}",
+                    context.run_id,
+                    f"backfill {start_ymd}..{end_ymd} n_days={len(days_to_fetch)}",
+                )
+                sym_count = 0
+                with ThreadPoolExecutor(max_workers=config.max_concurrent) as executor:
+                    futures = {
+                        executor.submit(
+                            _fetch_eod_day, td, underlying, d,
+                            config.eod_max_dte, config.eod_strike_range,
+                        ): d
+                        for d in days_to_fetch
+                    }
+                    for future in as_completed(futures):
+                        date_str = futures[future]
                         try:
-                            raw_eod = td.get_historical_eod_by_date(
-                                underlying, date_str,
-                                max_dte=config.eod_max_dte,
-                                strike_range=config.eod_strike_range,
-                            )
-                            eod_rows.extend(td.normalize_eod(raw_eod, now, ""))
-                            eod_count += len(raw_eod)
+                            rows = future.result()
+                            eod_rows.extend(td.normalize_eod(rows, now, ""))
+                            sym_count += len(rows)
                         except Exception as exc:
                             context.log.warning(
                                 "EOD by-date fetch failed for %s %s: %s",
                                 underlying, date_str, exc,
                             )
-                    day += timedelta(days=1)
-                context.log.info(
-                    "%s: EOD by-date backfill fetched %d rows across %d weekdays (%s to %s)",
-                    underlying, eod_count, n_days, start_ymd, end_ymd,
+
+                record_finish(
+                    f"ingest_thetadata.eod.{underlying}",
+                    context.run_id,
+                    "success",
+                    rows_written=sym_count,
                 )
-            elif start_ymd and end_ymd:
+                context.log.info(
+                    "%s: EOD by-date fetched %d rows from %d days (%s to %s)",
+                    underlying, sym_count, len(days_to_fetch), start_ymd, end_ymd,
+                )
+
+        elif start_ymd and end_ymd:
+            # Per-expiry path (unchanged)
+            for underlying in config.underlyings:
+                # EOD historical backfill: use ALL expirations active during [start_ymd, end_ymd].
+                # relevant_exps only contains upcoming expirations — historical expirations (which
+                # have the actual EOD data) are filtered out by the today_str <= e cutoff. The EOD
+                # loop must use its own expiration set derived from start_ymd.
+                try:
+                    exps = td.list_expirations(underlying)
+                except Exception as exc:
+                    context.log.warning(
+                        "Failed to list expirations for %s (EOD path): %s", underlying, exc
+                    )
+                    continue
                 eod_exps = [e for e in exps if e >= start_ymd]
                 eod_count = 0
                 for exp in eod_exps:
@@ -292,13 +400,13 @@ def fetch_thetadata_options(
                         underlying, eod_count, len(eod_exps), start_ymd, end_ymd,
                     )
 
-            context.log.info(
-                "Fetched %d chain rows, %d EOD rows for %d underlyings",
-                len(chain_rows),
-                len(eod_rows),
-                len(config.underlyings),
-            )
-            return {"chain_rows": chain_rows, "eod_rows": eod_rows}
+        context.log.info(
+            "Fetched %d chain rows, %d EOD rows for %d underlyings",
+            len(chain_rows),
+            len(eod_rows),
+            len(config.underlyings),
+        )
+        return {"chain_rows": chain_rows, "eod_rows": eod_rows}
     except Exception as exc:
         record_finish("ingest_thetadata", context.run_id, "failed", failure_cause=str(exc)[:200])
         raise
