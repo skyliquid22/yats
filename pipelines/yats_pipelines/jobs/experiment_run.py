@@ -268,6 +268,16 @@ def evaluate_experiment(
     symbols = sorted(spec_data.get("symbols", []))
     n_symbols = len(symbols)
 
+    execution_lag = spec.execution_lag_days  # 1=honest fill-next-bar, 0=same-bar (infeasible)
+    if execution_lag == 0:
+        import warnings
+        warnings.warn(
+            "execution_lag_days=0: same-bar EOD fill is infeasible for EOD-computed features. "
+            "Only use lag=0 to reproduce old runs.",
+            UserWarning,
+            stacklevel=2,
+        )
+
     if train_result.get("trained") and train_result.get("checkpoint_path"):
         # Roll out trained RL policy on the evaluation partition
         checkpoint = Path(train_result["checkpoint_path"])
@@ -289,14 +299,20 @@ def evaluate_experiment(
                 regime_feature_names=regime_cols or None,
             )
 
-        # Build DataFrames
-        dates = [row.get("timestamp", f"t{i}") for i, row in enumerate(eval_data[1:])]  # Skip first row (reset)
-        weights_df = pd.DataFrame(weights_list, index=dates[:len(weights_list)], columns=symbols)
+        # Build DataFrames — apply execution lag
+        # lag=0 (old): weight from obs(row_i) indexed at t_{i+1}, earns close(t_i)->close(t_{i+1})
+        # lag=1 (honest): weight from obs(row_i) indexed at t_{i+2}, earns close(t_{i+1})->close(t_{i+2})
+        skip = 1 + execution_lag
+        dates = [row.get("timestamp", f"t{i}") for i, row in enumerate(eval_data[skip:])]
+        n = min(len(weights_list), len(dates))
+        weights_df = pd.DataFrame(weights_list[:n], index=dates[:n], columns=symbols)
     else:
         # Non-RL policy: run real rollout (raises for unsupported types)
         weights_list = _rollout_non_rl_policy(policy, eval_data, symbols, spec_data)
-        dates = [row.get("timestamp", f"t{i}") for i, row in enumerate(eval_data[1:])]
-        weights_df = pd.DataFrame(weights_list, index=dates[:len(weights_list)], columns=symbols)
+        skip = 1 + execution_lag
+        dates = [row.get("timestamp", f"t{i}") for i, row in enumerate(eval_data[skip:])]
+        n = min(len(weights_list), len(dates))
+        weights_df = pd.DataFrame(weights_list[:n], index=dates[:n], columns=symbols)
 
     # Build returns DataFrame from eval partition
     returns_df = _build_returns_df(eval_data, symbols)

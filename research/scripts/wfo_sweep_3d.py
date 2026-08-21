@@ -151,8 +151,11 @@ def main() -> int:
                 _spec, test_data, Path(checkpoint_path),
                 observation_columns=obs_cols,
                 regime_feature_names=regime_cols or None)
-            dates = [row.get("timestamp", f"t{k}") for k, row in enumerate(test_data[1:])]
-            weights_df = pd.DataFrame(weights_list, index=dates[:len(weights_list)],
+            # lag=1 (honest): weight from obs(row_i) fills at close(i+1), earns close(i+1)->close(i+2)
+            skip = 1 + _spec.execution_lag_days
+            dates = [row.get("timestamp", f"t{k}") for k, row in enumerate(test_data[skip:])]
+            n = min(len(weights_list), len(dates))
+            weights_df = pd.DataFrame(weights_list[:n], index=dates[:n],
                                       columns=sorted(SYMBOLS))
             returns_df = _build_returns_df(test_data, sorted(SYMBOLS))
             common = weights_df.index.intersection(returns_df.index)

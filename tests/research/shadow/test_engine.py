@@ -615,3 +615,83 @@ class TestObservationShapeParity:
             f"Likely cause: regime features not included in shadow obs."
         )
 
+
+# ---------------------------------------------------------------------------
+# Execution timing: prev-decision / curr-fill test
+# ---------------------------------------------------------------------------
+
+class TestShadowExecutionTiming:
+    """ShadowEngine must decide from prev_snap obs and fill at curr_snap close.
+
+    We use a RecordingPolicy that logs which snapshot's obs was passed at each step.
+    The obs differs between prev_snap and curr_snap because prices rise monotonically
+    (close feature distinct per snapshot). We verify the policy always receives the
+    PREVIOUS snapshot's close, not the current one.
+    """
+
+    def _make_monotone_snapshots(self, n: int = 5) -> list[Snapshot]:
+        """Snapshots with strictly increasing closes so we can distinguish them."""
+        snaps = []
+        for i in range(n):
+            panel = {
+                "AAPL": {"close": 100.0 + i * 10.0, "ret_1d": 0.01},
+                "MSFT": {"close": 200.0 + i * 10.0, "ret_1d": 0.01},
+            }
+            snaps.append(Snapshot(
+                as_of=datetime(2023, 1, 3 + i),
+                symbols=("AAPL", "MSFT"),
+                panel=panel,
+                regime_features=(),
+                regime_feature_names=(),
+                observation_columns=("close",),
+            ))
+        return snaps
+
+    def test_policy_receives_prev_snap_obs_not_curr(self, tmp_path: Path):
+        """Policy obs[0] must equal prev_snap close, not curr_snap close."""
+        snapshots = self._make_monotone_snapshots(n=4)
+        spec = _make_spec()
+        config = ShadowRunConfig(
+            experiment_id="timing_test",
+            run_id="r1",
+            output_dir=tmp_path / "timing_test" / "r1",
+        )
+
+        recorded_obs: list[np.ndarray] = []
+
+        class RecordingPolicy:
+            def act(self, obs: np.ndarray, context: Any = None) -> np.ndarray:
+                recorded_obs.append(obs.copy())
+                return np.array([0.5, 0.5])
+
+        engine = ShadowEngine(spec, RecordingPolicy(), snapshots, config)
+        engine.run()
+
+        assert len(recorded_obs) >= 1, "Policy was never called"
+
+        # Step 1: prev_snap=snapshots[0] (AAPL close=100), curr_snap=snapshots[1]
+        # obs[0] = AAPL close from prev_snap = 100.0
+        # If we used curr_snap (wrong), it would be 110.0
+        first_obs = recorded_obs[0]
+        aapl_close_in_obs = first_obs[0]  # first feature = AAPL close (symbol-major, sorted)
+        assert aapl_close_in_obs == pytest.approx(100.0), (
+            f"Expected obs to use prev_snap AAPL close=100.0, got {aapl_close_in_obs}. "
+            "Policy must receive prev_snap observation (feasible timing for EOD features)."
+        )
+
+    def test_portfolio_value_consistent_after_prev_snap_decision(self, tmp_path: Path):
+        """End-to-end sanity: shadow run completes without error under new timing."""
+        snapshots = self._make_monotone_snapshots(n=5)
+        spec = _make_spec()
+        config = ShadowRunConfig(
+            experiment_id="timing_sanity",
+            run_id="r1",
+            output_dir=tmp_path / "timing_sanity" / "r1",
+        )
+        policy = FakePolicy(len(spec.symbols))
+        engine = ShadowEngine(spec, policy, snapshots, config)
+        summary = engine.run()
+
+        assert summary["steps_executed"] > 0
+        assert summary["final_value"] > 0
+

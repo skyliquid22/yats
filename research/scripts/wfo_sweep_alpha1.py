@@ -92,6 +92,9 @@ WFO_CFG = WFOConfig(train_window=250, label_horizon=21, purge_buffer=63, n_perio
 # Mean across 8 matched-geometry configs; used as reference only, not for DSR.
 PPO_CHAMPION_SHARPE = 2.17
 
+# Execution lag: 1=fill next bar (honest for EOD features), 0=old same-bar fill
+EXECUTION_LAG = 1
+
 
 def mark(msg: str) -> None:
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -225,6 +228,14 @@ def make_eval_fn(panel: pd.DataFrame, dates: list):
             scores = grp["alpha_score"]
             weights_by_date[dt] = rank_weighted_portfolio(scores, max_symbol_weight=0.30)
             returns_by_date[dt] = grp["ret_1d_realized"]
+
+        # Apply execution lag: decision from close(t-1) fills at close(t), earns ret_1d_realized[t]
+        if EXECUTION_LAG > 0:
+            sorted_dts = sorted(weights_by_date.keys())
+            weights_by_date = {
+                sorted_dts[i + 1]: weights_by_date[sorted_dts[i]]
+                for i in range(len(sorted_dts) - 1)
+            }
 
         port_returns = portfolio_returns_from_weights(weights_by_date, returns_by_date, SYMBOLS)
         if len(port_returns) < 2:

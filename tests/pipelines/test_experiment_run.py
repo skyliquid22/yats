@@ -366,6 +366,89 @@ class TestRolloutNonRlPolicy:
             assert abs(w.sum() - 1.0) < 1e-9, f"Weights must sum to 1, got {w.sum()}"
 
 
+# ---------------------------------------------------------------------------
+# Execution lag alignment tests
+# ---------------------------------------------------------------------------
+
+class TestExecutionLagAlignment:
+    """Verify that execution_lag_days shifts weight/return alignment correctly.
+
+    Core invariant:
+      lag=0 (old): weight from obs(row_i) earns return close(t_i)->close(t_{i+1})
+      lag=1 (honest): weight from obs(row_i) earns return close(t_{i+1})->close(t_{i+2})
+
+    We use equal_weight policy (deterministic) and a strictly monotone price series
+    so returns are always positive. Under lag=1, the portfolio loses one period's
+    observation relative to lag=0, producing shorter (N-2 vs N-1) return series.
+    """
+
+    def _make_monotone_data(self, n: int = 6) -> list[dict]:
+        """N rows with monotone prices: close[i] = 100 + i for AAPL, 200 + 2i for MSFT."""
+        return [
+            {
+                "timestamp": f"2024-01-{i+1:02d}",
+                "close": {"AAPL": 100.0 + i, "MSFT": 200.0 + 2 * i},
+            }
+            for i in range(n)
+        ]
+
+    def _run_lag(self, lag: int, n: int = 6) -> dict:
+        """Run equal_weight policy with given lag, return debug info."""
+        data = self._make_monotone_data(n)
+        symbols = ["AAPL", "MSFT"]
+
+        weights_list = _rollout_non_rl_policy("equal_weight", data, symbols, {})
+        returns_df = _build_returns_df(data, symbols)
+
+        skip = 1 + lag
+        dates = [row.get("timestamp", f"t{i}") for i, row in enumerate(data[skip:])]
+        n = min(len(weights_list), len(dates))
+        weights_df = pd.DataFrame(weights_list[:n], index=dates[:n], columns=symbols)
+
+        common_idx = weights_df.index.intersection(returns_df.index)
+        weights_df = weights_df.loc[common_idx]
+        returns_df = returns_df.loc[common_idx]
+        port = (weights_df * returns_df).sum(axis=1)
+
+        return {
+            "weight_dates": list(weights_df.index),
+            "return_dates": list(returns_df.index),
+            "portfolio_returns": list(port.values),
+            "n_periods": len(port),
+        }
+
+    def test_lag0_weight_earns_contemporaneous_return(self):
+        """lag=0: weight indexed at t_{i+1} × return(t_i→t_{i+1}) — same-bar alignment."""
+        result = self._run_lag(lag=0, n=6)
+        # With 6 rows, lag=0 gives 5 weight/return pairs (rows 1..5)
+        assert result["n_periods"] == 5
+        # First weight/return pair uses date 2024-01-02 (row 1)
+        assert result["weight_dates"][0] == "2024-01-02"
+        assert result["return_dates"][0] == "2024-01-02"
+
+    def test_lag1_weight_earns_next_bar_return(self):
+        """lag=1: weight indexed at t_{i+2} × return(t_{i+1}→t_{i+2}) — next-bar fill."""
+        result = self._run_lag(lag=1, n=6)
+        # With 6 rows, lag=1 gives 4 weight/return pairs (rows 2..5)
+        assert result["n_periods"] == 4
+        # First weight/return pair uses date 2024-01-03 (row 2)
+        assert result["weight_dates"][0] == "2024-01-03"
+        assert result["return_dates"][0] == "2024-01-03"
+
+    def test_lag1_produces_fewer_periods_than_lag0(self):
+        """lag=1 loses one period vs lag=0 (trimmed by the extra shift)."""
+        r0 = self._run_lag(lag=0, n=8)
+        r1 = self._run_lag(lag=1, n=8)
+        assert r1["n_periods"] == r0["n_periods"] - 1
+
+    def test_lag1_portfolio_returns_are_positive_on_monotone_prices(self):
+        """On monotone rising prices equal-weight portfolio returns must all be positive."""
+        result = self._run_lag(lag=1, n=8)
+        assert all(r > 0 for r in result["portfolio_returns"]), (
+            f"expected all positive returns on rising prices, got {result['portfolio_returns']}"
+        )
+
+
 class TestApplyEvaluationSplit:
     def _make_spec(self, **overrides):
         from research.experiments.spec import EvaluationSplitConfig

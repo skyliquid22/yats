@@ -241,7 +241,7 @@ class ExperimentSpec:
     cost_config: CostConfig
     seed: int
 
-    # Optional fields (11)
+    # Optional fields (12)
     evaluation_split: EvaluationSplitConfig | None = None
     wfo_config: WFOConfig | None = None
     risk_config: RiskConfig = field(default_factory=RiskConfig)
@@ -253,6 +253,8 @@ class ExperimentSpec:
     controller_config: Mapping[str, Any] | None = None
     allocator_by_mode: Mapping[str, Mapping[str, Any]] | None = None
     portfolio_risk: PortfolioRiskConfig | None = None
+    # Execution lag: 1=fill next bar (honest for EOD features), 0=same-bar fill (old/infeasible)
+    execution_lag_days: int = 1
 
     # Frozen hashes (6, set at creation time)
     regime_thresholds_hash: str = ""
@@ -337,6 +339,12 @@ class ExperimentSpec:
         if self.regime_labeling is not None and self.regime_labeling not in ("v1", "v2"):
             raise ValueError(
                 f"regime_labeling must be 'v1' or 'v2', got '{self.regime_labeling}'"
+            )
+
+        # --- Execution lag validation ---
+        if self.execution_lag_days not in (0, 1):
+            raise ValueError(
+                f"execution_lag_days must be 0 or 1, got {self.execution_lag_days}"
             )
 
     # ------------------------------------------------------------------

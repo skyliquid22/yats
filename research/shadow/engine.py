@@ -244,12 +244,18 @@ class ShadowEngine:
         prev_snap: Snapshot,
         curr_snap: Snapshot,
     ) -> None:
-        """Execute a single shadow step (direct rebalance)."""
-        # 1. Build observation from current snapshot
-        obs = self._build_observation(curr_snap)
+        """Execute a single shadow step (direct rebalance).
+
+        Execution timing (feasible for EOD features):
+          - Decision: observe prev_snap (features available after close of t-1)
+          - Fill: curr_snap close price (close of t)
+          - Return earned: close(t) → close(t+1) (next step's portfolio.weights × next returns)
+        """
+        # 1. Build observation from PREVIOUS snapshot (decide on prev-bar EOD features)
+        obs = self._build_observation(prev_snap)
 
         # 2. Policy produces target weights
-        context = self._build_policy_context(curr_snap)
+        context = self._build_policy_context(prev_snap)
         raw_weights = self._policy.act(obs, context)
 
         # 3. Project weights through risk constraints (using effective config)
@@ -336,14 +342,19 @@ class ShadowEngine:
     ) -> None:
         """Execute a single shadow step with sim broker (PRD F.2 execution_mode=sim).
 
+        Execution timing (feasible for EOD features):
+          - Decision: observe prev_snap (features available after close of t-1)
+          - Fill: curr_snap close + slippage (close of t)
+          - Return earned: close(t) → close(t+1)
+
         Flow: policy → project_weights → compile orders → risk check →
               SimBrokerAdapter fill → update portfolio.
         """
         assert self._sim_broker is not None
 
-        # 1. Build observation and get target weights
-        obs = self._build_observation(curr_snap)
-        context = self._build_policy_context(curr_snap)
+        # 1. Build observation and get target weights (use PREVIOUS snapshot for feasible timing)
+        obs = self._build_observation(prev_snap)
+        context = self._build_policy_context(prev_snap)
         raw_weights = self._policy.act(obs, context)
 
         # 2. Project weights through risk constraints
