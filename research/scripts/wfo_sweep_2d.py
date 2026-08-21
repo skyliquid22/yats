@@ -14,6 +14,7 @@ variance (compute_sweep_dsr), rank-decay across folds.
 All progress lines carry the [2D] prefix for the monitor.
 """
 import json
+import os
 import sys
 import time
 import logging
@@ -52,7 +53,8 @@ from yats_pipelines.resources.questdb import QuestDBResource
 
 SYMBOLS = ["AAPL", "AMZN", "GOOGL", "JPM", "META", "MSFT", "NVDA", "QQQ", "SPY", "TSLA"]
 FEATURE_SET = "sweep_v1"
-START, END = "2024-07-01", "2026-07-02"
+START = os.environ.get("YATS_SWEEP_START", "2024-07-01")
+END = os.environ.get("YATS_SWEEP_END", "2026-07-02")
 OUT_DIR = RIG / ".yats_data" / "wfo_sweeps" / "sweep_2d_full_v1"
 
 GRID = []

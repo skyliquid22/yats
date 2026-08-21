@@ -24,6 +24,7 @@ All progress lines carry the [ALPHA1] prefix for the monitor.
 from __future__ import annotations
 
 import json
+import os
 import logging
 import sys
 import time
@@ -53,7 +54,8 @@ from research.experiments.spec import WFOConfig
 from yats_pipelines.resources.questdb import QuestDBResource
 
 SYMBOLS = ["AAPL", "AMZN", "GOOGL", "JPM", "META", "MSFT", "NVDA", "QQQ", "SPY", "TSLA"]
-START, END = "2024-07-01", "2026-07-02"
+START = os.environ.get("YATS_SWEEP_START", "2024-07-01")
+END = os.environ.get("YATS_SWEEP_END", "2026-07-02")
 FEATURE_SET = "sweep_v1"
 OUT_DIR = RIG / ".yats_data" / "wfo_sweeps" / "sweep_alpha1"
 
