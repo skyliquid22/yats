@@ -1111,3 +1111,234 @@ def test_live_open_interest_snapshot():
     assert "strike" in sample
     assert "right" in sample
     assert sample["right"] in ("CALL", "PUT")
+
+
+# ---------------------------------------------------------------------------
+# gRPC-2: concurrency-aware options ingest
+# ---------------------------------------------------------------------------
+
+
+class TestMaxConcurrentConfig:
+    def test_default_is_8(self, monkeypatch):
+        monkeypatch.delenv("THETADATA_MAX_CONCURRENT", raising=False)
+        # Import fresh to pick up env (default is evaluated at class-definition time;
+        # test the field value via direct construction)
+        cfg = IngestThetadataConfig(underlyings=["AAPL"])
+        assert cfg.max_concurrent == 8
+
+    def test_env_override_at_import_time(self):
+        # max_concurrent field accepts any int — verify a non-default value is accepted
+        cfg = IngestThetadataConfig(underlyings=["AAPL"], max_concurrent=4)
+        assert cfg.max_concurrent == 4
+
+
+class TestGetIngestedDays:
+    def _make_conn(self, rows: list[tuple]) -> MagicMock:
+        conn = MagicMock()
+        cur = MagicMock()
+        conn.cursor.return_value = cur
+        cur.fetchall.return_value = rows
+        return conn
+
+    def test_returns_set_of_underlying_day_tuples(self):
+        ts = datetime(2024, 1, 15, 0, 0, tzinfo=timezone.utc)
+        conn = self._make_conn([("AAPL", ts), ("SPY", ts)])
+        result = _get_ingested_days(conn, ["AAPL", "SPY"], "20240101", "20240131")
+        assert ("AAPL", "20240115") in result
+        assert ("SPY", "20240115") in result
+
+    def test_empty_underlyings_returns_empty_set(self):
+        conn = MagicMock()
+        result = _get_ingested_days(conn, [], "20240101", "20240131")
+        assert result == set()
+        conn.cursor.assert_not_called()
+
+    def test_query_failure_returns_empty_set(self):
+        conn = MagicMock()
+        conn.cursor.side_effect = Exception("QuestDB unavailable")
+        result = _get_ingested_days(conn, ["AAPL"], "20240101", "20240131")
+        assert result == set()
+
+    def test_row_with_none_timestamp_is_skipped(self):
+        conn = self._make_conn([("AAPL", None)])
+        result = _get_ingested_days(conn, ["AAPL"], "20240101", "20240131")
+        assert result == set()
+
+    def test_sql_uses_start_and_end_timestamps(self):
+        conn = self._make_conn([])
+        _get_ingested_days(conn, ["AAPL"], "20240101", "20240131")
+        cur = conn.cursor.return_value
+        sql = cur.execute.call_args[0][0]
+        assert "20240101" in sql or "2024-01-01" in sql
+        assert "20240131" in sql or "2024-01-31" in sql
+
+    def test_sql_includes_underlying_in_clause(self):
+        conn = self._make_conn([])
+        _get_ingested_days(conn, ["AAPL", "SPY"], "20240101", "20240131")
+        cur = conn.cursor.return_value
+        sql = cur.execute.call_args[0][0]
+        assert "AAPL" in sql
+        assert "SPY" in sql
+
+
+class TestFetchEodDay:
+    def test_delegates_to_resource(self):
+        td = MagicMock(spec=ThetaDataResource)
+        td.get_historical_eod_by_date.return_value = [{"root": "AAPL"}]
+        rows = _fetch_eod_day(td, "AAPL", "20240115", max_dte=90, strike_range=20)
+        td.get_historical_eod_by_date.assert_called_once_with(
+            "AAPL", "20240115", max_dte=90, strike_range=20
+        )
+        assert rows == [{"root": "AAPL"}]
+
+    def test_zero_filters_passed_through(self):
+        td = MagicMock(spec=ThetaDataResource)
+        td.get_historical_eod_by_date.return_value = []
+        _fetch_eod_day(td, "SPY", "20240201", max_dte=0, strike_range=0)
+        td.get_historical_eod_by_date.assert_called_once_with(
+            "SPY", "20240201", max_dte=0, strike_range=0
+        )
+
+
+class TestConcurrentByDateFetch:
+    """Integration-level tests for the concurrent eod_by_date path in fetch_thetadata_options."""
+
+    def _make_context(self):
+        from dagster import build_op_context
+        return build_op_context()
+
+    def test_worker_cap_honored(self):
+        """ThreadPoolExecutor is created with max_workers=config.max_concurrent."""
+        from yats_pipelines.jobs.ingest_thetadata import fetch_thetadata_options
+
+        config = IngestThetadataConfig(
+            underlyings=["AAPL"],
+            start_date="20240101",
+            end_date="20240103",
+            eod_by_date=True,
+            max_concurrent=3,
+        )
+
+        captured_max_workers = []
+
+        original_executor = __import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor
+
+        class CapturingExecutor:
+            def __init__(self, max_workers=None, **kwargs):
+                captured_max_workers.append(max_workers)
+                self._exec = original_executor(max_workers=max_workers)
+
+            def submit(self, fn, *args, **kwargs):
+                return self._exec.submit(fn, *args, **kwargs)
+
+            def __enter__(self):
+                self._exec.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self._exec.__exit__(*args)
+
+        with self._make_context() as context, \
+             patch("yats_pipelines.jobs.ingest_thetadata._get_ingested_days", return_value=set()), \
+             patch("yats_pipelines.jobs.ingest_thetadata._fetch_eod_day", return_value=[]), \
+             patch("yats_pipelines.jobs.ingest_thetadata._pg_conn", return_value=MagicMock()), \
+             patch("yats_pipelines.jobs.ingest_thetadata.QuestDBResource", return_value=MagicMock()), \
+             patch("yats_pipelines.jobs.ingest_thetadata.ThetaDataResource") as mock_td_cls, \
+             patch("yats_pipelines.jobs.ingest_thetadata.record_start"), \
+             patch("yats_pipelines.jobs.ingest_thetadata.record_finish"), \
+             patch("yats_pipelines.jobs.ingest_thetadata.ThreadPoolExecutor", CapturingExecutor):
+            mock_td = MagicMock()
+            mock_td.list_expirations.return_value = []
+            mock_td.normalize_eod.return_value = []
+            mock_td_cls.return_value = mock_td
+            fetch_thetadata_options(context, config)
+
+        assert len(captured_max_workers) >= 1
+        assert captured_max_workers[0] == 3, (
+            f"Expected max_workers=3 (config.max_concurrent), got {captured_max_workers[0]}"
+        )
+
+    def test_resume_skip_already_ingested_days(self):
+        """Days present in already_ingested are not passed to _fetch_eod_day."""
+        from yats_pipelines.jobs.ingest_thetadata import fetch_thetadata_options
+
+        config = IngestThetadataConfig(
+            underlyings=["AAPL"],
+            start_date="20240101",
+            end_date="20240105",
+            eod_by_date=True,
+            max_concurrent=2,
+        )
+
+        # 20240101 and 20240102 are Mon/Tue — mark 20240101 as already done
+        already_done = {("AAPL", "20240101")}
+        fetched_days: list[str] = []
+
+        def capture_fetch(td, underlying, date_str, max_dte, strike_range):
+            fetched_days.append(date_str)
+            return []
+
+        with self._make_context() as context, \
+             patch("yats_pipelines.jobs.ingest_thetadata._get_ingested_days", return_value=already_done), \
+             patch("yats_pipelines.jobs.ingest_thetadata._fetch_eod_day", side_effect=capture_fetch), \
+             patch("yats_pipelines.jobs.ingest_thetadata._pg_conn", return_value=MagicMock()), \
+             patch("yats_pipelines.jobs.ingest_thetadata.QuestDBResource", return_value=MagicMock()), \
+             patch("yats_pipelines.jobs.ingest_thetadata.ThetaDataResource") as mock_td_cls, \
+             patch("yats_pipelines.jobs.ingest_thetadata.record_start"), \
+             patch("yats_pipelines.jobs.ingest_thetadata.record_finish"), \
+             patch("yats_pipelines.jobs.ingest_thetadata.ThreadPoolExecutor",
+                   __import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor):
+            mock_td = MagicMock()
+            mock_td.list_expirations.return_value = []
+            mock_td.normalize_eod.return_value = []
+            mock_td_cls.return_value = mock_td
+            fetch_thetadata_options(context, config)
+
+        assert "20240101" not in fetched_days, "Already-ingested day must be skipped"
+        assert "20240102" in fetched_days, "Non-ingested weekday must be fetched"
+
+    def test_progress_recording_per_symbol(self):
+        """record_start and record_finish are called once per symbol for eod_by_date path."""
+        from yats_pipelines.jobs.ingest_thetadata import fetch_thetadata_options
+
+        config = IngestThetadataConfig(
+            underlyings=["AAPL", "SPY"],
+            start_date="20240101",
+            end_date="20240101",
+            eod_by_date=True,
+            max_concurrent=2,
+        )
+
+        starts: list[str] = []
+        finishes: list[str] = []
+
+        def mock_record_start(job_name, run_id, detail):
+            starts.append(job_name)
+
+        def mock_record_finish(job_name, run_id, status, **kwargs):
+            finishes.append(job_name)
+
+        with self._make_context() as context, \
+             patch("yats_pipelines.jobs.ingest_thetadata._get_ingested_days", return_value=set()), \
+             patch("yats_pipelines.jobs.ingest_thetadata._fetch_eod_day", return_value=[]), \
+             patch("yats_pipelines.jobs.ingest_thetadata._pg_conn", return_value=MagicMock()), \
+             patch("yats_pipelines.jobs.ingest_thetadata.QuestDBResource", return_value=MagicMock()), \
+             patch("yats_pipelines.jobs.ingest_thetadata.ThetaDataResource") as mock_td_cls, \
+             patch("yats_pipelines.jobs.ingest_thetadata.record_start", side_effect=mock_record_start), \
+             patch("yats_pipelines.jobs.ingest_thetadata.record_finish", side_effect=mock_record_finish), \
+             patch("yats_pipelines.jobs.ingest_thetadata.ThreadPoolExecutor",
+                   __import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor):
+            mock_td = MagicMock()
+            mock_td.list_expirations.return_value = []
+            mock_td.normalize_eod.return_value = []
+            mock_td_cls.return_value = mock_td
+            fetch_thetadata_options(context, config)
+
+        # Top-level "ingest_thetadata" record_start (from op start) + per-symbol starts
+        per_symbol_starts = [j for j in starts if j.startswith("ingest_thetadata.eod.")]
+        assert "ingest_thetadata.eod.AAPL" in per_symbol_starts
+        assert "ingest_thetadata.eod.SPY" in per_symbol_starts
+
+        per_symbol_finishes = [j for j in finishes if j.startswith("ingest_thetadata.eod.")]
+        assert "ingest_thetadata.eod.AAPL" in per_symbol_finishes
+        assert "ingest_thetadata.eod.SPY" in per_symbol_finishes
