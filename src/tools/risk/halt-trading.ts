@@ -32,7 +32,8 @@ export const riskHaltTrading: ToolDef = {
     const qdb = new QuestDBClient();
     try {
       // Verify experiment exists by checking for any related data
-      const checkSql = `SELECT experiment_id FROM portfolio_nav
+      // Schema reference: create_tables.py (PORTFOLIO_STATE)
+      const checkSql = `SELECT experiment_id FROM portfolio_state
                         WHERE experiment_id = $1
                         LIMIT 1`;
       const checkResult = await qdb.query(checkSql, [experimentId]);

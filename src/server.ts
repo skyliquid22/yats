@@ -5,22 +5,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { tools } from "./tools/registry.js";
-import { type Role, isValidRole, canInvoke, deniedMessage, checkRateLimit } from "./auth/index.js";
-import { logToolInvocation } from "./audit.js";
-
-const DEFAULT_ROLE: Role = "intern";
-
-// Extract invoker role from MCP request _meta
-function extractRole(meta: Record<string, unknown> | undefined): Role {
-  const role = meta?.invoker_role;
-  if (typeof role === "string" && isValidRole(role)) return role;
-  return DEFAULT_ROLE;
-}
-
-function extractAgentId(meta: Record<string, unknown> | undefined): string {
-  const id = meta?.agent_id;
-  return typeof id === "string" ? id : "unknown";
-}
+import { handleToolCall } from "./dispatch.js";
 
 const server = new Server(
   { name: "yats", version: "0.1.0" },
@@ -36,48 +21,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   })),
 }));
 
-// Dispatch tool calls to handlers with permission + rate limit checks
+// Dispatch tool calls through the auth + audit pipeline (see dispatch.ts)
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args, _meta } = request.params;
   const meta = _meta as Record<string, unknown> | undefined;
-  const role = extractRole(meta);
-  const agentId = extractAgentId(meta);
 
-  // 1. Check tool exists
-  const tool = tools.get(name);
-  if (!tool) {
-    return {
-      content: [{ type: "text" as const, text: `Unknown tool: ${name}` }],
-      isError: true,
-    };
-  }
-
-  // 2. Check role-based permission
-  if (!canInvoke(role, name)) {
-    return {
-      content: [{ type: "text" as const, text: deniedMessage(role, name) }],
-      isError: true,
-    };
-  }
-
-  // 3. Check rate limits
-  const rateCheck = checkRateLimit(role, agentId, name);
-  if (!rateCheck.allowed) {
-    return {
-      content: [{ type: "text" as const, text: rateCheck.message! }],
-      isError: true,
-    };
-  }
-
-  // 4. Pass role through to handler via args (for tools that need it, e.g. data.query)
-  const argsWithRole = { ...(args ?? {}), _invoker_role: role };
-
-  const startTime = performance.now();
-  const result = await tool.handler(argsWithRole);
-  const durationMs = performance.now() - startTime;
-
-  // 5. Audit trail — non-blocking, fire-and-forget
-  logToolInvocation(name, agentId, argsWithRole, result, durationMs).catch(() => {});
+  const { result } = await handleToolCall(name, args, meta);
 
   return {
     content: result.content.map((c) => ({ type: "text" as const, text: c.text })),

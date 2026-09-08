@@ -1,5 +1,6 @@
 // QuestDB client (PG wire for reads, ILP for writes)
 import pg from "pg";
+import { recordQuery } from "./query-audit.js";
 
 const SELECT_PATTERN = /^\s*SELECT\s/i;
 const FORBIDDEN_PATTERN = /\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|GRANT|REVOKE)\b/i;
@@ -32,6 +33,8 @@ export class QuestDBClient {
   }
 
   async query(sql: string, params: unknown[] = []): Promise<{ columns: string[]; rows: Record<string, unknown>[] }> {
+    // Record before execution so even rejected/failed reads land in the audit trail
+    recordQuery(sql, params);
     if (!SELECT_PATTERN.test(sql)) {
       throw new Error("Only SELECT queries are allowed");
     }

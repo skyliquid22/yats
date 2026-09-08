@@ -1,6 +1,17 @@
 // Audit trail middleware — intercepts tool invocations and logs to QuestDB
 import { writeAuditRow, type AuditRow } from "./bridge/questdb-ilp.js";
+import type { RecordedQuery } from "./bridge/query-audit.js";
 import type { ToolResult } from "./types/tools.js";
+
+// Injectable audit sink — defaults to the QuestDB ILP writer. Tests (and the
+// provenance suite) can capture audit rows without a live QuestDB.
+export type AuditSink = (row: AuditRow) => Promise<void>;
+
+let auditSink: AuditSink = writeAuditRow;
+
+export function setAuditSink(sink: AuditSink | null): void {
+  auditSink = sink ?? writeAuditRow;
+}
 
 // Max size for parameter/result JSON to avoid bloating the audit table
 const MAX_JSON_LENGTH = 8192;
@@ -60,6 +71,7 @@ export async function logToolInvocation(
   args: Record<string, unknown>,
   result: ToolResult,
   durationMs: number,
+  queries: readonly RecordedQuery[] = [],
 ): Promise<void> {
   const row: AuditRow = {
     tool_name: toolName,
@@ -72,11 +84,13 @@ export async function logToolInvocation(
     dagster_run_id: extractDagsterRunId(result),
     quanttown_molecule_id: typeof args.quanttown_molecule_id === "string" ? args.quanttown_molecule_id : null,
     quanttown_bead_id: typeof args.quanttown_bead_id === "string" ? args.quanttown_bead_id : null,
+    query_hashes: queries.length > 0 ? JSON.stringify(queries.map((q) => q.hash)) : null,
   };
 
-  // Fire-and-forget: don't let audit failures slow down tool responses
+  // Awaited by the dispatcher (audit-before-respond) but never fails the tool
+  // response: failures are logged to stderr only.
   try {
-    await writeAuditRow(row);
+    await auditSink(row);
   } catch (err) {
     // Log to stderr but never fail the tool response
     console.error("[audit] Failed to write audit row:", (err as Error).message);

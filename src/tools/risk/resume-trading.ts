@@ -37,7 +37,8 @@ export const riskResumeTrading: ToolDef = {
     const qdb = new QuestDBClient();
     try {
       // Verify there's an active halt to resume from
-      const ksSql = `SELECT timestamp, trigger, action, reason
+      // Schema reference: create_tables.py (KILL_SWITCHES) — details, not reason
+      const ksSql = `SELECT timestamp, trigger, action, details
                      FROM kill_switches
                      WHERE experiment_id = $1 AND resolved_at IS NULL
                      ORDER BY timestamp DESC

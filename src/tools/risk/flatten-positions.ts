@@ -30,12 +30,13 @@ export const riskFlattenPositions: ToolDef = {
 
     const qdb = new QuestDBClient();
     try {
-      // Get current open positions
-      const posSql = `SELECT symbol, side, qty, market_value
+      // Get current open positions (quantity != 0 covers shorts too)
+      // Schema reference: create_tables.py (POSITIONS) — keyed by experiment_id/mode
+      const posSql = `SELECT symbol, quantity, avg_entry_price, notional, unrealized_pnl
                       FROM positions
-                      WHERE run_id = $1 AND experiment_id = $2 AND qty > 0
-                      ORDER BY abs(market_value) DESC`;
-      const posResult = await qdb.query(posSql, [runId, experimentId]);
+                      WHERE experiment_id = $1 AND mode = $2 AND quantity != 0
+                      ORDER BY abs(notional) DESC`;
+      const posResult = await qdb.query(posSql, [experimentId, mode]);
 
       if (posResult.rows.length === 0) {
         return ok({

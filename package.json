@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
-    "dev": "ts-node --esm src/server.ts"
+    "dev": "ts-node --esm src/server.ts",
+    "test": "tsc && node --test \"dist/tests/**/*.test.js\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

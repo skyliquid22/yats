@@ -601,6 +601,7 @@ CREATE TABLE IF NOT EXISTS audit_trail (
     result_status SYMBOL,
     result_summary STRING,
     duration_ms LONG,
+    query_hashes STRING,
     dagster_run_id STRING,
     quanttown_molecule_id STRING,
     quanttown_bead_id STRING
@@ -770,6 +771,9 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE features ADD COLUMN spy_gex_norm DOUBLE",
     "ALTER TABLE features ADD COLUMN spy_iv_delta_5d DOUBLE",
     "ALTER TABLE features ADD COLUMN spy_slope_delta_5d DOUBLE",
+    # v11-0: read provenance — JSON array of stable sha256 query hashes per MCP
+    # tool invocation, written by the MCP server audit middleware.
+    "ALTER TABLE audit_trail ADD COLUMN query_hashes STRING",
 ]
 
 

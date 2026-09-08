@@ -9,7 +9,7 @@ export const executionOrders: ToolDef = {
   inputSchema: {
     type: "object",
     properties: {
-      run_id: { type: "string", description: "Trading run ID (paper or live)" },
+      run_id: { type: "string", description: "Dagster run ID of the trading run (optional)" },
       experiment_id: { type: "string", description: "Filter by experiment ID (optional)" },
       symbol: { type: "string", description: "Filter by symbol (optional)" },
       status: {
@@ -33,7 +33,7 @@ export const executionOrders: ToolDef = {
     let paramIdx = 1;
 
     if (runId) {
-      conditions.push(`run_id = $${paramIdx++}`);
+      conditions.push(`dagster_run_id = $${paramIdx++}`);
       params.push(runId);
     }
     if (experimentId) {
@@ -50,8 +50,10 @@ export const executionOrders: ToolDef = {
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const sql = `SELECT timestamp, run_id, experiment_id, order_id, symbol, side,
-                        qty, filled_qty, price, filled_price, status, order_type
+    // Schema reference: create_tables.py (ORDERS)
+    const sql = `SELECT timestamp, order_id, experiment_id, mode, symbol, side,
+                        quantity, order_type, status, fill_price, fill_quantity,
+                        slippage_bps, fees, risk_check_result, broker_order_id, dagster_run_id
                  FROM orders
                  ${where}
                  ORDER BY timestamp DESC

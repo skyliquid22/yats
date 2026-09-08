@@ -37,6 +37,9 @@ export interface AuditRow {
   dagster_run_id?: string | null;
   quanttown_molecule_id?: string | null;
   quanttown_bead_id?: string | null;
+  // JSON array of stable sha256 query hashes for every SQL query executed
+  // during the invocation (provenance verification for read tools)
+  query_hashes?: string | null;
 }
 
 export async function writeAuditRow(row: AuditRow): Promise<void> {
@@ -53,6 +56,7 @@ export async function writeAuditRow(row: AuditRow): Promise<void> {
     .stringColumn("result_summary", row.result_summary)
     .intColumn("duration_ms", row.duration_ms);
 
+  if (row.query_hashes) s.stringColumn("query_hashes", row.query_hashes);
   if (row.dagster_run_id) s.stringColumn("dagster_run_id", row.dagster_run_id);
   if (row.quanttown_molecule_id) s.stringColumn("quanttown_molecule_id", row.quanttown_molecule_id);
   if (row.quanttown_bead_id) s.stringColumn("quanttown_bead_id", row.quanttown_bead_id);

@@ -22,12 +22,14 @@ export const executionPaperStatus: ToolDef = {
     try {
       const dagsterStatus = await dagster.getRunStatus(runId);
 
+      // Schema reference: create_tables.py (EXECUTION_METRICS)
       const metricsResult = await qdb.query(
-        `SELECT experiment_id, total_trades, realized_pnl, unrealized_pnl,
-                sharpe_ratio, max_drawdown, win_rate, last_heartbeat
-         FROM paper_trading_metrics
-         WHERE run_id = $1
-         ORDER BY last_heartbeat DESC
+        `SELECT timestamp, experiment_id, run_id, mode, fill_rate, reject_rate,
+                avg_slippage_bps, p95_slippage_bps, total_fees, total_turnover,
+                execution_halts, sharpe, max_drawdown, total_return
+         FROM execution_metrics
+         WHERE dagster_run_id = $1
+         ORDER BY timestamp DESC
          LIMIT 1`,
         [runId]
       );

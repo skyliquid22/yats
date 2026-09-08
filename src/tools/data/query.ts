@@ -1,5 +1,6 @@
 // data.query — Parameterized SELECT query builder with role-based table whitelisting
 import { QuestDBClient } from "../../bridge/questdb-client.js";
+import { queryHash } from "../../bridge/query-audit.js";
 import { ok, err, type ToolDef } from "../../types/tools.js";
 import { type Role, checkTableAccess, tableDeniedMessage } from "../../auth/index.js";
 
@@ -40,7 +41,14 @@ export const dataQuery: ToolDef = {
     const qdb = new QuestDBClient();
     try {
       const result = await qdb.query(finalSql, params);
-      return ok({ columns: result.columns, rows: result.rows, row_count: result.rows.length });
+      // query_hash matches the entry written to audit_trail.query_hashes for
+      // this invocation — callers can cite it as read provenance.
+      return ok({
+        columns: result.columns,
+        rows: result.rows,
+        row_count: result.rows.length,
+        query_hash: queryHash(finalSql, params),
+      });
     } catch (e) {
       return err(`Query failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {

@@ -9,7 +9,7 @@ export const riskPortfolioSummary: ToolDef = {
   inputSchema: {
     type: "object",
     properties: {
-      run_id: { type: "string", description: "Trading run ID (paper or live)" },
+      run_id: { type: "string", description: "Dagster run ID of the trading run (optional)" },
       experiment_id: { type: "string", description: "Filter by experiment ID (optional)" },
     },
     required: [],
@@ -18,50 +18,54 @@ export const riskPortfolioSummary: ToolDef = {
     const runId = args.run_id as string | undefined;
     const experimentId = args.experiment_id as string | undefined;
 
-    const conditions: string[] = [];
-    const params: unknown[] = [];
-    let paramIdx = 1;
-
+    // Schema reference: create_tables.py — portfolio_state has dagster_run_id;
+    // positions and kill_switches key on experiment_id/mode only.
+    const navConditions: string[] = [];
+    const navParams: unknown[] = [];
+    let navIdx = 1;
     if (runId) {
-      conditions.push(`run_id = $${paramIdx++}`);
-      params.push(runId);
+      navConditions.push(`dagster_run_id = $${navIdx++}`);
+      navParams.push(runId);
     }
     if (experimentId) {
-      conditions.push(`experiment_id = $${paramIdx++}`);
-      params.push(experimentId);
+      navConditions.push(`experiment_id = $${navIdx++}`);
+      navParams.push(experimentId);
     }
+    const navWhere = navConditions.length > 0 ? `WHERE ${navConditions.join(" AND ")}` : "";
 
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const expWhere = experimentId ? "WHERE experiment_id = $1" : "";
+    const expParams: unknown[] = experimentId ? [experimentId] : [];
 
     const qdb = new QuestDBClient();
     try {
-      // Latest NAV snapshot
-      const navSql = `SELECT timestamp, run_id, experiment_id, cash, positions_value,
-                             total_nav, daily_pnl, cumulative_pnl, drawdown
-                      FROM portfolio_nav
-                      ${where}
+      // Latest NAV snapshot from portfolio_state
+      const navSql = `SELECT timestamp, experiment_id, mode, nav, cash, gross_exposure,
+                             net_exposure, leverage, num_positions, daily_pnl, peak_nav,
+                             drawdown, dagster_run_id
+                      FROM portfolio_state
+                      ${navWhere}
                       ORDER BY timestamp DESC
                       LIMIT 1`;
-      const navResult = await qdb.query(navSql, [...params]);
+      const navResult = await qdb.query(navSql, [...navParams]);
 
       // Position count and concentration
       const posSql = `SELECT count() as position_count,
-                             sum(abs(market_value)) as gross_exposure,
-                             sum(market_value) as net_exposure
+                             sum(abs(notional)) as gross_exposure,
+                             sum(notional) as net_exposure
                       FROM positions
-                      ${where}`;
-      const posResult = await qdb.query(posSql, [...params]);
+                      ${expWhere}`;
+      const posResult = await qdb.query(posSql, [...expParams]);
 
       // Kill switch status
       const ksSql = `SELECT timestamp, trigger, action, resolved_at
                      FROM kill_switches
-                     ${where ? where + " AND" : "WHERE"} resolved_at IS NULL
+                     ${expWhere ? expWhere + " AND" : "WHERE"} resolved_at IS NULL
                      ORDER BY timestamp DESC
                      LIMIT 1`;
       let killSwitchActive = false;
       let killSwitchInfo = null;
       try {
-        const ksResult = await qdb.query(ksSql, [...params]);
+        const ksResult = await qdb.query(ksSql, [...expParams]);
         if (ksResult.rows.length > 0) {
           killSwitchActive = true;
           killSwitchInfo = ksResult.rows[0];
@@ -72,7 +76,7 @@ export const riskPortfolioSummary: ToolDef = {
 
       const nav = navResult.rows.length > 0 ? navResult.rows[0] : null;
       const posStats = posResult.rows.length > 0 ? posResult.rows[0] : null;
-      const totalNav = (nav?.total_nav as number) || 0;
+      const totalNav = (nav?.nav as number) || 0;
 
       return ok({
         nav_snapshot: nav,
