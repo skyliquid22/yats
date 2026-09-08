@@ -48,6 +48,7 @@ from compute.stats.deflated_sharpe import compute_sweep_dsr, probabilistic_sharp
 from yats_pipelines.jobs.experiment_run import (
     _build_returns_df,
     _dataframe_to_env_rows,
+    _fill_skip,
     _merge_closes_into_features,
 )
 from yats_pipelines.resources.questdb import QuestDBResource
@@ -90,7 +91,7 @@ def fetch_env_rows(feature_set):
     cur.close()
     cur = conn.cursor()
     cur.execute(
-        "SELECT timestamp, symbol, close FROM canonical_equity_ohlcv "
+        "SELECT timestamp, symbol, open, close FROM canonical_equity_ohlcv "
         "WHERE symbol IN %s AND timestamp >= %s AND timestamp <= %s "
         "ORDER BY timestamp, symbol",
         (tuple(SYMBOLS), START, END),
@@ -151,13 +152,16 @@ def main() -> int:
                 _spec, test_data, Path(checkpoint_path),
                 observation_columns=obs_cols,
                 regime_feature_names=regime_cols or None)
-            # lag=1 (honest): weight from obs(row_i) fills at close(i+1), earns close(i+1)->close(i+2)
-            skip = 1 + _spec.execution_lag_days
+            # Unified execution timing (V11-1) — honors _spec.fill_timing:
+            #   next_close (default): fill at close(i+1), earn close(i+1)->close(i+2)
+            #   next_open: fill at open(i+1), earn open(i+1)->close(i+1)
+            skip = _fill_skip(_spec.execution_lag_days, _spec.fill_timing)
             dates = [row.get("timestamp", f"t{k}") for k, row in enumerate(test_data[skip:])]
             n = min(len(weights_list), len(dates))
             weights_df = pd.DataFrame(weights_list[:n], index=dates[:n],
                                       columns=sorted(SYMBOLS))
-            returns_df = _build_returns_df(test_data, sorted(SYMBOLS))
+            returns_df = _build_returns_df(test_data, sorted(SYMBOLS),
+                                           fill_timing=_spec.fill_timing)
             common = weights_df.index.intersection(returns_df.index)
             port = (weights_df.loc[common] * returns_df.loc[common]).sum(axis=1).dropna()
             sharpe = compute_sharpe(port) if len(port) > 2 else None

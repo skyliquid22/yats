@@ -288,10 +288,12 @@ class ReplayMarketDataSource:
             panel: dict[str, dict[str, float]] = {}
             for sym in self.symbols:
                 sym_features = dict(feat_day.get(sym, {}))
-                # Overlay canonical close (authoritative price)
+                # Overlay canonical prices (authoritative). open is required by
+                # ShadowEngine for fill_timing='next_open' (fill at bar open).
                 sym_canonical = canon_day.get(sym, {})
-                if "close" in sym_canonical:
-                    sym_features["close"] = sym_canonical["close"]
+                for price_col in ("close", "open"):
+                    if price_col in sym_canonical:
+                        sym_features[price_col] = sym_canonical[price_col]
                 panel[sym] = sym_features
 
             # Regime features

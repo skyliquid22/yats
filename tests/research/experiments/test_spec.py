@@ -259,6 +259,47 @@ class TestExperimentSpecConstruction:
 
 
 # ===================================================================
+# ExperimentSpec — Fill timing (V11-1 unified execution timing)
+# ===================================================================
+
+class TestFillTiming:
+    def test_default_is_next_close(self):
+        spec = _make_spec()
+        assert spec.fill_timing == "next_close"
+        assert spec.execution_lag_days == 1
+
+    def test_next_open_valid_with_lag_1(self):
+        spec = _make_spec(fill_timing="next_open")
+        assert spec.fill_timing == "next_open"
+
+    def test_invalid_fill_timing_raises(self):
+        with pytest.raises(ValueError, match="fill_timing"):
+            _make_spec(fill_timing="same_day_close")
+
+    def test_next_open_with_lag_0_raises(self):
+        """Same-day fills exist only under legacy lag=0 with next_close."""
+        with pytest.raises(ValueError, match="next_open.*requires execution_lag_days=1"):
+            _make_spec(fill_timing="next_open", execution_lag_days=0)
+
+    def test_legacy_lag_0_next_close_still_allowed(self):
+        spec = _make_spec(execution_lag_days=0)
+        assert spec.execution_lag_days == 0
+        assert spec.fill_timing == "next_close"
+
+    def test_fill_timing_in_canonical_dict(self):
+        """Included in canonical JSON — same treatment as execution_lag_days."""
+        d = _make_spec().to_canonical_dict()
+        assert d["fill_timing"] == "next_close"
+        assert d["execution_lag_days"] == 1.0
+
+    def test_fill_timing_changes_experiment_id(self):
+        assert (
+            _make_spec().experiment_id
+            != _make_spec(fill_timing="next_open").experiment_id
+        )
+
+
+# ===================================================================
 # ExperimentSpec — Hierarchy Validation
 # ===================================================================
 

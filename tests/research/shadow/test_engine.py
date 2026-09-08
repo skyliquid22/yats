@@ -695,3 +695,173 @@ class TestShadowExecutionTiming:
         assert summary["steps_executed"] > 0
         assert summary["final_value"] > 0
 
+
+# ---------------------------------------------------------------------------
+# Fill timing (V11-1 unified execution timing): next_close vs next_open
+# ---------------------------------------------------------------------------
+
+
+class _CapturingWriter:
+    """Stub QuestDB writer capturing write_step kwargs."""
+
+    def __init__(self):
+        self.steps: list[dict] = []
+        self.metrics: list[dict] = []
+
+    def write_step(self, **kwargs):
+        self.steps.append(kwargs)
+
+    def write_metrics(self, **kwargs):
+        self.metrics.append(kwargs)
+
+
+class TestShadowFillTiming:
+    """ShadowEngine timing model (V11-1):
+
+    Decision from prev_snap (EOD t-1). Under next_close (default) the fill is
+    at curr close: this step's close(t-1)->close(t) return is earned entirely
+    by the previous weights. Under next_open the fill is at curr open: the
+    previous weights earn the overnight leg close(t-1)->open(t), and the newly
+    filled weights earn the intraday leg open(t)->close(t).
+    """
+
+    SYMBOLS = ("AAPL", "MSFT")
+    # (open, close) per day — opens deliberately far from adjacent closes
+    PRICES = [
+        {"AAPL": (99.0, 100.0), "MSFT": (201.0, 200.0)},
+        {"AAPL": (101.0, 103.0), "MSFT": (198.0, 202.0)},
+        {"AAPL": (104.0, 102.0), "MSFT": (203.0, 205.0)},
+    ]
+
+    def _make_snapshots(self, include_open: bool = True) -> list[Snapshot]:
+        snaps = []
+        for i, day in enumerate(self.PRICES):
+            panel = {}
+            for sym, (opn, close) in day.items():
+                panel[sym] = {"close": close, "ret_1d": 0.01}
+                if include_open:
+                    panel[sym]["open"] = opn
+            snaps.append(Snapshot(
+                as_of=datetime(2023, 1, 3 + i),
+                symbols=self.SYMBOLS,
+                panel=panel,
+                regime_features=(),
+                regime_feature_names=(),
+                observation_columns=("close", "ret_1d"),
+            ))
+        return snaps
+
+    def _run(self, tmp_path: Path, name: str, spec, snapshots, writer=None) -> dict:
+        config = ShadowRunConfig(
+            experiment_id=name,
+            run_id="r1",
+            output_dir=tmp_path / name / "r1",
+        )
+        engine = ShadowEngine(
+            spec, FakePolicy(2), snapshots, config, questdb_writer=writer,
+        )
+        return engine.run()
+
+    def test_next_open_portfolio_math(self, tmp_path: Path):
+        """Exact value accounting: old weights earn overnight, new earn intraday."""
+        spec = _make_spec(
+            fill_timing="next_open",
+            cost_config=CostConfig(transaction_cost_bp=0.0),
+        )
+        summary = self._run(tmp_path, "no_math", spec, self._make_snapshots())
+
+        # Step 1 (prev=day0, curr=day1): old weights are 0 -> only the newly
+        # filled [0.5, 0.5] earn intraday open(1)->close(1)
+        r1 = 0.5 * (103.0 / 101.0 - 1.0) + 0.5 * (202.0 / 198.0 - 1.0)
+        # Step 2: old [0.5, 0.5] earn overnight close(1)->open(2);
+        # refreshed [0.5, 0.5] earn intraday open(2)->close(2)
+        r2 = (
+            0.5 * (104.0 / 103.0 - 1.0) + 0.5 * (203.0 / 202.0 - 1.0)
+            + 0.5 * (102.0 / 104.0 - 1.0) + 0.5 * (205.0 / 203.0 - 1.0)
+        )
+        expected = 1_000_000.0 * (1.0 + r1) * (1.0 + r2)
+        assert summary["final_value"] == pytest.approx(expected)
+
+    def test_next_close_default_ignores_open_prices(self, tmp_path: Path):
+        """Regression: adding open to the panel must not change next_close numbers."""
+        spec = _make_spec(cost_config=CostConfig(transaction_cost_bp=0.0))
+        with_open = self._run(tmp_path, "nc_with_open", spec, self._make_snapshots(True))
+        without_open = self._run(tmp_path, "nc_no_open", spec, self._make_snapshots(False))
+
+        assert with_open["final_value"] == pytest.approx(without_open["final_value"])
+
+        # And the value matches close-to-close accounting with a 1-step lag
+        r2 = 0.5 * (102.0 / 103.0 - 1.0) + 0.5 * (205.0 / 202.0 - 1.0)
+        expected = 1_000_000.0 * (1.0 + 0.0) * (1.0 + r2)
+        assert with_open["final_value"] == pytest.approx(expected)
+
+    def test_next_open_differs_from_next_close(self, tmp_path: Path):
+        snaps = self._make_snapshots()
+        s_open = self._run(
+            tmp_path, "diff_open",
+            _make_spec(fill_timing="next_open", cost_config=CostConfig(transaction_cost_bp=0.0)),
+            snaps,
+        )
+        s_close = self._run(
+            tmp_path, "diff_close",
+            _make_spec(cost_config=CostConfig(transaction_cost_bp=0.0)),
+            snaps,
+        )
+        assert s_open["final_value"] != pytest.approx(s_close["final_value"])
+
+    def test_none_mode_logs_open_fill_prices(self, tmp_path: Path):
+        """execution_mode=none: logged fill prices are curr opens under next_open."""
+        writer = _CapturingWriter()
+        spec = _make_spec(fill_timing="next_open")
+        self._run(tmp_path, "no_fillprice", spec, self._make_snapshots(), writer=writer)
+
+        step1 = writer.steps[0]  # prev=day0, curr=day1
+        assert step1["fill_prices"] == [101.0, 198.0]
+
+    def test_none_mode_logs_close_fill_prices_by_default(self, tmp_path: Path):
+        writer = _CapturingWriter()
+        spec = _make_spec()
+        self._run(tmp_path, "nc_fillprice", spec, self._make_snapshots(), writer=writer)
+
+        step1 = writer.steps[0]
+        assert step1["fill_prices"] == [103.0, 202.0]
+
+    def test_sim_mode_fills_at_open(self, tmp_path: Path):
+        """execution_mode=sim: broker fills happen at curr open (+slippage)."""
+        writer = _CapturingWriter()
+        spec = _make_spec(
+            fill_timing="next_open",
+            cost_config=CostConfig(transaction_cost_bp=0.0),
+        )
+        config = ShadowRunConfig(
+            experiment_id="sim_open",
+            run_id="r1",
+            output_dir=tmp_path / "sim_open" / "r1",
+            execution_mode="sim",
+        )
+        engine = ShadowEngine(
+            spec, FakePolicy(2), self._make_snapshots(), config, questdb_writer=writer,
+        )
+        engine.run()
+
+        # Step 1 fills AAPL/MSFT at day-1 opens (101/198) within slippage
+        # (default flat 5bp), far from day-1 closes (103/202).
+        step1 = writer.steps[0]
+        for price, opn in zip(step1["fill_prices"], [101.0, 198.0]):
+            assert abs(price / opn - 1.0) < 0.001, (
+                f"sim fill {price} should be at open {opn} (+slippage), not close"
+            )
+
+    def test_missing_open_falls_back_to_close(self, tmp_path: Path):
+        """Under next_open, a symbol without open degrades to a next_close fill."""
+        spec = _make_spec(
+            fill_timing="next_open",
+            cost_config=CostConfig(transaction_cost_bp=0.0),
+        )
+        summary = self._run(tmp_path, "no_fallback", spec, self._make_snapshots(False))
+
+        # With no opens anywhere, next_open accounting reduces to next_close
+        spec_nc = _make_spec(cost_config=CostConfig(transaction_cost_bp=0.0))
+        summary_nc = self._run(tmp_path, "nc_fallback", spec_nc, self._make_snapshots(False))
+        assert summary["final_value"] == pytest.approx(summary_nc["final_value"])
+

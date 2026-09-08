@@ -100,6 +100,11 @@ class ShadowEngine:
         self._symbols = spec.symbols
         self._n_symbols = len(self._symbols)
 
+        # Unified execution timing (V11-1): decision from prev_snap (EOD t-1);
+        # fill at curr_snap close ('next_close', default) or curr_snap open
+        # ('next_open'). See _execute_step_none/_execute_step_sim docstrings.
+        self._fill_timing = getattr(spec, "fill_timing", "next_close")
+
         # Resolve effective risk config (PRD §12.2)
         self._effective_risk_config, self._risk_audit = effective_risk_config(
             spec.risk_config,
@@ -248,8 +253,14 @@ class ShadowEngine:
 
         Execution timing (feasible for EOD features):
           - Decision: observe prev_snap (features available after close of t-1)
-          - Fill: curr_snap close price (close of t)
-          - Return earned: close(t) → close(t+1) (next step's portfolio.weights × next returns)
+          - fill_timing='next_close' (default): fill at curr_snap close
+            (close of t). This step's return close(t-1) → close(t) is earned
+            entirely by the PREVIOUS weights; the new weights start earning
+            from close(t).
+          - fill_timing='next_open': fill at curr_snap open (open of t). This
+            step's return decomposes into two legs:
+              overnight close(t-1) → open(t)  — earned by the PREVIOUS weights
+              intraday  open(t)   → close(t) — earned by the NEWLY FILLED weights
         """
         # 1. Build observation from PREVIOUS snapshot (decide on prev-bar EOD features)
         obs = self._build_observation(prev_snap)
@@ -265,11 +276,10 @@ class ShadowEngine:
             self._portfolio.weights,
         )
 
-        # 4. Compute per-symbol returns (close-to-close)
-        returns = self._compute_returns(prev_snap, curr_snap)
-        weighted_return = float(np.dot(self._portfolio.weights, returns))
-
-        # 4b. Portfolio risk layer (vol targeting + optional beta-cap)
+        # 3b. Portfolio risk layer (vol targeting + optional beta-cap).
+        # Applied before return accounting: under next_open the intraday leg
+        # is earned by the final projected weights. Inputs are prior-day
+        # histories only, so ordering does not change next_close results.
         if self._spec.portfolio_risk is not None:
             from research.portfolio.risk_layer import apply_risk_layer
 
@@ -283,6 +293,18 @@ class ShadowEngine:
                 if self._spy_col_idx is not None:
                     spy_hist = sym_hist[:, self._spy_col_idx]
             projected = apply_risk_layer(projected, port_hist, sym_hist, spy_hist, pr)
+
+        # 4. Compute this step's portfolio return per fill_timing.
+        # returns (close-to-close) is kept for logging and the beta buffer.
+        returns = self._compute_returns(prev_snap, curr_snap)
+        if self._fill_timing == "next_open":
+            overnight, intraday = self._compute_open_fill_legs(prev_snap, curr_snap)
+            weighted_return = float(
+                np.dot(self._portfolio.weights, overnight)
+                + np.dot(projected, intraday)
+            )
+        else:
+            weighted_return = float(np.dot(self._portfolio.weights, returns))
 
         # 5. Transaction cost
         turnover = float(np.abs(projected - self._portfolio.weights).sum())
@@ -312,10 +334,10 @@ class ShadowEngine:
 
         # 8. Write to QuestDB execution_log (per-symbol rows)
         if self._questdb_writer is not None:
-            # In direct rebalance mode: fill at close, no slippage, no rejects
-            close_prices = [
-                curr_snap.panel.get(sym, {}).get("close", 0.0)
-                for sym in self._symbols
+            # Direct rebalance mode: fill at close (next_close) or open
+            # (next_open); no slippage, no rejects
+            fill_prices = [
+                self._fill_price(curr_snap, sym) for sym in self._symbols
             ]
             per_symbol_fee = cost / self._n_symbols if self._n_symbols > 0 else 0.0
             self._questdb_writer.write_step(
@@ -324,7 +346,7 @@ class ShadowEngine:
                 symbols=self._symbols,
                 target_weights=raw_weights.tolist(),
                 realized_weights=projected.tolist(),
-                fill_prices=close_prices,
+                fill_prices=fill_prices,
                 slippage_bps=[0.0] * self._n_symbols,
                 fees_per_symbol=[per_symbol_fee] * self._n_symbols,
                 rejected=[False] * self._n_symbols,
@@ -344,8 +366,13 @@ class ShadowEngine:
 
         Execution timing (feasible for EOD features):
           - Decision: observe prev_snap (features available after close of t-1)
-          - Fill: curr_snap close + slippage (close of t)
-          - Return earned: close(t) → close(t+1)
+          - fill_timing='next_close' (default): fill at curr_snap close +
+            slippage (close of t); this step's close(t-1) → close(t) return is
+            earned entirely by the previous weights.
+          - fill_timing='next_open': fill at curr_snap open + slippage
+            (open of t); this step's return decomposes into an overnight leg
+            close(t-1) → open(t) earned by the previous weights, plus an
+            intraday leg open(t) → close(t) earned by the realized weights.
 
         Flow: policy → project_weights → compile orders → risk check →
               SimBrokerAdapter fill → update portfolio.
@@ -379,10 +406,11 @@ class ShadowEngine:
                     spy_hist = sym_hist[:, self._spy_col_idx]
             projected = apply_risk_layer(projected, port_hist, sym_hist, spy_hist, pr)
 
-        # 3. Compile weight deltas into order signals
+        # 3. Compile weight deltas into order signals — sized and filled at the
+        # fill price (curr close under next_close; curr open under next_open)
         current_prices: dict[str, float] = {}
         for sym in self._symbols:
-            current_prices[sym] = curr_snap.panel.get(sym, {}).get("close", 0.0)
+            current_prices[sym] = self._fill_price(curr_snap, sym)
 
         signals = [
             Signal(
@@ -476,9 +504,17 @@ class ShadowEngine:
             if sym in rejected_syms:
                 realized_weights[i] = self._portfolio.weights[i]
 
-        # 7. Compute returns and update portfolio
+        # 7. Compute returns and update portfolio.
+        # returns (close-to-close) is kept for logging and the beta buffer.
         returns = self._compute_returns(prev_snap, curr_snap)
-        weighted_return = float(np.dot(self._portfolio.weights, returns))
+        if self._fill_timing == "next_open":
+            overnight, intraday = self._compute_open_fill_legs(prev_snap, curr_snap)
+            weighted_return = float(
+                np.dot(self._portfolio.weights, overnight)
+                + np.dot(realized_weights, intraday)
+            )
+        else:
+            weighted_return = float(np.dot(self._portfolio.weights, returns))
 
         cost = total_fees / self._portfolio.portfolio_value if self._portfolio.portfolio_value > 0 else 0.0
 
@@ -597,6 +633,49 @@ class ShadowEngine:
             if prev_close > 0:
                 returns[i] = (curr_close - prev_close) / prev_close
         return returns
+
+    def _fill_price(self, curr: Snapshot, sym: str) -> float:
+        """Price at which this step's rebalance fills.
+
+        next_close: curr snapshot close. next_open: curr snapshot open,
+        falling back to close when open is missing (<= 0).
+        """
+        sym_data = curr.panel.get(sym, {})
+        if self._fill_timing == "next_open":
+            curr_open = sym_data.get("open", 0.0)
+            if curr_open > 0:
+                return curr_open
+        return sym_data.get("close", 0.0)
+
+    def _compute_open_fill_legs(
+        self, prev: Snapshot, curr: Snapshot,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Per-symbol return legs for fill_timing='next_open'.
+
+        overnight[i] = open(t) / close(t-1) - 1 — earned by the weights held
+            BEFORE the fill (previous step's weights).
+        intraday[i]  = close(t) / open(t) - 1  — earned by the NEWLY FILLED
+            weights (the fill happens at open(t)).
+        overnight + intraday compounds to the close-to-close return.
+
+        When open(t) is missing (<= 0), the full close-to-close return is
+        assigned to the overnight leg and the intraday leg is 0 — equivalent
+        to a next_close fill for that symbol (matches _fill_price fallback).
+        """
+        overnight = np.zeros(self._n_symbols)
+        intraday = np.zeros(self._n_symbols)
+        for i, sym in enumerate(self._symbols):
+            prev_close = prev.panel.get(sym, {}).get("close", 0.0)
+            curr_open = curr.panel.get(sym, {}).get("open", 0.0)
+            curr_close = curr.panel.get(sym, {}).get("close", 0.0)
+            if prev_close <= 0:
+                continue
+            if curr_open > 0:
+                overnight[i] = (curr_open - prev_close) / prev_close
+                intraday[i] = (curr_close - curr_open) / curr_open
+            else:
+                overnight[i] = (curr_close - prev_close) / prev_close
+        return overnight, intraday
 
     def _save_state(self) -> None:
         """Persist resume state to state.json."""

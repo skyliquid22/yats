@@ -118,10 +118,11 @@ def fetch_features(context: OpExecutionContext, config: ExperimentRunConfig, spe
             if dedup_cols:
                 features_df = features_df.drop_duplicates(subset=dedup_cols, keep="last")
 
-        # Join canonical close prices — features table has no close column
+        # Join canonical open/close prices — features table has no price columns.
+        # open is needed for fill_timing='next_open' (fill at next bar's open).
         closes_cur = conn.cursor()
         closes_cur.execute(
-            "SELECT timestamp, symbol, close FROM canonical_equity_ohlcv "
+            "SELECT timestamp, symbol, open, close FROM canonical_equity_ohlcv "
             f"WHERE {where_clause} ORDER BY timestamp, symbol",
             q_params,
         )
@@ -268,7 +269,15 @@ def evaluate_experiment(
     symbols = sorted(spec_data.get("symbols", []))
     n_symbols = len(symbols)
 
+    # Unified execution timing (V11-1): decision_time = EOD(t);
+    #   fill_timing='next_close' (default) — fill at close(t+lag), weight earns
+    #     close(t+lag)->close(t+lag+1) (close-to-close returns).
+    #   fill_timing='next_open' — fill at open(t+1), weight earns the intraday
+    #     return open(t+1)->close(t+1) each day (accepted simplification for
+    #     daily-rebalance eval; see _build_returns_df docstring).
+    # Same-day close fill exists ONLY under legacy execution_lag_days=0.
     execution_lag = spec.execution_lag_days  # 1=honest fill-next-bar, 0=same-bar (infeasible)
+    fill_timing = spec.fill_timing
     if execution_lag == 0:
         import warnings
         warnings.warn(
@@ -299,23 +308,25 @@ def evaluate_experiment(
                 regime_feature_names=regime_cols or None,
             )
 
-        # Build DataFrames — apply execution lag
-        # lag=0 (old): weight from obs(row_i) indexed at t_{i+1}, earns close(t_i)->close(t_{i+1})
-        # lag=1 (honest): weight from obs(row_i) indexed at t_{i+2}, earns close(t_{i+1})->close(t_{i+2})
-        skip = 1 + execution_lag
+        # Build DataFrames — apply execution timing (see _fill_skip docstring):
+        # next_close lag=0 (legacy): weight from obs(row_i) indexed at t_{i+1}, earns close(t_i)->close(t_{i+1})
+        # next_close lag=1 (default): weight from obs(row_i) indexed at t_{i+2}, earns close(t_{i+1})->close(t_{i+2})
+        # next_open  lag=1: weight from obs(row_i) indexed at t_{i+1}, earns open(t_{i+1})->close(t_{i+1})
+        skip = _fill_skip(execution_lag, fill_timing)
         dates = [row.get("timestamp", f"t{i}") for i, row in enumerate(eval_data[skip:])]
         n = min(len(weights_list), len(dates))
         weights_df = pd.DataFrame(weights_list[:n], index=dates[:n], columns=symbols)
     else:
         # Non-RL policy: run real rollout (raises for unsupported types)
         weights_list = _rollout_non_rl_policy(policy, eval_data, symbols, spec_data)
-        skip = 1 + execution_lag
+        skip = _fill_skip(execution_lag, fill_timing)
         dates = [row.get("timestamp", f"t{i}") for i, row in enumerate(eval_data[skip:])]
         n = min(len(weights_list), len(dates))
         weights_df = pd.DataFrame(weights_list[:n], index=dates[:n], columns=symbols)
 
-    # Build returns DataFrame from eval partition
-    returns_df = _build_returns_df(eval_data, symbols)
+    # Build returns DataFrame from eval partition (close-to-close for
+    # next_close; open-to-close for next_open)
+    returns_df = _build_returns_df(eval_data, symbols, fill_timing=fill_timing)
 
     # Align DataFrames
     common_idx = weights_df.index.intersection(returns_df.index)
@@ -683,6 +694,8 @@ def _reconstruct_spec(spec_data: dict) -> Any:
         hierarchy_enabled=spec_data.get("hierarchy_enabled", False),
         controller_config=spec_data.get("controller_config"),
         allocator_by_mode=spec_data.get("allocator_by_mode"),
+        execution_lag_days=spec_data.get("execution_lag_days", 1),
+        fill_timing=spec_data.get("fill_timing", "next_close"),
         regime_thresholds_hash=spec_data.get("regime_thresholds_hash", ""),
         regime_detector_version=spec_data.get("regime_detector_version", ""),
         regime_universe=tuple(spec_data.get("regime_universe", ())),
@@ -704,11 +717,17 @@ def _dataframe_to_env_rows(
 
     # Group by timestamp — skip rows with NaN feature values rather than zero-filling,
     # since zero is not a neutral value for bounded features like dist_20d_high.
+    # 'open' rides along as a price column (not an observation feature) so the
+    # eval path can support fill_timing='next_open'.
+    extract_cols = list(observation_columns)
+    if "open" in df.columns and "open" not in extract_cols:
+        extract_cols.append("open")
+
     rows: list[dict[str, Any]] = []
     for ts, group in df.groupby("timestamp"):
         row: dict[str, Any] = {"timestamp": str(ts)}
 
-        for col in observation_columns:
+        for col in extract_cols:
             if col in group.columns:
                 per_sym = {}
                 for _, r in group.iterrows():
@@ -735,42 +754,103 @@ def _merge_closes_into_features(
     features_df: pd.DataFrame,
     closes_df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, int]:
-    """Inner-join canonical close prices onto features rows by (timestamp, symbol).
+    """Inner-join canonical prices onto features rows by (timestamp, symbol).
 
+    Always merges 'close'; also merges 'open' when present in closes_df
+    (needed for fill_timing='next_open').
     Rows in features_df without a matching close price are dropped (logged by caller).
     Returns (merged_df, n_dropped).
     """
     if features_df.empty:
         return features_df, 0
 
+    price_cols = ["close"] + (["open"] if "open" in closes_df.columns else [])
     before = len(features_df)
     merged = features_df.merge(
-        closes_df[["timestamp", "symbol", "close"]],
+        closes_df[["timestamp", "symbol", *price_cols]],
         on=["timestamp", "symbol"],
         how="inner",
     )
     return merged, before - len(merged)
 
 
-def _build_returns_df(data: list[dict[str, Any]], symbols: list[str]) -> pd.DataFrame:
-    """Build returns DataFrame from env data rows (close-to-close returns).
+def _fill_skip(execution_lag_days: int, fill_timing: str = "next_close") -> int:
+    """Index offset from an obs row to the date its weight is marked at.
 
-    Missing close prices are stored as NaN (not 0.0) to avoid fabricating -100% returns.
+    Unified execution timing (V11-1): decision_time = EOD(t_i) for obs row i.
+
+    fill_timing='next_close' (default):
+        fill at close(t_{i+lag}); the weight earns close(t_{i+lag}) ->
+        close(t_{i+lag+1}) and is therefore indexed at date t_{i+lag+1}
+        (matching the close-to-close returns row at that date).
+        lag=1 is the honest default; lag=0 is the legacy same-bar close fill.
+
+    fill_timing='next_open':
+        fill at open(t_{i+lag}) with lag=1 (enforced by ExperimentSpec); the
+        weight earns the intraday return open(t_{i+1}) -> close(t_{i+1}) and
+        is indexed at date t_{i+1} (matching the open-to-close returns row).
+    """
+    if fill_timing == "next_open":
+        return execution_lag_days
+    return 1 + execution_lag_days
+
+
+def _build_returns_df(
+    data: list[dict[str, Any]],
+    symbols: list[str],
+    fill_timing: str = "next_close",
+) -> pd.DataFrame:
+    """Build the per-date returns DataFrame the filled weights are marked against.
+
+    fill_timing='next_close' (default): close-to-close returns —
+        r(t) = close(t) / close(t-1) - 1, indexed at t (first row dropped).
+        A weight filled at close(t) earns r(t+1), so evaluate_experiment
+        indexes the weight at its earn date via _fill_skip.
+
+    fill_timing='next_open': open-to-close (intraday) returns —
+        r(t) = close(t) / open(t) - 1, indexed at t.
+        Convention (documented simplification for the daily-rebalance eval):
+        the weight decided from obs(t) fills at open(t+1) and is marked to
+        close(t+1), earning close(t+1)/open(t+1) - 1. Because weights are
+        refreshed every bar, the overnight gap close(t) -> open(t+1) is not
+        attributed to any weight under this convention.
+
+    Missing prices are stored as NaN (not 0.0) to avoid fabricating -100% returns.
+    Raises ValueError under 'next_open' when no row carries open prices.
     """
     dates = []
     close_vals: dict[str, list[float]] = {s: [] for s in symbols}
+    open_vals: dict[str, list[float]] = {s: [] for s in symbols}
+
+    def _extract(prices: Any, sym: str) -> float:
+        if isinstance(prices, dict):
+            raw = prices.get(sym)
+            return float(raw) if raw is not None else float("nan")
+        return float(prices) if prices is not None else float("nan")
 
     for row in data:
         dates.append(row.get("timestamp", ""))
         close = row.get("close", {})
+        opens = row.get("open", {})
         for s in symbols:
-            if isinstance(close, dict):
-                raw = close.get(s)
-                close_vals[s].append(float(raw) if raw is not None else float("nan"))
-            else:
-                close_vals[s].append(float(close) if close is not None else float("nan"))
+            close_vals[s].append(_extract(close, s))
+            open_vals[s].append(_extract(opens, s))
 
     close_df = pd.DataFrame(close_vals, index=dates)
+
+    if fill_timing == "next_open":
+        open_df = pd.DataFrame(open_vals, index=dates)
+        if open_df.isna().all().all() and len(data) > 0:
+            raise ValueError(
+                "fill_timing='next_open' requires 'open' prices in env rows, "
+                "but none were found. Ensure the canonical_equity_ohlcv join "
+                "includes the open column."
+            )
+        # Guard against zero/negative opens (missing-data sentinels) → NaN.
+        open_df = open_df.where(open_df > 0)
+        returns_df = close_df / open_df - 1.0
+        return returns_df.iloc[1:]  # t_0 is never a fill date (lag >= 1)
+
     returns_df = close_df.pct_change().iloc[1:]  # Drop first NaN row
     return returns_df
 

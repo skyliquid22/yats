@@ -73,6 +73,8 @@ def _build_spec(spec_dict: dict[str, Any]) -> spec_mod.ExperimentSpec:
         hierarchy_enabled=spec_dict.get("hierarchy_enabled", False),
         controller_config=spec_dict.get("controller_config"),
         allocator_by_mode=spec_dict.get("allocator_by_mode"),
+        execution_lag_days=spec_dict.get("execution_lag_days", 1),
+        fill_timing=spec_dict.get("fill_timing", "next_close"),
     )
 
 

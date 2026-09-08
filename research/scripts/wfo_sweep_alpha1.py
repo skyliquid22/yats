@@ -97,6 +97,15 @@ PPO_CHAMPION_SHARPE = 2.17
 # Execution lag: 1=fill next bar (honest for EOD features), 0=old same-bar fill
 EXECUTION_LAG = 1
 
+# Unified execution timing (V11-1) — decision EOD(t), fill at:
+#   'next_close' (default): close(t+1); weight earns close(t+1)->close(t+2)
+#   'next_open': open(t+1); weight earns open(t+1)->close(t+1) (intraday)
+FILL_TIMING = os.environ.get("YATS_FILL_TIMING", "next_close")
+if FILL_TIMING not in ("next_close", "next_open"):
+    raise ValueError(f"YATS_FILL_TIMING must be 'next_close' or 'next_open', got '{FILL_TIMING}'")
+if FILL_TIMING == "next_open" and EXECUTION_LAG == 0:
+    raise ValueError("fill_timing='next_open' requires EXECUTION_LAG=1 (no same-day open fills)")
+
 
 def mark(msg: str) -> None:
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -134,7 +143,7 @@ def load_panel() -> pd.DataFrame:
     features_df["date"] = pd.to_datetime(features_df["date"]).dt.date
 
     cur.execute(
-        "SELECT timestamp, symbol, close FROM canonical_equity_ohlcv"
+        "SELECT timestamp, symbol, open, close FROM canonical_equity_ohlcv"
         " WHERE symbol IN %s AND timestamp >= %s AND timestamp <= %s"
         " ORDER BY timestamp, symbol",
         (tuple(SYMBOLS), START, END),
@@ -164,6 +173,12 @@ def load_panel() -> pd.DataFrame:
     panel["ret_1d_realized"] = compute_forward_returns(
         panel, 1, close_col="close", date_col="date", symbol_col="symbol",
     )
+
+    # Same-date intraday return open(t)->close(t) for fill_timing='next_open':
+    # a weight filled at open(t) marked to close(t) earns close(t)/open(t) - 1.
+    open_prices = pd.to_numeric(panel["open"], errors="coerce")
+    close_prices = pd.to_numeric(panel["close"], errors="coerce")
+    panel["ret_oc_1d"] = close_prices / open_prices.where(open_prices > 0) - 1.0
 
     # Residualize forward returns vs SPY rolling beta
     for h in (5, 21):
@@ -222,16 +237,23 @@ def make_eval_fn(panel: pd.DataFrame, dates: list):
         test_panel = test_panel.copy()
         test_panel["alpha_score"] = scores_series.values
 
-        # Build rank-weighted portfolio per date
+        # Build rank-weighted portfolio per date.
+        # Unified execution timing (V11-1): the weight decided from obs(t)
+        # sits at fill-date t+1 (shift below). The return it earns at t+1 is
+        #   next_close: ret_1d_realized[t+1] = close(t+1)->close(t+2)
+        #   next_open:  ret_oc_1d[t+1] = open(t+1)->close(t+1) (intraday)
+        return_col = "ret_oc_1d" if FILL_TIMING == "next_open" else "ret_1d_realized"
         weights_by_date: dict = {}
         returns_by_date: dict = {}
         for dt, grp in test_panel.groupby("date", sort=True):
             grp = grp.set_index("symbol")
             scores = grp["alpha_score"]
             weights_by_date[dt] = rank_weighted_portfolio(scores, max_symbol_weight=0.30)
-            returns_by_date[dt] = grp["ret_1d_realized"]
+            returns_by_date[dt] = grp[return_col]
 
-        # Apply execution lag: decision from close(t-1) fills at close(t), earns ret_1d_realized[t]
+        # Apply execution lag: decision from close(t-1) fills at close(t)
+        # (next_close, earning ret_1d_realized[t]) or at open(t) (next_open,
+        # earning ret_oc_1d[t])
         if EXECUTION_LAG > 0:
             sorted_dts = sorted(weights_by_date.keys())
             weights_by_date = {

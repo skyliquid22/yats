@@ -91,6 +91,7 @@ _install_mocks()
 from pipelines.yats_pipelines.jobs.experiment_run import (
     _apply_evaluation_split,
     _build_returns_df,
+    _fill_skip,
     _merge_closes_into_features,
     _reconstruct_spec,
     _dataframe_to_env_rows,
@@ -447,6 +448,236 @@ class TestExecutionLagAlignment:
         assert all(r > 0 for r in result["portfolio_returns"]), (
             f"expected all positive returns on rising prices, got {result['portfolio_returns']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fill timing (V11-1 unified execution timing)
+# ---------------------------------------------------------------------------
+
+
+class TestFillSkip:
+    """_fill_skip maps (execution_lag_days, fill_timing) to the obs->mark-date offset."""
+
+    def test_next_close_lag1_default(self):
+        assert _fill_skip(1, "next_close") == 2
+
+    def test_next_close_lag0_legacy(self):
+        assert _fill_skip(0, "next_close") == 1
+
+    def test_next_open_lag1(self):
+        # Fill at open(t+1), marked at close(t+1) — same date row as the fill
+        assert _fill_skip(1, "next_open") == 1
+
+    def test_default_fill_timing_is_next_close(self):
+        assert _fill_skip(1) == 2
+
+
+class TestNextOpenReturns:
+    """_build_returns_df(fill_timing='next_open') arithmetic: r(t) = close(t)/open(t) - 1."""
+
+    def _rows(self):
+        return [
+            {"timestamp": "2024-01-01", "open": {"AAPL": 100.0}, "close": {"AAPL": 102.0}},
+            {"timestamp": "2024-01-02", "open": {"AAPL": 104.0}, "close": {"AAPL": 101.0}},
+            {"timestamp": "2024-01-03", "open": {"AAPL": 100.0}, "close": {"AAPL": 105.0}},
+        ]
+
+    def test_open_to_close_values(self):
+        df = _build_returns_df(self._rows(), ["AAPL"], fill_timing="next_open")
+        # First row (t_0) dropped: t_0 is never a fill date under lag >= 1
+        assert list(df.index) == ["2024-01-02", "2024-01-03"]
+        assert df.loc["2024-01-02", "AAPL"] == pytest.approx(101.0 / 104.0 - 1.0)
+        assert df.loc["2024-01-03", "AAPL"] == pytest.approx(105.0 / 100.0 - 1.0)
+
+    def test_next_close_default_unchanged(self):
+        """Regression: default output identical to the pre-fill_timing behavior."""
+        rows = self._rows()
+        df_default = _build_returns_df(rows, ["AAPL"])
+        df_explicit = _build_returns_df(rows, ["AAPL"], fill_timing="next_close")
+        expected = pd.DataFrame(
+            {"AAPL": [101.0 / 102.0 - 1.0, 105.0 / 101.0 - 1.0]},
+            index=["2024-01-02", "2024-01-03"],
+        )
+        pd.testing.assert_frame_equal(df_default, df_explicit)
+        pd.testing.assert_frame_equal(df_default, expected)
+
+    def test_missing_open_is_nan(self):
+        rows = self._rows()
+        del rows[1]["open"]["AAPL"]
+        df = _build_returns_df(rows, ["AAPL"], fill_timing="next_open")
+        assert pd.isna(df.loc["2024-01-02", "AAPL"])
+        assert df.loc["2024-01-03", "AAPL"] == pytest.approx(0.05)
+
+    def test_zero_open_is_nan_not_inf(self):
+        rows = self._rows()
+        rows[1]["open"]["AAPL"] = 0.0
+        df = _build_returns_df(rows, ["AAPL"], fill_timing="next_open")
+        assert pd.isna(df.loc["2024-01-02", "AAPL"])
+
+    def test_no_opens_at_all_raises(self):
+        rows = [
+            {"timestamp": "2024-01-01", "close": {"AAPL": 100.0}},
+            {"timestamp": "2024-01-02", "close": {"AAPL": 101.0}},
+        ]
+        with pytest.raises(ValueError, match="next_open.*requires 'open'"):
+            _build_returns_df(rows, ["AAPL"], fill_timing="next_open")
+
+
+class TestFillTimingAlignment:
+    """Weight/return alignment under the unified timing model.
+
+    Convention (V11-1): decision_time = EOD(t_i) for obs row i.
+      next_close (lag=1, default): fill close(t_{i+1}); weight indexed at
+        t_{i+2} against close(t_{i+1})->close(t_{i+2}).
+      next_open (lag=1): fill open(t_{i+1}); weight indexed at t_{i+1}
+        against open(t_{i+1})->close(t_{i+1}).
+    """
+
+    SYMBOLS = ["AAPL", "MSFT"]
+
+    def _make_data(self, n: int = 6) -> list[dict]:
+        """Rows with distinct open/close so open->close != close->close."""
+        rows = []
+        for i in range(n):
+            close = {"AAPL": 100.0 + i, "MSFT": 200.0 + 2 * i}
+            opens = {s: c * 0.99 for s, c in close.items()}  # +1.0101% intraday
+            rows.append({
+                "timestamp": f"2024-01-{i+1:02d}",
+                "close": close,
+                "open": opens,
+            })
+        return rows
+
+    def _run(self, fill_timing: str, lag: int = 1, n: int = 6) -> dict:
+        data = self._make_data(n)
+        weights_list = _rollout_non_rl_policy("equal_weight", data, self.SYMBOLS, {})
+        returns_df = _build_returns_df(data, self.SYMBOLS, fill_timing=fill_timing)
+
+        skip = _fill_skip(lag, fill_timing)
+        dates = [row["timestamp"] for row in data[skip:]]
+        m = min(len(weights_list), len(dates))
+        weights_df = pd.DataFrame(weights_list[:m], index=dates[:m], columns=self.SYMBOLS)
+
+        common_idx = weights_df.index.intersection(returns_df.index)
+        port = (weights_df.loc[common_idx] * returns_df.loc[common_idx]).sum(axis=1)
+        return {
+            "dates": list(common_idx),
+            "portfolio_returns": list(port.values),
+        }
+
+    def test_next_open_marks_weight_one_bar_earlier_than_next_close(self):
+        r_open = self._run("next_open")
+        r_close = self._run("next_close")
+        assert r_open["dates"][0] == "2024-01-02"
+        assert r_close["dates"][0] == "2024-01-03"
+        assert len(r_open["portfolio_returns"]) == len(r_close["portfolio_returns"]) + 1
+
+    def test_next_open_portfolio_return_is_intraday(self):
+        """Each day's portfolio return = equal-weighted close/open - 1."""
+        r_open = self._run("next_open")
+        # open = 0.99 * close for both symbols → intraday return = 1/0.99 - 1
+        expected = 1.0 / 0.99 - 1.0
+        for r in r_open["portfolio_returns"]:
+            assert r == pytest.approx(expected)
+
+    def test_default_next_close_regression_identical_to_lag_formula(self):
+        """Regression: default fill_timing reproduces the old skip = 1 + lag path exactly."""
+        data = self._make_data(8)
+        weights_list = _rollout_non_rl_policy("equal_weight", data, self.SYMBOLS, {})
+
+        # Old (pre-fill_timing) computation, verbatim
+        skip_old = 1 + 1
+        dates_old = [row["timestamp"] for row in data[skip_old:]]
+        m = min(len(weights_list), len(dates_old))
+        weights_old = pd.DataFrame(weights_list[:m], index=dates_old[:m], columns=self.SYMBOLS)
+        returns_old = _build_returns_df(data, self.SYMBOLS)
+        common = weights_old.index.intersection(returns_old.index)
+        port_old = (weights_old.loc[common] * returns_old.loc[common]).sum(axis=1)
+
+        r_new = self._run("next_close", n=8)
+        np.testing.assert_allclose(r_new["portfolio_returns"], port_old.values)
+        assert r_new["dates"] == list(port_old.index)
+
+
+class TestLeakyArtifactRegression:
+    """A leaky artifact (weight peeks at the return it would earn under the
+    legacy same-bar convention) must show collapsed Sharpe under BOTH
+    next_close and next_open, while legacy lag=0 rewards it enormously.
+
+    Data construction: the close-to-close return is dominated by the
+    overnight gap (sigma 2%), with tiny intraday noise (sigma 0.05%). The
+    leaky weight for obs row i is 1 iff close(t_{i+1}) > close(t_i) — future
+    information at decision time EOD(t_i).
+      - legacy lag=0 next_close: the weight sits at t_{i+1} and earns exactly
+        the peeked return -> only positive returns -> huge Sharpe.
+      - default next_close (lag=1): earns close(t_{i+1})->close(t_{i+2}),
+        independent of the peek -> Sharpe collapses.
+      - next_open (lag=1): earns open(t_{i+1})->close(t_{i+1}) = intraday
+        noise, (near-)independent of the gap-dominated peek -> collapses.
+    """
+
+    def _make_gap_data(self, n: int = 1000, seed: int = 0) -> list[dict]:
+        rng = np.random.default_rng(seed)
+        rows = []
+        close = 100.0
+        for i in range(n):
+            if i == 0:
+                opn = close
+            else:
+                gap = rng.normal(0.0, 0.02)        # overnight move dominates
+                opn = close * (1.0 + gap)
+            noise = rng.normal(0.0, 0.0005)         # tiny intraday move
+            close = opn * (1.0 + noise)
+            rows.append({
+                "timestamp": f"t{i:04d}",
+                "open": {"AAPL": opn},
+                "close": {"AAPL": close},
+            })
+        return rows
+
+    @staticmethod
+    def _sharpe(returns: "pd.Series") -> float:
+        arr = np.asarray(returns, dtype=float)
+        arr = arr[~np.isnan(arr)]
+        if arr.std(ddof=1) == 0:
+            return 0.0
+        return float(arr.mean() / arr.std(ddof=1) * np.sqrt(252))
+
+    def _leaky_weights(self, data: list[dict]) -> list[np.ndarray]:
+        """weights[i] = 1 iff the day-(i+1) close-to-close return is positive."""
+        closes = [row["close"]["AAPL"] for row in data]
+        weights = []
+        for i in range(len(data) - 1):
+            w = 1.0 if closes[i + 1] > closes[i] else 0.0
+            weights.append(np.array([w]))
+        return weights
+
+    def _sharpe_for(self, data, weights_list, lag: int, fill_timing: str) -> float:
+        returns_df = _build_returns_df(data, ["AAPL"], fill_timing=fill_timing)
+        skip = _fill_skip(lag, fill_timing)
+        dates = [row["timestamp"] for row in data[skip:]]
+        m = min(len(weights_list), len(dates))
+        weights_df = pd.DataFrame(weights_list[:m], index=dates[:m], columns=["AAPL"])
+        common = weights_df.index.intersection(returns_df.index)
+        port = (weights_df.loc[common] * returns_df.loc[common]).sum(axis=1)
+        return self._sharpe(port)
+
+    def test_leak_collapses_under_both_fill_timings(self):
+        data = self._make_gap_data()
+        weights_list = self._leaky_weights(data)
+
+        sharpe_legacy = self._sharpe_for(data, weights_list, lag=0, fill_timing="next_close")
+        sharpe_next_close = self._sharpe_for(data, weights_list, lag=1, fill_timing="next_close")
+        sharpe_next_open = self._sharpe_for(data, weights_list, lag=1, fill_timing="next_open")
+
+        # Legacy same-bar fill rewards the peek massively (theoretical annualized
+        # Sharpe of the artifact is ~11; allow sampling variation)
+        assert sharpe_legacy > 8.0, f"legacy lag=0 Sharpe={sharpe_legacy:.2f}"
+        # Both honest timings collapse it
+        assert abs(sharpe_next_close) < 2.0, f"next_close Sharpe={sharpe_next_close:.2f}"
+        assert abs(sharpe_next_open) < 2.0, f"next_open Sharpe={sharpe_next_open:.2f}"
+        assert abs(sharpe_next_close) < sharpe_legacy / 5
+        assert abs(sharpe_next_open) < sharpe_legacy / 5
 
 
 class TestApplyEvaluationSplit:

@@ -300,6 +300,8 @@ def _reconstruct_spec(spec_data: dict) -> Any:
         hierarchy_enabled=spec_data.get("hierarchy_enabled", False),
         controller_config=spec_data.get("controller_config"),
         allocator_by_mode=spec_data.get("allocator_by_mode"),
+        execution_lag_days=spec_data.get("execution_lag_days", 1),
+        fill_timing=spec_data.get("fill_timing", "next_close"),
         regime_thresholds_hash=spec_data.get("regime_thresholds_hash", ""),
         regime_detector_version=spec_data.get("regime_detector_version", ""),
         regime_universe=tuple(spec_data.get("regime_universe", ())),

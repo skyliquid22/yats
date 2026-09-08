@@ -255,6 +255,14 @@ class ExperimentSpec:
     portfolio_risk: PortfolioRiskConfig | None = None
     # Execution lag: 1=fill next bar (honest for EOD features), 0=same-bar fill (old/infeasible)
     execution_lag_days: int = 1
+    # Unified execution timing (V11-1): decision_time = EOD(t); fill is either
+    #   'next_close' (DEFAULT) — fill at close(t+1); weight earns close(t+1)->close(t+2)
+    #   'next_open'            — fill at open(t+1);  weight earns open(t+1)->close(t+1)
+    # Same-day close fill exists ONLY under legacy execution_lag_days=0 (which
+    # warns loudly); next_open therefore requires execution_lag_days=1.
+    # New optional field with a default — handled like execution_lag_days was:
+    # validated in __post_init__ and included in canonical JSON.
+    fill_timing: str = "next_close"
 
     # Frozen hashes (6, set at creation time)
     regime_thresholds_hash: str = ""
@@ -345,6 +353,19 @@ class ExperimentSpec:
         if self.execution_lag_days not in (0, 1):
             raise ValueError(
                 f"execution_lag_days must be 0 or 1, got {self.execution_lag_days}"
+            )
+
+        # --- Fill timing validation (V11-1 unified execution timing) ---
+        if self.fill_timing not in ("next_close", "next_open"):
+            raise ValueError(
+                f"fill_timing must be 'next_close' or 'next_open', "
+                f"got '{self.fill_timing}'"
+            )
+        if self.fill_timing == "next_open" and self.execution_lag_days == 0:
+            raise ValueError(
+                "fill_timing='next_open' requires execution_lag_days=1; "
+                "same-day fills exist only under legacy execution_lag_days=0 "
+                "with fill_timing='next_close'"
             )
 
     # ------------------------------------------------------------------
