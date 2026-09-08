@@ -41,6 +41,9 @@ class IngestThetadataConfig(Config):
     eod_strike_range: int = 0   # at most 2n+1 strikes around spot (0 = off)
     # PRO plan allows 8 concurrent gRPC requests; override via THETADATA_MAX_CONCURRENT
     max_concurrent: int = int(os.environ.get("THETADATA_MAX_CONCURRENT", "8"))
+    # Disable the (symbol, day) resume skip in eod_by_date mode and re-fetch
+    # every day in range. QuestDB dedup/canonicalize keep reruns idempotent.
+    force: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -291,13 +294,16 @@ def fetch_thetadata_options(
             # RESUME: query which (symbol, day) pairs already exist in raw_thetadata_options_eod
             # and skip them. Saves significant time on incremental backfills.
             already_ingested: set[tuple[str, str]] = set()
-            conn_check = _pg_conn(QuestDBResource())
-            try:
-                already_ingested = _get_ingested_days(
-                    conn_check, config.underlyings, start_ymd, end_ymd
-                )
-            finally:
-                conn_check.close()
+            if config.force:
+                context.log.info("force=True — resume disabled, re-fetching all days")
+            else:
+                conn_check = _pg_conn(QuestDBResource())
+                try:
+                    already_ingested = _get_ingested_days(
+                        conn_check, config.underlyings, start_ymd, end_ymd
+                    )
+                finally:
+                    conn_check.close()
 
             if already_ingested:
                 context.log.info(

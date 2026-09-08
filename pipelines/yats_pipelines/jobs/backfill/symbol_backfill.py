@@ -1,163 +1,248 @@
-"""Dagster job — one-command symbol backfill and ingestion.
+"""One-command symbol backfill — ingest → canonicalize → feature pipeline.
 
-This job provides a single command to add new symbols to the YATS system:
+Entry point:
     python -m yats_pipelines.backfill --symbols NFLX,AMD --start 2020-01-01
 
-The job orchestrates the full ingestion pipeline for the specified symbols:
-1. Ingest historical data from ThetaData (gRPC-2 path)
-2. Canonicalize the data (equity/option_eod/fundamentals domains)
-3. Run the feature pipeline for configured feature sets
+Each stage is an existing Dagster job executed in-process, in this order:
 
-The job handles:
-- Resume: skips already-ingested data
-- Date ranges: configurable start/end dates
-- Concurrency: respects THETADATA_MAX_CONCURRENT limit
-- Error handling: graceful degradation on partial failures
+1. ingest_thetadata          — options EOD history via gRPC (by-date bulk mode)
+2. ingest_alpaca             — equity OHLCV daily bars
+3. ingest_financialdatasets  — fundamentals / financial metrics / insider / 13F
+4. canonicalize              — raw → canonical for all backfill domains
+5. feature_pipeline          — one run per feature set, restricted to the
+                               backfilled symbols
+
+A stage failure aborts the remaining stages: downstream stages would otherwise
+compute canonical/feature rows from incomplete raw data. Re-running the same
+command is safe — the options ingest resumes past already-fetched (symbol, day)
+pairs and canonicalization dedups on rerun. Pass force=True (CLI --force) to
+re-fetch option days that are already in QuestDB.
 """
+
+from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timedelta
-from typing import List
+import uuid
+from datetime import datetime, timezone
 
-from dagster import Config, OpExecutionContext, job, op
-from dagster import Failure
+from yats_pipelines.jobs.canonicalize import canonicalize
+from yats_pipelines.jobs.feature_pipeline import feature_pipeline
+from yats_pipelines.jobs.ingest_alpaca import ingest_alpaca
+from yats_pipelines.jobs.ingest_financialdatasets import ingest_financialdatasets
+from yats_pipelines.jobs.ingest_thetadata import ingest_thetadata
+from yats_pipelines.utils.run_recorder import record_finish, record_start
 
 logger = logging.getLogger(__name__)
 
+# Feature sets computed for freshly backfilled symbols. Together these cover
+# every canonical domain the backfill ingests: core_v1 (OHLCV + fundamentals +
+# cross-sectional + regime), options_v1 (EOD chain), insider_v1 (insider + 13F).
+DEFAULT_FEATURE_SETS: tuple[str, ...] = ("core_v1", "options_v1", "insider_v1")
 
-class SymbolBackfillConfig(Config):
-    """Configuration for the symbol backfill job."""
+# Canonicalize domains covered by the backfill's three ingest stages.
+BACKFILL_DOMAINS: tuple[str, ...] = (
+    "equity_ohlcv",
+    "fundamentals",
+    "financial_metrics",
+    "option_eod",
+    "insider_trades",
+    "institutional_holdings",
+)
 
-    symbols: List[str]
-    start_date: str  # YYYY-MM-DD
-    end_date: str = ""  # YYYY-MM-DD, empty = today
-    # Force re-ingestion even if data already exists
-    force: bool = False
-    # Maximum concurrent gRPC requests (PRO plan allows 8)
-    max_concurrent: int = int(os.environ.get("THETADATA_MAX_CONCURRENT", "8"))
+
+def default_max_concurrent() -> int:
+    """Concurrent gRPC request cap — PRO plan allows 8."""
+    return int(os.environ.get("THETADATA_MAX_CONCURRENT", "8"))
 
 
-@op
-def validate_config(context: OpExecutionContext, config: SymbolBackfillConfig) -> dict:
-    """Validate the job configuration and prepare parameters."""
-    context.log.info(f"Validating configuration for symbols: {', '.join(config.symbols)}")
+def resolve_end_date(end_date: str) -> str:
+    """Empty end date defaults to today (UTC)."""
+    return end_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # Validate symbols
-    if not config.symbols:
-        raise Failure("No symbols specified for backfill")
 
-    # Validate dates
+def validate_params(symbols: list[str], start_date: str, end_date: str) -> None:
+    """Validate backfill parameters. Raises ValueError on bad input."""
+    if not symbols:
+        raise ValueError("No symbols specified for backfill")
     try:
-        start_date = datetime.strptime(config.start_date, "%Y-%m-%d")
-        if config.end_date:
-            end_date = datetime.strptime(config.end_date, "%Y-%m-%d")
-        else:
-            end_date = datetime.now()
-
-        if start_date > end_date:
-            raise Failure("start_date cannot be after end_date")
-    except ValueError as e:
-        raise Failure(f"Invalid date format: {str(e)}")
-
-    context.log.info(f"Date range: {config.start_date} to {config.end_date or 'today'}")
-
-    return {
-        "symbols": config.symbols,
-        "start_date": config.start_date,
-        "end_date": config.end_date or end_date.strftime("%Y-%m-%d"),
-        "force": config.force,
-        "max_concurrent": config.max_concurrent,
-    }
-
-
-@op
-def ingest_symbol_data(context: OpExecutionContext, params: dict) -> dict:
-    """Ingest historical data for the specified symbols.
-
-    Uses the ingest_thetadata job infrastructure with backfill parameters.
-    """
-    from ..jobs.ingest_thetadata import IngestThetadataConfig, fetch_thetadata_options, write_raw_thetadata, canonicalize_options
-    from ..resources.questdb import QuestDBResource
-    from ..utils.run_recorder import record_start, record_finish
-    from dagster import build_op_context
-
-    context.log.info(f"Ingesting data for symbols: {', '.join(params['symbols'])}")
-
-    # Record the backfill start
-    run_id = context.run_id
-    detail = f"backfill {' '.join(params['symbols'])}"
-    record_start("symbol_backfill", run_id, detail)
-
-    try:
-        # Configure the ingestion job
-        ingest_config = IngestThetadataConfig(
-            underlyings=params["symbols"],
-            start_date=params["start_date"].replace("-", ""),
-            end_date=params["end_date"].replace("-", ""),
-            eod_by_date=True,  # Use efficient by-date mode for backfills
-            max_concurrent=params["max_concurrent"],
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"Invalid date format (expected YYYY-MM-DD): {exc}") from exc
+    if start > end:
+        raise ValueError(
+            f"start_date {start_date} cannot be after end_date {end_date}"
         )
 
-        # Create a sub-context for the ingestion ops
-        sub_context = build_op_context(run_id=run_id)
 
-        # Fetch the data
-        fetch_result = fetch_thetadata_options(sub_context, ingest_config)
-        context.log.info(f"Fetched {len(fetch_result['chain_rows'])} chain rows and {len(fetch_result['eod_rows'])} EOD rows")
+def build_stage_plan(
+    symbols: list[str],
+    start_date: str,
+    end_date: str,
+    *,
+    force: bool = False,
+    max_concurrent: int | None = None,
+    feature_sets: tuple[str, ...] | list[str] = DEFAULT_FEATURE_SETS,
+) -> list[tuple[str, object, dict]]:
+    """Build the ordered (stage_name, job_def, run_config) execution plan.
 
-        # Write raw data
-        write_result = write_raw_thetadata(sub_context, fetch_result)
-        context.log.info(f"Wrote {write_result['chain_count']} chain rows and {write_result['eod_count']} EOD rows")
-
-        # Canonicalize the data
-        canonicalize_options(sub_context, write_result)
-        context.log.info("Completed canonicalization of options data")
-
-        record_finish("symbol_backfill", run_id, "success")
-        return {
-            "symbols": params["symbols"],
-            "rows_written": write_result["chain_count"] + write_result["eod_count"],
-        }
-
-    except Exception as e:
-        record_finish("symbol_backfill", run_id, "failed", failure_cause=str(e)[:200])
-        raise Failure(f"Symbol ingestion failed: {str(e)}")
-
-
-@op
-def run_feature_pipeline(context: OpExecutionContext, ingestion_result: dict) -> None:
-    """Run the feature pipeline for the newly ingested symbols.
-
-    This processes the canonicalized data through the feature engineering pipeline.
+    Dates are ISO YYYY-MM-DD throughout; the thetadata ingest op strips the
+    dashes itself for the vendor's YYYYMMDD format.
     """
-    from ..jobs.feature_pipeline import run_feature_pipeline_for_symbols
+    if max_concurrent is None:
+        max_concurrent = default_max_concurrent()
 
-    symbols = ingestion_result["symbols"]
-    context.log.info(f"Running feature pipeline for symbols: {', '.join(symbols)}")
+    plan: list[tuple[str, object, dict]] = [
+        (
+            "ingest_thetadata",
+            ingest_thetadata,
+            {
+                "ops": {
+                    "fetch_thetadata_options": {
+                        "config": {
+                            "underlyings": symbols,
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            # By-date bulk mode: one greeks-eod call per
+                            # (symbol, trading day) — the only mode that scales
+                            # to multi-year backfills.
+                            "eod_by_date": True,
+                            "max_concurrent": max_concurrent,
+                            "force": force,
+                        }
+                    }
+                }
+            },
+        ),
+        (
+            "ingest_alpaca",
+            ingest_alpaca,
+            {
+                "ops": {
+                    "fetch_alpaca_bars": {
+                        "config": {
+                            "ticker_list": symbols,
+                            "start_date": start_date,
+                            "end_date": end_date,
+                        }
+                    }
+                }
+            },
+        ),
+        (
+            "ingest_financialdatasets",
+            ingest_financialdatasets,
+            {
+                "ops": {
+                    "ingest_financialdatasets_op": {
+                        "config": {
+                            "ticker_list": symbols,
+                            # data_domains defaults to all six FD domains
+                        }
+                    }
+                }
+            },
+        ),
+        (
+            "canonicalize",
+            canonicalize,
+            {
+                "ops": {
+                    "canonicalize_op": {
+                        "config": {
+                            "domains": list(BACKFILL_DOMAINS),
+                            "start_date": start_date,
+                            "end_date": end_date,
+                        }
+                    }
+                }
+            },
+        ),
+    ]
 
-    try:
-        # Run the feature pipeline for these symbols
-        # This will use the existing feature pipeline infrastructure
-        run_feature_pipeline_for_symbols(symbols)
-        context.log.info("Feature pipeline completed successfully")
-    except Exception as e:
-        logger.error(f"Feature pipeline failed: {str(e)}")
-        raise Failure(f"Feature pipeline failed: {str(e)}")
+    for fs in feature_sets:
+        plan.append(
+            (
+                f"feature_pipeline:{fs}",
+                feature_pipeline,
+                {
+                    "ops": {
+                        "feature_pipeline_op": {
+                            "config": {
+                                "tickers": symbols,
+                                "feature_set": fs,
+                                "start_date": start_date,
+                                "end_date": end_date,
+                            }
+                        }
+                    }
+                },
+            )
+        )
+
+    return plan
 
 
-@job(tags={"yats/concurrency_pool": "backfill", "dagster/priority": "15"})
-def symbol_backfill():
-    """Dagster job: one-command symbol backfill and ingestion.
+def run_symbol_backfill(
+    symbols: list[str],
+    start_date: str,
+    end_date: str = "",
+    *,
+    force: bool = False,
+    max_concurrent: int | None = None,
+    feature_sets: tuple[str, ...] | list[str] = DEFAULT_FEATURE_SETS,
+) -> bool:
+    """Run the full backfill chain for the given symbols.
 
-    Usage:
-        python -m yats_pipelines.backfill --symbols NFLX,AMD --start 2020-01-01
-
-    This job orchestrates the full ingestion pipeline for new symbols:
-    1. Ingest historical data from ThetaData
-    2. Canonicalize the data
-    3. Run the feature pipeline
+    Returns True when every stage succeeded. Stops at the first failed stage
+    and returns False — downstream stages must not run on partial raw data.
     """
-    params = validate_config()
-    ingestion_result = ingest_symbol_data(params)
-    run_feature_pipeline(ingestion_result)
+    symbols = [s.strip().upper() for s in symbols if s.strip()]
+    end_date = resolve_end_date(end_date)
+    validate_params(symbols, start_date, end_date)
+
+    run_id = f"backfill-{uuid.uuid4().hex[:12]}"
+    detail = f"{','.join(symbols)} {start_date}..{end_date}"
+    record_start("symbol_backfill", run_id, detail)
+
+    plan = build_stage_plan(
+        symbols,
+        start_date,
+        end_date,
+        force=force,
+        max_concurrent=max_concurrent,
+        feature_sets=feature_sets,
+    )
+
+    for stage_name, job_def, run_config in plan:
+        logger.info("symbol_backfill %s: running stage %s", run_id, stage_name)
+        try:
+            result = job_def.execute_in_process(
+                run_config=run_config, raise_on_error=False
+            )
+        except Exception as exc:
+            logger.error(
+                "symbol_backfill %s: stage %s raised: %s", run_id, stage_name, exc
+            )
+            record_finish(
+                "symbol_backfill", run_id, "failed",
+                failure_cause=f"{stage_name}: {exc}"[:200],
+            )
+            return False
+
+        if not result.success:
+            logger.error(
+                "symbol_backfill %s: stage %s failed — aborting remaining stages",
+                run_id, stage_name,
+            )
+            record_finish(
+                "symbol_backfill", run_id, "failed",
+                failure_cause=f"stage {stage_name} failed",
+            )
+            return False
+
+        logger.info("symbol_backfill %s: stage %s succeeded", run_id, stage_name)
+
+    record_finish("symbol_backfill", run_id, "success")
+    return True

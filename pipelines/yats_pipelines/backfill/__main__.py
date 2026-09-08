@@ -1,87 +1,94 @@
-"""Main entry point for the YATS backfill command.
+"""CLI entry point for the one-command symbol backfill.
 
-Allows running the symbol backfill job from the command line:
     python -m yats_pipelines.backfill --symbols NFLX,AMD --start 2020-01-01
+
+Chains ingest (ThetaData options EOD, Alpaca OHLCV, financialdatasets.ai
+fundamentals/insider/13F) → canonicalize → feature pipeline for the given
+symbols. See docs/ingestion.md ("Adding a symbol") for the full runbook.
 """
 
+from __future__ import annotations
+
 import argparse
+import logging
 import sys
-from datetime import datetime
-from typing import List
 
-from dagster import execute_job, job, op
-from dagster import DagsterInstance
+from yats_pipelines.jobs.backfill.symbol_backfill import (
+    DEFAULT_FEATURE_SETS,
+    default_max_concurrent,
+    run_symbol_backfill,
+)
 
-from ..jobs.backfill.symbol_backfill import symbol_backfill
 
-
-def main():
-    parser = argparse.ArgumentParser(description="YATS Symbol Backfill")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m yats_pipelines.backfill",
+        description="YATS one-command symbol backfill",
+    )
     parser.add_argument(
         "--symbols",
         required=True,
-        help="Comma-separated list of symbols to backfill (e.g., NFLX,AMD)",
+        help="Comma-separated list of symbols to backfill (e.g. NFLX,AMD)",
     )
     parser.add_argument(
         "--start",
         required=True,
-        help="Start date for backfill in YYYY-MM-DD format",
+        help="Start date in YYYY-MM-DD format",
     )
     parser.add_argument(
         "--end",
-        help="End date for backfill in YYYY-MM-DD format (default: today)",
+        default="",
+        help="End date in YYYY-MM-DD format (default: today, UTC)",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Force re-ingestion even if data already exists",
+        help="Re-fetch option days even if already ingested (disables resume)",
     )
     parser.add_argument(
         "--max-concurrent",
         type=int,
-        default=8,
-        help="Maximum concurrent gRPC requests (default: 8)",
+        default=default_max_concurrent(),
+        help="Max concurrent gRPC requests (default: THETADATA_MAX_CONCURRENT or 8)",
     )
+    parser.add_argument(
+        "--feature-sets",
+        default=",".join(DEFAULT_FEATURE_SETS),
+        help=f"Comma-separated feature sets to compute (default: {','.join(DEFAULT_FEATURE_SETS)})",
+    )
+    return parser
 
-    args = parser.parse_args()
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    args = build_parser().parse_args(argv)
 
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     if not symbols:
-        print("Error: No valid symbols provided")
-        sys.exit(1)
+        print("Error: no valid symbols provided", file=sys.stderr)
+        return 2
 
-    end_date = args.end or datetime.now().strftime("%Y-%m-%d")
+    feature_sets = [s.strip() for s in args.feature_sets.split(",") if s.strip()]
 
-    # Configure the job
-    config = {
-        "ops": {
-            "validate_config": {
-                "config": {
-                    "symbols": symbols,
-                    "start_date": args.start,
-                    "end_date": end_date,
-                    "force": args.force,
-                    "max_concurrent": args.max_concurrent,
-                }
-            }
-        }
-    }
+    try:
+        ok = run_symbol_backfill(
+            symbols,
+            args.start,
+            args.end,
+            force=args.force,
+            max_concurrent=args.max_concurrent,
+            feature_sets=feature_sets,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
-    # Execute the job
-    instance = DagsterInstance.get()
-    result = execute_job(
-        job=symbol_backfill,
-        run_config=config,
-        instance=instance,
-    )
-
-    if result.success:
-        print("Symbol backfill completed successfully!")
-        sys.exit(0)
-    else:
-        print("Symbol backfill failed!")
-        sys.exit(1)
+    if ok:
+        print(f"Symbol backfill completed successfully for: {', '.join(symbols)}")
+        return 0
+    print("Symbol backfill failed — see logs above", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

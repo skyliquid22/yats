@@ -50,6 +50,9 @@ class FeaturePipelineConfig(Config):
     """Run config for the feature pipeline."""
 
     universe: str = "sp500"  # YAML universe name under configs/universes/
+    # Explicit ticker list — when non-empty it overrides `universe`. Used by the
+    # symbol backfill to compute features for symbols not (yet) in any universe.
+    tickers: list[str] = []
     feature_set: str = "core_v1"  # Feature set name under configs/feature_sets/
     feature_set_version: str = "1.0"
     start_date: str = ""  # ISO-8601; empty = all
@@ -807,7 +810,11 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
     Reads canonical tables, computes all features in the feature set,
     writes to the features table via ILP.
     """
-    detail = f"universe={config.universe} feature_set={config.feature_set}"
+    scope = (
+        f"tickers={','.join(config.tickers[:5])}" if config.tickers
+        else f"universe={config.universe}"
+    )
+    detail = f"{scope} feature_set={config.feature_set}"
     record_start("feature_pipeline", context.run_id, detail)
     _exc: Exception | None = None
     _total_written = 0
@@ -826,9 +833,13 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
         len(fs.insider), len(fs.institutional),
     )
 
-    # Load universe
-    tickers = _load_universe(config.universe)
-    context.log.info("Universe '%s': %d tickers", config.universe, len(tickers))
+    # Load universe (explicit ticker list overrides the universe YAML)
+    if config.tickers:
+        tickers = list(config.tickers)
+        context.log.info("Explicit ticker list: %d tickers", len(tickers))
+    else:
+        tickers = _load_universe(config.universe)
+        context.log.info("Universe '%s': %d tickers", config.universe, len(tickers))
 
     conn = None
     try:
