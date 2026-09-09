@@ -104,7 +104,7 @@ def test_equity_ohlcv_writes_on_first_run():
 
 def test_equity_ohlcv_within_run_dedups_symbol_day_latest_ingested_wins():
     """Two raw bars for the same (symbol, day) collapse to ONE canonical row,
-    keeping the latest-ingested. Guards ya-n4bhm at the write-dedup layer;
+    keeping the latest-ingested. Guards write-time idempotency at the write-dedup layer;
     the storage DEDUP keys guard the cross-run vector separately."""
     now = datetime(2024, 1, 5, tzinfo=timezone.utc)
     config = CanonicalizeConfig(domains=["equity_ohlcv"])
@@ -420,7 +420,7 @@ class TestCanonicalizeFundamentals:
 
 
 # ---------------------------------------------------------------------------
-# _load_fundamentals_weighted_shares — shares_outstanding data gap fix (ya-balr8)
+# _load_fundamentals_weighted_shares — shares_outstanding data gap fix
 # ---------------------------------------------------------------------------
 
 
@@ -1035,7 +1035,7 @@ class TestCanonicalizeInsiderTrades:
         assert canonical_calls[0][1]["columns"]["price_per_share"] == pytest.approx(150.0)
 
     def test_filing_date_column_preferred_over_filed_at(self):
-        """When filing_date column is set (ya-2gqv7+), it is used as the canonical timestamp."""
+        """When filing_date column is set, it is used as the canonical timestamp."""
         filed_at = datetime(2024, 2, 10, tzinfo=timezone.utc)  # old value (wrong date)
         filing_date = datetime(2024, 2, 15, tzinfo=timezone.utc)  # corrected filing date
         row = _make_insider_trade_row(filed_at=filed_at, filing_date=filing_date)

@@ -81,7 +81,7 @@ class WFOConfig:
     concatenated in chronological order to form a single OOS track record.
 
     purge_buffer and label_horizon are inherited from EvaluationSplitConfig
-    semantics (ya-2mt9e) and applied between each train window and its
+    semantics and applied between each train window and its
     adjacent test block.
     """
 

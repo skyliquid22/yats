@@ -1,5 +1,5 @@
 # Product Requirements Document (PRD)
-# YATS — Yet Another Trading System
+# YATS: Yet Another Trading System
 
 Version: 1.0
 Owner: Ahmed
@@ -9,7 +9,7 @@ Status: Design Phase
 Purpose: Define WHAT YATS must deliver. YATS is a successor to the Quanto trading
 platform as an MCP-native system. The existing codebase is referred to as "Quanto" (the predecessor).
 
-Audience: QuantTown agents, Claude Code instances, human developers.
+Audience: AI agents, Claude Code instances, human developers.
 
 **This document is standalone.** Appendices A-J at the end provide full
 implementation specifications for all subsystems (env, rewards, experiment spec,
@@ -30,8 +30,8 @@ broker replay, tiered promotion, and paper/live execution under a static risk co
 YATS rebuilds this system with three structural changes:
 
 1. **MCP-native interface.** A TypeScript MCP server (official SDK) replaces the CLI
-   and scripts. QuantTown agents invoke YATS tools via MCP. Humans debug via
-   Python notebooks or ad-hoc scripts — no separate CLI layer.
+   and scripts. Agents invoke YATS tools via MCP. Humans debug via
+   Python notebooks or ad-hoc scripts; no separate CLI layer.
 
 2. **QuestDB as the queryable backbone.** Parquet-on-disk is replaced by QuestDB for
    all time-series and metadata that needs to be queried across experiments, symbols,
@@ -48,9 +48,9 @@ YATS rebuilds this system with three structural changes:
    - Risk engine with simulation mode for research
    - Queryable experiment history, audit trails, and promotion records
 
-Everything else — the experiment lifecycle, canonicalization philosophy, policy
+Everything else (the experiment lifecycle, canonicalization philosophy, policy
 abstractions, reward versioning, determinism guarantees, shadow execution model,
-risk policy as static contract — carries over from Quanto because it is well-designed.
+risk policy as static contract) carries over from Quanto because it is well-designed.
 
 ---
 
@@ -89,7 +89,7 @@ risk policy as static contract — carries over from Quanto because it is well-d
 - .yats_data/ directory structure for artifacts
 
 ### What Gets Dropped from v1 Scope
-- Options data ingestion (no vendor coverage — deferred)
+- Options data ingestion (no vendor coverage; deferred)
 - Options-implied features (IV ATM, risk reversals, butterflies, vol surface)
 - Internal Greek computation
 - Tenor/delta bucketing
@@ -104,7 +104,7 @@ risk policy as static contract — carries over from Quanto because it is well-d
 
 YATS MUST:
 
-1. Expose all platform capabilities as MCP tools callable by QuantTown agents
+1. Expose all platform capabilities as MCP tools callable by AI agents
 2. Ingest equity OHLCV from Alpaca and fundamentals/metrics/filings from financialdatasets.ai
 3. Maintain raw -> canonical two-layer storage in QuestDB with full lineage
 4. Support both batch reconciliation (historical) and streaming append (live)
@@ -121,18 +121,16 @@ YATS MUST:
 15. Maintain full audit trail of every tool invocation, pipeline run, and risk decision
 16. Orchestrate all pipelines via Dagster (including qualification and promotion)
 17. Store experiment metadata and metrics in QuestDB for cross-experiment querying
-18. Compose with QuantTown MEOW stack (molecules invoke YATS tools as beads)
 
 ## 3.2 Non-Goals
 
 YATS WILL NOT:
 
-- Include options data or options-derived features (no vendor — deferred to v2)
+- Include options data or options-derived features (no vendor; deferred to v2)
 - Provide a GUI, dashboard, or CLI (MCP is the interface; notebooks for debugging)
 - Implement portfolio optimization
 - Implement AutoML or automated feature discovery
 - Support tick-level data or HFT
-- Replace QuantTown — YATS is the toolbox, QuantTown is the firm
 - Implement dynamic regime-adaptive risk limits (risk is static; regimes affect policy, not limits)
 
 ---
@@ -168,9 +166,9 @@ Python writes compute outputs (features, metrics, experiment indexes) and reads 
 
 ## 4.3 Why This Split
 
-- MCP official SDK is TypeScript — best protocol support and type safety
-- All compute is already Python — RL, NumPy/Pandas, statsmodels, PyTorch
-- Dagster is Python — its GraphQL API is the natural bridge
+- MCP official SDK is TypeScript: best protocol support and type safety
+- All compute is already Python: RL, NumPy/Pandas, statsmodels, PyTorch
+- Dagster is Python: its GraphQL API is the natural bridge
 - No need to rewrite compute; just need a proper protocol layer on top
 
 ---
@@ -276,7 +274,7 @@ Equity OHLCV:
 - Primary vendor: Alpaca (configurable)
 - Fallback: only if primary is missing or fails validation
 - Validation: missing fields, non-positive prices, extreme outliers, timestamp gaps
-- No averaging — canonical bar comes from a single vendor per symbol-day
+- No averaging: canonical bar comes from a single vendor per symbol-day
 - Vendor choice logged per row (source_vendor column)
 
 Fundamentals:
@@ -360,15 +358,15 @@ feature registry:
 ### v1 Feature Sets (Equities + Fundamentals)
 
 **A. OHLCV Context Features**
-- ret_1d, ret_5d, ret_21d — log returns (1-day, 5-day, 21-day)
-- rv_21d, rv_63d — realized volatility (21-day, 63-day)
-- dist_from_20d_high, dist_from_20d_low — distance from rolling extremes
+- ret_1d, ret_5d, ret_21d: log returns (1-day, 5-day, 21-day)
+- rv_21d, rv_63d: realized volatility (21-day, 63-day)
+- dist_from_20d_high, dist_from_20d_low: distance from rolling extremes
 
 **B. Cross-Sectional Factors**
-- mom_3m, mom_12m_excl_1m — momentum signals
-- log_mkt_cap — log market capitalization
-- size_rank — cross-sectional size percentile
-- value_rank — cross-sectional value percentile
+- mom_3m, mom_12m_excl_1m: momentum signals
+- log_mkt_cap: log market capitalization
+- size_rank: cross-sectional size percentile
+- value_rank: cross-sectional value percentile
 
 **C. Fundamental Factors**
 - Valuation: pe_ttm, ps_ttm, pb, ev_ebitda
@@ -376,10 +374,10 @@ feature registry:
 - Growth: eps_growth_1y, revenue_growth_1y
 
 **D. Regime Features** (market-level, attached to each row when enabled)
-- market_vol_20d — 20-day market volatility
-- market_trend_20d — 20-day market trend
-- dispersion_20d — 20-day cross-sectional dispersion
-- corr_mean_20d — 20-day average correlation
+- market_vol_20d: 20-day market volatility
+- market_trend_20d: 20-day market trend
+- dispersion_20d: 20-day cross-sectional dispersion
+- corr_mean_20d: 20-day average correlation
 
 Regime feature universe: configurable, default is fixed primary (SPY, QQQ, IWM)
 for stability (regime_v1_1 behavior).
@@ -522,7 +520,7 @@ feature data from QuestDB and passes it into the env as arrays/DataFrames.
 
 ### Reward Versions
 
-**reward_v1:** Identity — base log-return passed through unchanged.
+**reward_v1:** Identity: base log-return passed through unchanged.
 
 **reward_v2:** Multi-component shaped reward.
 **Full specification: Appendix B** (exact formulas, default scaling factors,
@@ -762,7 +760,7 @@ Mechanism:
   it triggers dagster.shadow_run internally with a special flag
   (qualification_replay=true) that bypasses the promotion gate.
 - The shadow run is tagged as qualification_replay in QuestDB execution tables.
-- This bypass is ONLY available to the qualification pipeline — agents cannot
+- This bypass is ONLY available to the qualification pipeline; agents cannot
   invoke shadow.run with qualification_replay directly.
 - The risk_officer role can also trigger shadow for non-promoted experiments
   via explicit allowlisting (adding experiment_id to qualification allowlist config).
@@ -870,7 +868,7 @@ different content, the system errors. No overwrites.
 
 # 12. Risk Engine
 
-## 12.1 Static Contract (RISK_POLICY.md — Unchanged)
+## 12.1 Static Contract (RISK_POLICY.md, Unchanged)
 
 The risk policy is model-agnostic, non-learnable, enforced at runtime.
 No strategy, model, or RL agent may override it.
@@ -931,7 +929,7 @@ Risk simulation mode is available in BOTH training and shadow:
 ---
 
 
-# VERIFY ITEMS — ALL RESOLVED
+# VERIFY ITEMS: ALL RESOLVED
 
 1. financialdatasets.ai provides shares outstanding; daily market cap computed as shares * close price
 2. financialdatasets.ai provides fundamentals/metrics only; all OHLCV from Alpaca exclusively
@@ -971,7 +969,7 @@ Signal -> Order Translator -> Risk Engine -> Broker Adapter -> Fill -> Ledger
 - order_notional = desired_notional - current_position_notional
 - Market orders only (v1)
 - Executed at next bar open or broker market price
-- Orders netted per symbol — one open position per symbol
+- Orders netted per symbol: one open position per symbol
 
 **Risk Engine:** Full RISK_POLICY.md enforcement (see Section 12.1).
 Every order passes through pre-order checks. Post-fill verification confirms
@@ -981,7 +979,7 @@ the resulting portfolio state doesn't breach any constraint.
 - Authentication: APCA-API-KEY-ID + APCA-API-SECRET-KEY from environment
 - Paper endpoint: paper-api.alpaca.markets
 - Live endpoint: api.alpaca.markets
-- Paper/live separation enforced by config — the system refuses to use the live
+- Paper/live separation enforced by config; the system refuses to use the live
   endpoint unless the experiment is promoted to production tier
 - Responsibilities: order submission, status polling, fill handling, error normalization
 - WebSocket connection for real-time bar streaming (feeds into streaming canonicalization)
@@ -1013,7 +1011,7 @@ QuestDB using materialized view patterns:
   WHERE experiment_id = '<ID>' AND mode = '<mode>' AND status = 'filled'
   LATEST ON timestamp PARTITION BY symbol
   ```
-  A snapshot table (positions) is also maintained — updated after each fill —
+  A snapshot table (positions) is also maintained, updated after each fill,
   for fast reads. On restart, the snapshot is validated against the aggregated
   fills. If mismatch, the aggregation is authoritative.
 
@@ -1097,8 +1095,8 @@ which is gated to managing_partner approval for production mode.
   major version.
 - Deprecated tool versions emit a warning in the audit trail but remain functional
   for at least one release cycle.
-- QuantTown molecules reference tool versions explicitly in bead definitions
-  to prevent silent breakage.
+- Downstream automation should reference tool versions explicitly to prevent
+  silent breakage.
 
 ## 14.2 Tool Catalog
 
@@ -1211,7 +1209,7 @@ which is gated to managing_partner approval for production mode.
 
 ### yats.stats.* (Statistical Tools)
 
-These are Python subprocess calls — lightweight, no pipelines:
+These are Python subprocess calls: lightweight, no pipelines:
 
 | Tool | Description |
 |------|-------------|
@@ -1365,7 +1363,7 @@ iteration:
 
 **Dagster Availability:**
 - If Dagster is unreachable, all pipeline-backed MCP tools return an explicit
-  error: "Dagster unavailable — pipeline tools disabled."
+  error: "Dagster unavailable; pipeline tools disabled."
 - Direct QuestDB query tools (data.query, experiment.list, etc.) remain functional.
 - Paper/live trading processes are independent of Dagster and continue running.
 - In-flight Dagster runs that are interrupted by a Dagster restart are marked
@@ -1374,7 +1372,7 @@ iteration:
 
 **dagster.live_trading**
 - Input: experiment_id (must be promoted to production)
-- Architecture: Same as paper_trading — Dagster handles setup/teardown,
+- Architecture: Same as paper_trading; Dagster handles setup/teardown,
   independent Python process runs execution loop against live Alpaca endpoint.
 - Gate: managing_partner approval
 - Trigger: yats.execution.promote_live
@@ -1392,16 +1390,14 @@ audit_trail table:
   experiment_id (SYMBOL or NULL), mode (SYMBOL or NULL),
   parameters (STRING as JSON), result_status (SYMBOL: success/failure/timeout),
   result_summary (STRING as JSON), duration_ms (LONG),
-  dagster_run_id (STRING or NULL),
-  quanttown_molecule_id (STRING or NULL),
-  quanttown_bead_id (STRING or NULL)
+  dagster_run_id (STRING or NULL)
 - Partitioned by MONTH
 
 ## 16.2 What Gets Logged
 
 - Every MCP tool invocation (tool name, parameters, result, duration)
 - Every Dagster pipeline trigger and completion
-- Every risk decision (pass, reject, halt, size_reduce) — also in risk_decisions table
+- Every risk decision (pass, reject, halt, size_reduce); also in risk_decisions table
 - Every kill switch trigger and resolution
 - Every promotion record creation
 - Every qualification run
@@ -1683,7 +1679,7 @@ yats/
 
 # 18. Release Phases
 
-## Phase 1 — Foundation: Data + Features + QuestDB (Weeks 1-3)
+## Phase 1 (Foundation): Data + Features + QuestDB (Weeks 1-3)
 
 Deliverables:
 - QuestDB setup with all table schemas (raw, canonical, features, watermarks, audit_trail)
@@ -1706,7 +1702,7 @@ Acceptance:
 - Features computed for full universe
 - Audit trail captures all invocations
 
-## Phase 2 — Research Loop: Experiments + Training + Evaluation (Weeks 4-6)
+## Phase 2 (Research Loop): Experiments + Training + Evaluation (Weeks 4-6)
 
 Deliverables:
 - ExperimentSpec with composable inheritance
@@ -1729,7 +1725,7 @@ Acceptance:
 - Regime features included in observations when enabled
 - Incremental feature computation only processes new data
 
-## Phase 3 — Validation: Shadow + Qualification + Promotion (Weeks 7-9)
+## Phase 3 (Validation): Shadow + Qualification + Promotion (Weeks 7-9)
 
 Deliverables:
 - ShadowEngine with both execution modes (none and sim)
@@ -1751,7 +1747,7 @@ Acceptance:
 - Can compare shadow vs baseline metrics via SQL
 - Risk simulation mode allows different thresholds in shadow only
 
-## Phase 4 — Execution: Risk + Paper Trading + Alpaca (Weeks 10-12)
+## Phase 4 (Execution): Risk + Paper Trading + Alpaca (Weeks 10-12)
 
 Deliverables:
 - Production risk engine enforcing RISK_POLICY.md
@@ -1771,19 +1767,15 @@ Acceptance:
 - Streaming bars arrive and canonicalize in near-real-time
 - All execution activity logged in unified tables
 
-## Phase 5 — Integration: QuantTown + Production Hardening (Weeks 13-14)
+## Phase 5 (Integration): Production Hardening (Weeks 13-14)
 
 Deliverables:
-- QuantTown MEOW molecule -> YATS tool invocation mapping
-- Gate evaluation integration (qualification gates as molecule gates)
-- End-to-end formula: cook -> pour -> sling -> execute through all beads
 - Production hardening (error handling, retry logic, graceful degradation)
 - Live trading pathway (promote_live with managing_partner gate)
 
 Acceptance:
-- QuantTown agent can sling an alpha-hypothesis molecule that invokes YATS tools
-- Qualification molecule produces valid qualification report
-- Promotion molecule respects tier ordering and approval gates
+- Qualification pipeline produces a valid qualification report
+- Promotion respects tier ordering and approval gates
 - End-to-end: research -> qualify -> promote -> paper trade -> monitor
 
 ---
@@ -1817,10 +1809,7 @@ The system is complete when:
 8. **Audit trail is complete**: Every tool invocation, pipeline run, risk decision,
    and promotion logged in audit_trail table
 
-9. **QuantTown integration works**: Agent slings molecule -> beads invoke YATS MCP
-   tools -> results flow back to molecule -> gates evaluate
-
-10. **Reproducibility holds**: Same experiment spec + same canonical data -> identical
+9. **Reproducibility holds**: Same experiment spec + same canonical data -> identical
     metrics across runs
 
 ---
@@ -1907,7 +1896,7 @@ yats.monitor.reconcile performs consistency checks:
 - Report orphans (QuestDB rows without filesystem artifacts, or vice versa)
 - Report mismatches (Dagster says success but QuestDB rows missing)
 
-This tool is diagnostic only — it reports inconsistencies but does not auto-fix.
+This tool is diagnostic only: it reports inconsistencies but does not auto-fix.
 Human decides whether to re-trigger pipelines or manually correct.
 
 ## 20.6 Transaction Boundaries
@@ -1930,7 +1919,7 @@ for correctness; reconciliation tool can detect missing entries).
 
 ## 21.1 Role-Based Tool Permissions
 
-Each QuantTown agent role has a defined permission set. The MCP server enforces
+Each agent role has a defined permission set. The MCP server enforces
 these based on the invoker identity passed with each tool call.
 
 ### intern (read-only + grunt work)
@@ -1956,7 +1945,7 @@ these based on the invoker identity passed with each tool call.
   risk.correlation, risk.tail_analysis, risk.decisions
 - qualify.run, qualify.report, qualify.gates
 - shadow.run, shadow.run_sim, shadow.results, shadow.compare_modes
-- risk.halt_trading (emergency — no approval needed)
+- risk.halt_trading (emergency; no approval needed)
 
 ### pm (coordination + promotion)
 - All researcher permissions, plus:
@@ -2054,7 +2043,7 @@ LATEST ON timestamp PARTITION BY symbol
 WHERE reconcile_method = 'batch'
 ```
 
-This returns exactly one row per (timestamp, symbol) — the most recently
+This returns exactly one row per (timestamp, symbol): the most recently
 canonicalized version. Experiments that need to reproduce against an older
 canonical snapshot filter explicitly:
 
@@ -2138,9 +2127,9 @@ When concurrency limits are hit, Dagster jobs queue with priority:
 8. Feature computation
 9. Data ingestion (lowest)
 
-## 23.3 Rate Limits (QuantTown Governance)
+## 23.3 Rate Limits (Agent Governance)
 
-These limits prevent runaway automation from QuantTown agents:
+These limits prevent runaway automation by agents:
 
 | Action | Limit | Period |
 |--------|-------|--------|
@@ -2160,7 +2149,7 @@ Promotion beyond research tier requires explicit agent approval:
 - candidate tier: PM approval required
 - production tier: managing_partner approval required
 
-Auto-promotion (molecule that auto-qualifies and auto-promotes without human
+Auto-promotion (automation that auto-qualifies and auto-promotes without human
 review) is blocked by default. The MCP tool for promote.to_candidate and
 promote.to_production includes a requires_human_approval flag that cannot be
 bypassed by agent configuration.
@@ -2378,14 +2367,14 @@ relaxed checkpoint.
 
 ---
 
-# YATS PRD — Appendix: Standalone Implementation Specifications
+# YATS PRD Appendix: Standalone Implementation Specifications
 
 This appendix makes the PRD self-contained. An implementer can build YATS
 from the PRD + this appendix alone.
 
 ---
 
-# A. SignalWeightEnv — Full Specification
+# A. SignalWeightEnv: Full Specification
 
 ## A.1 Environment Interface
 
@@ -2507,7 +2496,7 @@ Configuration (ExecutionSimConfig):
 
 ---
 
-# B. Reward Shaping — Full Specification
+# B. Reward Shaping: Full Specification
 
 ## B.1 Reward Adapter
 
@@ -2567,7 +2556,7 @@ reward_v2 adds `reward_components` to info:
 
 ---
 
-# C. ExperimentSpec — Full Specification
+# C. ExperimentSpec: Full Specification
 
 ## C.1 Dataclass Definition
 
@@ -2664,7 +2653,7 @@ The ID is fully deterministic: same spec fields produce same ID.
 
 ---
 
-# D. Qualification — Full Specification
+# D. Qualification: Full Specification
 
 ## D.1 Gate Evaluation Order
 
@@ -2746,7 +2735,7 @@ When baseline_id equals candidate_id:
 
 ---
 
-# E. Hierarchical Policy — Full Specification
+# E. Hierarchical Policy: Full Specification
 
 ## E.1 Modes
 
@@ -2819,7 +2808,7 @@ mapping in the experiment spec.
 
 ---
 
-# F. Shadow Engine — Full Specification
+# F. Shadow Engine: Full Specification
 
 ## F.1 ReplayMarketDataSource
 
@@ -2922,9 +2911,9 @@ On resume: load state.json, advance replay_window to step_index, continue.
 
 ---
 
-# G. Risk Engine — Full Specification
+# G. Risk Engine: Full Specification
 
-## G.1 Risk Engine — Full Implementation
+## G.1 Risk Engine: Full Implementation
 
 YATS implements the complete RISK_POLICY.md. Quanto only implemented
 constraints 1-4. YATS adds constraints 5-12 as new implementation work.
@@ -2936,7 +2925,7 @@ constraints 1-4. YATS adds constraints 5-12 as new implementation work.
 | pass | Order approved unchanged |
 | size_reduce | Order approved at reduced size to satisfy constraint |
 | reject | Order fully rejected |
-| halt | Trading halted — no further orders until resume |
+| halt | Trading halted; no further orders until resume |
 
 **size_reduce logic:** When a constraint would reject an order, the risk engine
 first attempts to reduce the order size to the maximum that satisfies the
@@ -2950,7 +2939,7 @@ risk_decisions.
 Constraints evaluated in this exact order. Earlier constraints can short-circuit
 (HALT stops all further evaluation).
 
-**Group 1: Kill Switches (HALT — immediate trading stop)**
+**Group 1: Kill Switches (HALT, immediate trading stop)**
 
 1. `daily_loss_limit`: if daily PnL < limit → HALT all
 2. `trailing_drawdown_limit`: if drawdown from peak > limit → HALT all
@@ -2992,7 +2981,7 @@ Constraints evaluated in this exact order. Earlier constraints can short-circuit
 **Group 5: Signal Constraints (REJECT or SIZE_REDUCE)**
 
 13. `min_confidence`: if signal confidence < min_confidence
-    - Reject order entirely (no size_reduce — low confidence means don't trade)
+    - Reject order entirely (no size_reduce; low confidence means don't trade)
 14. `min_holding_period`: if position held < min_holding_period bars
     - Reject close/reduce orders for that position
 
@@ -3007,7 +2996,7 @@ Constraints evaluated in this exact order. Earlier constraints can short-circuit
 - Volatility scaling (11) modifies order sizes before they enter Groups 2-3.
 - The actual evaluation flow is:
   1. Check kill switches (1-2)
-  2. Apply vol regime brakes if applicable (12) — adjusts limits
+  2. Apply vol regime brakes if applicable (12), which adjusts limits
   3. Apply volatility scaling to all order sizes (11)
   4. Check global limits with adjusted limits (3-6)
   5. Check per-symbol limits with adjusted limits (7-10)
@@ -3052,7 +3041,7 @@ min_confidence: 0.0              # No confidence gating by default
 min_holding_period: 1            # 1 bar minimum hold
 
 # Size reduce
-minimum_order_threshold: 0.01   # 1% of NAV — below this, reject instead of size_reduce
+minimum_order_threshold: 0.01   # 1% of NAV; below this, reject instead of size_reduce
 
 # Operational
 max_broker_errors: 5             # Consecutive broker errors before halt
@@ -3061,7 +3050,7 @@ data_staleness_threshold: 300    # Seconds before data considered stale
 
 ---
 
-# H. Regression Gates — Full Specification
+# H. Regression Gates: Full Specification
 
 ## H.1 Metric Extraction
 
@@ -3113,7 +3102,7 @@ for metric in metrics:
 
 ---
 
-# I. Regime Detection — Full Specification
+# I. Regime Detection: Full Specification
 
 ## I.1 Regime Feature Computation (v1)
 
@@ -3169,7 +3158,7 @@ label_module: research.eval.regime_slicing
 
 ---
 
-# J. Feature Computation — Full Specification
+# J. Feature Computation: Full Specification
 
 ## J.1 Per-Symbol Features (OHLCV-Derived)
 

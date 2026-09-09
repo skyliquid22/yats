@@ -3,7 +3,7 @@
 All queries.* functions are monkeypatched so these tests need no live DB.
 One @pytest.mark.live_db test exercises the health endpoint against real QuestDB.
 
-Guards ya-v3bp2: all 8 endpoints return HTTP 200 with expected response shapes.
+Guards: all 8 endpoints return HTTP 200 with expected response shapes.
 """
 from __future__ import annotations
 

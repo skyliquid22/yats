@@ -1,4 +1,4 @@
-"""Tests for trading health sensor bug fixes (ya-1vwwc).
+"""Tests for trading health sensor bug fixes.
 
 Covers:
 A - naive UTC normalization: QuestDB timestamps arrive tz-naive; arithmetic

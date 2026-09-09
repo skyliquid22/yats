@@ -16,14 +16,6 @@ export const executionPromoteLive: ToolDef = {
         type: "boolean",
         description: "Managing partner acknowledgment required for live promotion (must be true)",
       },
-      quanttown_molecule_id: {
-        type: "string",
-        description: "QuantTown molecule ID if invoked from a molecule (for audit trail linkage)",
-      },
-      quanttown_bead_id: {
-        type: "string",
-        description: "QuantTown bead ID if invoked from a molecule step (for audit trail linkage)",
-      },
     },
     required: ["experiment_id", "run_id", "promoted_by", "managing_partner_ack"],
   },
@@ -32,8 +24,6 @@ export const executionPromoteLive: ToolDef = {
     const runId = args.run_id as string;
     const promotedBy = args.promoted_by as string;
     const managingPartnerAck = args.managing_partner_ack as boolean;
-    const quanttownMoleculeId = (args.quanttown_molecule_id as string | undefined) ?? "";
-    const quanttownBeadId = (args.quanttown_bead_id as string | undefined) ?? "";
 
     if (!managingPartnerAck) {
       return err("Live trading promotion requires managing_partner_ack=true");
@@ -61,11 +51,6 @@ export const executionPromoteLive: ToolDef = {
         mode: "live",
         job: "live_trading_setup",
       };
-
-      if (quanttownMoleculeId) {
-        result.quanttown_molecule_id = quanttownMoleculeId;
-        result.quanttown_bead_id = quanttownBeadId;
-      }
 
       return ok(result);
     } catch (e) {

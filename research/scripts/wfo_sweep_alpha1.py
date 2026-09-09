@@ -1,4 +1,4 @@
-"""ALPHA-1: supervised cross-sectional alpha sweep (ya-z2ki9).
+"""ALPHA-1: supervised cross-sectional alpha sweep.
 
 Trains Ridge + LightGBM models predicting residualized forward returns
 (5d and 21d) through the existing WFO harness, at matched geometry to

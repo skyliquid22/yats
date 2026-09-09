@@ -82,8 +82,6 @@ export async function logToolInvocation(
     result_summary: buildResultSummary(result),
     duration_ms: Math.round(durationMs),
     dagster_run_id: extractDagsterRunId(result),
-    quanttown_molecule_id: typeof args.quanttown_molecule_id === "string" ? args.quanttown_molecule_id : null,
-    quanttown_bead_id: typeof args.quanttown_bead_id === "string" ? args.quanttown_bead_id : null,
     query_hashes: queries.length > 0 ? JSON.stringify(queries.map((q) => q.hash)) : null,
   };
 

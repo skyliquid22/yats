@@ -1,6 +1,6 @@
 """Tests for financialdatasets.ai adapter and ingest job.
 
-Guards ya-2gqv7:
+Guards:
 - Insider trades keyed at filing_date (point-in-time); fallback to transaction_date logged.
 - All 6 new insider_trade columns land in the ILP row.
 - Institutional holdings row mapping and pagination exhaustion.

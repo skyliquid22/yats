@@ -602,9 +602,7 @@ CREATE TABLE IF NOT EXISTS audit_trail (
     result_summary STRING,
     duration_ms LONG,
     query_hashes STRING,
-    dagster_run_id STRING,
-    quanttown_molecule_id STRING,
-    quanttown_bead_id STRING
+    dagster_run_id STRING
 ) TIMESTAMP(timestamp) PARTITION BY MONTH;
 """
 
@@ -729,16 +727,16 @@ ALL_TABLES: list[str] = [
 # no-op). Enabling DEDUP makes canonical tables idempotent across reruns: a
 # second run's rows UPSERT in place rather than append.
 MIGRATIONS: list[str] = [
-    # ya-n4bhm: equity cross-run idempotency
+    # Equity cross-run idempotency
     "ALTER TABLE canonical_equity_ohlcv DEDUP ENABLE UPSERT KEYS(timestamp, symbol)",
-    # ya-6e7ok: options cross-run idempotency — live+EOD rows coexist via source_vendor key.
+    # Options cross-run idempotency — live+EOD rows coexist via source_vendor key.
     # QuestDB accepts DOUBLE (strike) and non-designated TIMESTAMP (expiry) as upsert keys.
     "ALTER TABLE canonical_options_chain DEDUP ENABLE UPSERT KEYS(quote_date, underlying, expiry, strike, right, source_vendor)",
-    # ya-i6nvo: feature reruns upsert instead of appending — stale rows from a
+    # Feature reruns upsert instead of appending — stale rows from a
     # prior run for the same (timestamp, symbol, feature_set) would otherwise be
     # read alongside fresh ones (fetch_features does not filter by computed_at).
     "ALTER TABLE features DEDUP ENABLE UPSERT KEYS(timestamp, symbol, feature_set, feature_set_version)",
-    # ya-2gqv7: insider_trades — add filing_date, transaction_date, and 4 new signal columns.
+    # insider_trades — add filing_date, transaction_date, and 4 new signal columns.
     # filed_at now truly = filing date (point-in-time fix); transaction_date preserved as column.
     "ALTER TABLE raw_fd_insider_trades ADD COLUMN filing_date TIMESTAMP",
     "ALTER TABLE raw_fd_insider_trades ADD COLUMN transaction_date TIMESTAMP",
@@ -746,22 +744,22 @@ MIGRATIONS: list[str] = [
     "ALTER TABLE raw_fd_insider_trades ADD COLUMN shares_owned_before DOUBLE",
     "ALTER TABLE raw_fd_insider_trades ADD COLUMN security_title STRING",
     "ALTER TABLE raw_fd_insider_trades ADD COLUMN issuer STRING",
-    # ya-ayjf6: canonical insider_trades + institutional_holdings — DEDUP from day one.
+    # Canonical insider_trades + institutional_holdings — DEDUP from day one.
     # Tables born with DEDUP in CREATE TABLE; these migrate any pre-existing table created
     # before Stage 3b landed.
     "ALTER TABLE canonical_insider_trades DEDUP ENABLE UPSERT KEYS(filing_date, symbol, insider_name, transaction_date, transaction_type, shares)",
     "ALTER TABLE canonical_institutional_holdings DEDUP ENABLE UPSERT KEYS(filing_date, symbol, filer_cik, report_period)",
     "ALTER TABLE canonical_inst_ownership DEDUP ENABLE UPSERT KEYS(filing_date, symbol, report_period)",
-    # ya-vs9a1: job_runs instrumentation table — DEDUP from day one; migrate any pre-existing table.
+    # job_runs instrumentation table — DEDUP from day one; migrate any pre-existing table.
     "ALTER TABLE job_runs DEDUP ENABLE UPSERT KEYS(started_at, job_name, dagster_run_id)",
-    # ya-tvaa0: Stage 3c — insider/institutional feature columns added to features table.
+    # Stage 3c — insider/institutional feature columns added to features table.
     "ALTER TABLE features ADD COLUMN insider_net_buy_90d DOUBLE",
     "ALTER TABLE features ADD COLUMN insider_buy_intensity_30d DOUBLE",
     "ALTER TABLE features ADD COLUMN insider_cluster_30d DOUBLE",
     "ALTER TABLE features ADD COLUMN exec_net_buy_90d DOUBLE",
     "ALTER TABLE features ADD COLUMN inst_ownership_pct DOUBLE",
     "ALTER TABLE features ADD COLUMN inst_top10_share DOUBLE",
-    # ya-3rkix: Stage 4a — regime_v2 options-implied feature columns added to features table.
+    # Stage 4a — regime_v2 options-implied feature columns added to features table.
     "ALTER TABLE features ADD COLUMN spy_atm_iv DOUBLE",
     "ALTER TABLE features ADD COLUMN spy_iv_zscore_60d DOUBLE",
     "ALTER TABLE features ADD COLUMN spy_vrp DOUBLE",

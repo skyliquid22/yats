@@ -239,7 +239,7 @@ def aggregate_sweep_dsr(
     Results that lack 'oos_sharpe' are passed through unchanged (DSR is skipped
     until the experiment pipeline populates OOS metrics).
 
-    PRD Stage 1b (ya-cnac1): DSR at sweep-aggregation level.
+    PRD Stage 1b: DSR at sweep-aggregation level.
     """
     data_root = Path(config.data_root)
     augmented = _compute_sweep_dsr_for_results(results, data_root)

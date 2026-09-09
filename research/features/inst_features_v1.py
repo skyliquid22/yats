@@ -19,7 +19,7 @@ Computes 2 features using as-of filing dates (no lookahead):
 
 DEFERRED (do not implement — >2 quarter lookback, infeasible purge on 502 bars):
   inst_ownership_chg_qoq — needs 2 report periods (~180-bar memory); unlocks with
-                            the span-extension bead.
+                            the span-extension work.
 """
 
 from __future__ import annotations

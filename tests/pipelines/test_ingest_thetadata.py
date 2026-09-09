@@ -380,7 +380,7 @@ class TestGetHistoricalEod:
 
 
 class TestGetHistoricalEodByDate:
-    """Bulk by-date mode: one expiration=* request per trading day (ya-i6nvo)."""
+    """Bulk by-date mode: one expiration=* request per trading day."""
 
     def setup_method(self):
         self._tp = patch.dict(os.environ, {"THETADATA_TRANSPORT": "terminal"})

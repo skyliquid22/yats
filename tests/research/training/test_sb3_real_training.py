@@ -141,7 +141,7 @@ class TestRealSB3Training:
 
 
 class TestShadowReplayShapeParity:
-    """Regression tests for ya-jl1k9: shadow replay obs shape == training obs shape."""
+    """Regression tests: shadow replay obs shape == training obs shape."""
 
     SYMBOLS = ["AAPL", "MSFT"]
     OBS_COLS = ["close", "ret_1d"]

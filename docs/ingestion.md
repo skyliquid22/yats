@@ -17,7 +17,7 @@ This chains the existing Dagster jobs in-process, in order:
 | 2 | Equity OHLCV | `ingest_alpaca` | `raw_alpaca_equity_ohlcv` (daily bars) |
 | 3 | Fundamentals & filings | `ingest_financialdatasets` | `raw_fd_fundamentals`, `raw_fd_financial_metrics`, `raw_fd_earnings`, `raw_fd_insider_trades`, `raw_fd_analyst_estimates`, `raw_fd_institutional_holdings` |
 | 4 | Canonicalize | `canonicalize` | `canonical_*` tables for domains `equity_ohlcv`, `fundamentals`, `financial_metrics`, `option_eod`, `insider_trades`, `institutional_holdings` + `reconciliation_log` |
-| 5 | Features | `feature_pipeline` | `features` table — one run per feature set (default: `core_v1`, `options_v1`, `insider_v1`), restricted to the new symbols via the `tickers` config override |
+| 5 | Features | `feature_pipeline` | `features` table, one run per feature set (default: `core_v1`, `options_v1`, `insider_v1`), restricted to the new symbols via the `tickers` config override |
 
 A stage failure aborts the remaining stages (canonical/feature rows must not be
 computed from incomplete raw data) and the command exits non-zero. The overall
@@ -45,7 +45,7 @@ The command is idempotent and safe to re-run after an interruption:
 
 After the backfill, add the symbols to a universe YAML under
 `configs/universes/` so scheduled feature-pipeline runs and experiments pick
-them up — the backfill itself computes features via an explicit ticker list and
+them up; the backfill itself computes features via an explicit ticker list and
 does not edit universe configs.
 
 ## Transport and environment variables
@@ -61,31 +61,31 @@ does not edit universe configs.
 
 ## Vendor caveats
 
-Known limits of the data vendors — the ingest jobs already work around them,
+Known limits of the data vendors. The ingest jobs already work around them,
 but they define what data can and cannot exist:
 
 - **13F institutional holdings (financialdatasets.ai)**: the endpoint
   hard-caps responses at **200 rows per quarter** regardless of `limit`, and
   **ignores the `offset` parameter** (an offset loop refetches the same page
-  forever — verified live 2026-07-08). Pagination is done with a
+  forever; verified live 2026-07-08). Pagination is done with a
   **quarter cursor** instead: one request per `report_period=YYYY-MM-DD`
   quarter-end (last `FD_13F_QUARTERS` quarters). The ≤200 filers returned per
-  quarter cover roughly ~75% of market cap for large names — top-holder
+  quarter cover roughly ~75% of market cap for large names: top-holder
   features are fine, exhaustive filer coverage is not available.
 - **Insider trades (financialdatasets.ai)**: fetch caps at **500 rows per
   ticker** (single request, no pagination). For high-insider-activity names
   this truncates deep history.
 - **13F `value_usd` unreliable before 2025-06**: financialdatasets.ai dollar
   values are inconsistent for report periods before ~June 2025. Ownership
-  levels use **`shares`** (consistent across splits) — never absolute
+  levels use **`shares`** (consistent across splits), never absolute
   `value_usd`. The only sanctioned `value_usd` use is within-quarter ratios
   (e.g. `inst_top10_share`), where the uniform scaling artifact cancels out.
 - **ETFs (SPY, QQQ, …) have no insider or fundamentals data**: there is no
   Form 4 insider activity or income-statement data for funds. `insider_*` and
-  fundamental features are **structurally null** for ETFs — this is expected,
+  fundamental features are **structurally null** for ETFs; this is expected,
   not an ingest failure. 13F-based `inst_*` features do cover ETFs.
 - **Options historical greeks (ThetaData gRPC `greeks-eod`)**: historical
-  EOD greeks come from the bulk `option_history_greeks_eod` endpoint — **one
+  EOD greeks come from the bulk `option_history_greeks_eod` endpoint: **one
   call per (symbol, trading day)** with `expiration=*`. A multi-year backfill
   is therefore ~252 calls/symbol/year, run through a worker pool capped at
   `THETADATA_MAX_CONCURRENT`. The per-expiry history endpoint does not scale
@@ -93,7 +93,7 @@ but they define what data can and cannot exist:
 - **Flat files start 2026-07-02**: whole-market option flat files are
   available **forward from 2026-07-02** on our subscription; earlier dates
   return `PERMISSION_DENIED`. Historical flat files are a **paid add-on**
-  (purchase deferred — see the flat-files section below). Per-symbol backfill
+  (purchase deferred; see the flat-files section below). Per-symbol backfill
   via `ingest_thetadata` is unaffected by this limit.
 
 ## ThetaData Option Flat Files
@@ -101,7 +101,7 @@ but they define what data can and cannot exist:
 ### What they are
 
 `ThetaClient.option_flat_file_eod(date)` and `option_flat_file_open_interest(date)` return
-**whole-market** per-date snapshots — every optionable symbol, every expiration, every strike.
+**whole-market** per-date snapshots: every optionable symbol, every expiration, every strike.
 This is the full market universe for a single calendar date.
 
 ### Storage choice: Parquet under `.yats_data/flatfiles/`
@@ -130,7 +130,7 @@ Our ThetaData account has access to flat files starting **2026-07-02** (first-ac
 
 The `ingest_flatfiles` job runs daily after close and builds the archive **forward from
 that date**. Requesting flat files for dates before 2026-07-02 returns a gRPC
-`PERMISSION_DENIED` error — the job handles this gracefully (logs a warning, succeeds
+`PERMISSION_DENIED` error; the job handles this gracefully (logs a warning, succeeds
 with no data written).
 
 ### Historical flat-file add-on purchase
@@ -144,7 +144,7 @@ for arbitrary historical dates.
 Rationale:
 1. The current universe (defined in `configs/`) is small enough that historical backfill
    via `ingest_thetadata` (per-symbol gRPC EOD) is cheaper and sufficient.
-2. Flat files become worthwhile when the universe expands to ~1,000+ symbols — at that
+2. Flat files become worthwhile when the universe expands to ~1,000+ symbols; at that
    scale the per-symbol loop would take hours and the flat-file bulk pull (~seconds/day)
    wins decisively.
 3. The forward archive built by `ingest_flatfiles` covers any future universe expansion

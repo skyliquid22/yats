@@ -239,7 +239,7 @@ class TestPostFillVerification:
 
 
 # ---------------------------------------------------------------------------
-# Portfolio-wide pre-order clamp tests (ya-hxc7f)
+# Portfolio-wide pre-order clamp tests
 # ---------------------------------------------------------------------------
 # Risk engine input must cover the UNION of signal-batch symbols and existing
 # holdings.  Without this fix, holdings-only symbols are invisible to the risk

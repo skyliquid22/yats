@@ -1,4 +1,4 @@
-"""Regression tests for watermark semantics (ya-qlvxi).
+"""Regression tests for watermark semantics.
 
 1. Watermark advances on max(processed) even when all rows are all-NaN skips
    (fixes perpetual reprocessing).

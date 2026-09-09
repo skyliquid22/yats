@@ -1,5 +1,5 @@
 """
-Tests for DagsterClient.makeRunId canonical serialization (ya-jtj5b).
+Tests for DagsterClient.makeRunId canonical serialization.
 
 The TypeScript implementation uses a recursive key-sort serializer.
 These tests replicate the algorithm in Python to verify algorithm properties:

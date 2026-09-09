@@ -20,7 +20,7 @@ Copy `.env.example` to `.env` if you need vendor credentials; nothing in the uni
 ## Tests
 
 ```bash
-# Python — same command CI runs (live vendor/DB tests excluded)
+# Python: same command CI runs (live vendor/DB tests excluded)
 PYTHONPATH=.:pipelines uv run --with pytest --with pytest-timeout \
   pytest tests -q --timeout=120 -k "not live"
 
@@ -46,8 +46,8 @@ Fork, branch from `main`, and open a PR against `main`.
 
 ## Where things live
 
-- [docs/REFERENCE.md](docs/REFERENCE.md) — MCP tool catalog, QuestDB schemas, config reference
-- [docs/ingestion.md](docs/ingestion.md) — ingestion architecture, symbol backfill runbook
-- [docs/dashboard.md](docs/dashboard.md) — read-only ops dashboard
-- [docs/research/](docs/research/) — dated sweep verdicts (the lab notebook)
+- [docs/REFERENCE.md](docs/REFERENCE.md): MCP tool catalog, QuestDB schemas, config reference
+- [docs/ingestion.md](docs/ingestion.md): ingestion architecture, symbol backfill runbook
+- [docs/dashboard.md](docs/dashboard.md): read-only ops dashboard
+- [docs/research/](docs/research/): dated sweep verdicts (the lab notebook)
 - `src/` TypeScript MCP server · `pipelines/` Dagster jobs · `research/` research modules · `compute/` stats/risk kernels · `configs/` YAML contracts

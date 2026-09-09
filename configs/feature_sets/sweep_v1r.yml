@@ -3,8 +3,8 @@ description: >
   sweep_v1 + regime_v2 market-implied regime features (4b arm B).
   Original description:
   Stage 2d WFO sweep matrix: full_v1 minus mom_12m_excl_1m. The 252-bar feature
-  memory of 12m momentum makes honest purging (purge_buffer = max lookback,
-  ya-gy051) geometrically infeasible on the 502-bar span — and the feature is
+  memory of 12m momentum makes honest purging (purge_buffer = max lookback)
+  geometrically infeasible on the 502-bar span — and the feature is
   null for the first 252 bars regardless. Max lookback here is 63 (rv_63d /
   mom_3m), so purge_buffer=63 with feasible anchored folds. Options features
   computed from EOD chains within max_dte=210 / strike_range=60.

@@ -736,7 +736,7 @@ _FEATURE_COLUMNS = [
     "atm_iv", "skew_25d", "iv_term_slope", "put_call_oi_ratio", "net_gamma_exposure",
     "insider_net_buy_90d", "insider_buy_intensity_30d", "insider_cluster_30d", "exec_net_buy_90d",
     "inst_ownership_pct", "inst_top10_share",
-    # ya-3rkix: Stage 4a regime_v2 columns
+    # Stage 4a regime_v2 columns
     "spy_atm_iv", "spy_iv_zscore_60d", "spy_vrp", "spy_iv_term_slope",
     "spy_skew_zscore_60d", "spy_gex_sign", "spy_gex_norm",
     "spy_iv_delta_5d", "spy_slope_delta_5d",

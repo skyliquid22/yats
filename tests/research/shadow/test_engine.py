@@ -529,7 +529,7 @@ class TestShadowArtifacts:
 
 
 # ---------------------------------------------------------------------------
-# Observation shape parity — ShadowEngine vs SignalWeightEnv (ya-jl1k9)
+# Observation shape parity — ShadowEngine vs SignalWeightEnv
 # ---------------------------------------------------------------------------
 
 
@@ -563,7 +563,7 @@ def _make_snapshots_with_regime(
 class TestObservationShapeParity:
     """ShadowEngine and SignalWeightEnv must produce the same obs dimension.
 
-    Regression test for ya-jl1k9: shadow replay was building 200-dim obs
+    Regression test: shadow replay was building 200-dim obs
     while trained PPO expected 204-dim (4 regime features missing).
     """
 

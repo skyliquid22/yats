@@ -1,6 +1,6 @@
 """Unit tests for dashboard/queries.py — mocked PG cursor, no live DB needed.
 
-Guards ya-v3bp2: all query functions return the correct shape and handle
+Guards: all query functions return the correct shape and handle
 empty-result / error cases gracefully.
 """
 from __future__ import annotations
@@ -372,7 +372,7 @@ class TestExperimentsSearch:
         """Search also scans YATS_DATA_ROOT/wfo_sweeps — point it at an empty
         tmp dir so real local sweep summaries can't leak into assertions
         (observed: 8 real sweep configs made count tests fail on dev machines
-        while passing in clean polecat clones)."""
+        while passing in clean checkouts)."""
         monkeypatch.setenv("YATS_DATA_ROOT", str(tmp_path))
 
     def test_returns_results_and_deflation_clock(self):

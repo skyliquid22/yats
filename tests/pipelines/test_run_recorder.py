@@ -1,6 +1,6 @@
 """Tests for run_recorder — never-raises behavior, upsert semantics, per-job wiring smoke.
 
-Guards ya-vs9a1:
+Guards:
 - record_start/record_finish never raise even when ILP is down.
 - record_finish uses the same started_at as record_start (upsert key stability).
 - Both status="running" (start) and status="success"/"failed" (finish) are written.

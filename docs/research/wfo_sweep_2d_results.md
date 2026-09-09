@@ -1,9 +1,9 @@
-# Stage 2d — First WFO-Validated Sweep: Results (2026-07-08)
+# Stage 2d: First WFO-Validated Sweep Results (2026-07-08)
 
 **Question**: is there real, multiple-testing-survived alpha in the current
 signal set (price/vol + fundamentals + regime + options-implied) with PPO?
 
-**Verdict: NO — no config survives deflation.** Best DSR 0.645 (threshold
+**Verdict: NO, no config survives deflation.** Best DSR 0.645 (threshold
 0.95). Honest infrastructure milestone: the platform can now answer this
 question rigorously, and the answer for this signal set + policy class is
 "not yet distinguishable from selection noise."
@@ -18,11 +18,11 @@ question rigorously, and the answer for this signal set + policy class is
   the feature is null for its first 252 bars regardless). 28 observation
   columns incl. all 5 options features + 4 regime scalars.
 - WFO: anchored/expanding, 4 folds, purge=1 (label horizon) + buffer=64
-  (feature memory, ya-gy051 sizing). Train windows 185→323 bars; 46-bar OOS
+  (feature-memory sizing). Train windows 185→323 bars; 46-bar OOS
   blocks; concatenated OOS n=184 per config.
 - Grid (N=8, the trial set DSR deflates over): lr {3e-4, 1e-4} ×
   ent_coef {0.0, 0.01} × gamma {0.99, 0.95}; PPO, seed 42, n_steps 256,
-  batch 64, total_timesteps 20,000 (full convergence per fold — never reduced).
+  batch 64, total_timesteps 20,000 (full convergence per fold, never reduced).
 
 ## Results
 
@@ -38,7 +38,7 @@ question rigorously, and the answer for this signal set + policy class is
 | 7 | 1e-4 | 0.01 | 0.95 | 0.074 | 0.525 | 0.410 | +1.45 +2.25 +0.78 −3.11 |
 
 Sweep-level SR0 (expected max Sharpe under H0 from cross-config variance): 0.346.
-Rank decay across folds: 0.536 (> 0.5 ⇒ config rankings unstable — the
+Rank decay across folds: 0.536 (> 0.5 ⇒ config rankings unstable; the
 hyperparameter "winner" flips fold to fold, consistent with noise).
 
 ## Reading
@@ -47,14 +47,14 @@ hyperparameter "winner" flips fold to fold, consistent with noise).
    effects at N=8 trials and n=184 OOS observations.
 2. **Universal fold-4 failure** (8/8 configs negative, −1.4 to −3.1, early-2026
    OOS window): every variant learned something that did not survive the most
-   recent regime. This is the strongest structural signal in the sweep —
+   recent regime. This is the strongest structural signal in the sweep,
    regime-dependence, not hyperparameter choice, dominates outcomes.
 3. **Honest purging matters**: an unpurged smoke run showed OOS Sharpe 2.0 on
    the same pipeline; purge+buffer dropped it to ≈0. Most of the apparent edge
    was boundary leakage.
 
 ## What this does NOT say
-- It does not say the signal set is worthless — n=184 OOS bars and a 2-year
+- It does not say the signal set is worthless: n=184 OOS bars and a 2-year
   span is a small sample; a real 0.5-Sharpe edge would be hard to certify here.
 - It does not certify PPO at 20k timesteps as the best extractor of these
   features.

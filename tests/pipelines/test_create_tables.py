@@ -1,10 +1,10 @@
 """Regression tests for canonical table DDL + idempotency migrations.
 
-Guards the ya-n4bhm fix: canonical_equity_ohlcv must be born (and migrated)
+Guards: canonical_equity_ohlcv must be born (and migrated)
 with QuestDB DEDUP UPSERT KEYS(timestamp, symbol) so that re-running
 canonicalize UPSERTs bars in place instead of appending duplicates.
 
-Guards the ya-6e7ok fix: canonical_options_chain must be born (and migrated)
+Guards: canonical_options_chain must be born (and migrated)
 with QuestDB DEDUP UPSERT KEYS(quote_date, underlying, expiry, strike, right,
 source_vendor) so that re-running option_eod canonicalize UPSERTs contracts in
 place instead of appending duplicates. source_vendor is in the key so live
@@ -190,7 +190,7 @@ class TestMigrationsStage3b:
 
 
 class TestJobRunsDDL:
-    """Guards ya-vs9a1: job_runs instrumentation table DDL and migration."""
+    """Guards the job_runs instrumentation table DDL and migration."""
 
     def test_declares_dedup_upsert_keys(self):
         ddl = _norm(JOB_RUNS)

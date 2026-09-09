@@ -1,4 +1,4 @@
-"""Tests for feature_pipeline._write_features and regime alignment (ya-muvu0, ya-gdt2b)."""
+"""Tests for feature_pipeline._write_features and regime alignment."""
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -148,7 +148,7 @@ def _make_ohlcv_naive(dates: list[str], symbol: str = "AAPL") -> pd.DataFrame:
 
 
 class TestTzNaiveFilteringPath:
-    """Regression tests for ya-gdt2b: tz-naive datetime64[us] vs tz-aware Timestamp crash."""
+    """Regression tests: tz-naive datetime64[us] vs tz-aware Timestamp crash."""
 
     DATES = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
 
@@ -167,7 +167,7 @@ class TestTzNaiveFilteringPath:
         )
 
     def test_cs_filtering_comparison_no_type_error(self):
-        """feat_df['timestamp'] > cs_wm must not raise TypeError (the crash from ya-gdt2b)."""
+        """feat_df['timestamp'] > cs_wm must not raise TypeError (the original crash)."""
         ohlcv = _make_ohlcv(self.DATES)
         ohlcv_by_symbol = {"AAPL": ohlcv.reset_index(drop=True)}
         cs_wm = pd.Timestamp("2024-01-03", tz="UTC")
@@ -212,7 +212,7 @@ class TestTzNaiveFilteringPath:
 
 
 class TestLogMktCapNullShares:
-    """Regression tests for ya-balr8: log_mkt_cap crash when shares_outstanding is None/object-dtype."""
+    """Regression tests: log_mkt_cap crash when shares_outstanding is None/object-dtype."""
 
     DATES = ["2024-01-02", "2024-01-03", "2024-01-04"]
 

@@ -1,7 +1,7 @@
 """Rank-weighted long-only portfolio construction from cross-sectional alpha scores.
 
 v1: simple rank-weighting capped at max_symbol_weight.
-Hook exists for optimizer integration in ALPHA-3 (ya-whx95 or similar).
+Hook exists for optimizer integration in ALPHA-3.
 """
 from __future__ import annotations
 

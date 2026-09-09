@@ -1,6 +1,6 @@
 """Structural tests for Dashboard D2 static frontend.
 
-Guards ya-c85dk: index.html and app.js exist with expected structure.
+Guards: index.html and app.js exist with expected structure.
 End-to-end render verification is covered by Dashboard D3 live deployment.
 """
 from __future__ import annotations

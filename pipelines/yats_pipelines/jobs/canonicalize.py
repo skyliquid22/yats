@@ -738,7 +738,7 @@ def _canonicalize_insider_trades(
         log.info("insider_trades: run %s already written — skipping (idempotent)", run_id)
         return 0
 
-    # filed_at is the designated partition key and equals the filing date (ya-2gqv7 fix).
+    # filed_at is the designated partition key and equals the filing date.
     where, params = _date_clause(config.start_date, config.end_date, ts_col="filed_at")
     query = f"SELECT * FROM raw_fd_insider_trades{where} ORDER BY filed_at"
 
@@ -765,7 +765,7 @@ def _canonicalize_insider_trades(
     # This collapses the case where the same filing is re-ingested into raw.
     by_key: dict[tuple, dict] = {}
     for row in raw_rows:
-        # Point-in-time: prefer the new filing_date column (ya-2gqv7), fall back to filed_at.
+        # Point-in-time: prefer the new filing_date column, fall back to filed_at.
         filing_dt = row.get("filing_date") or row.get("filed_at")
         if filing_dt is None:
             continue

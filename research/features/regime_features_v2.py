@@ -18,7 +18,7 @@ Features (market-wide scalars; broadcast to all symbols — same value on a give
   spy_iv_delta_5d   — 5d change in spy_atm_iv (regime transition direction)
   spy_slope_delta_5d— 5d change in spy_iv_term_slope (term-structure regime shift)
 
-Design constraints (non-negotiable per bead ya-3rkix):
+Design constraints (non-negotiable):
   - All lookbacks <= 64 bars; max here is 61 (60d z-score window).
   - Continuous features in obs — no hard bucketing in training.
   - as-of discipline: caller must pass only EOD rows (source_vendor='thetadata_eod').

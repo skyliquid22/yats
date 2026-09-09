@@ -1,6 +1,6 @@
 """Tests for compute.stats.deflated_sharpe — DSR and sweep-level correction.
 
-Tests required by ya-cnac1:
+Required tests:
 1. DSR decreases as N (trial count) rises holding observed SR fixed
 2. DSR decreases as cross-config Sharpe variance rises
 3. N=1 sweep degenerates gracefully to DSR ≈ PSR
@@ -93,7 +93,7 @@ class TestComputeSweepBenchmarkSr:
 
 
 # ---------------------------------------------------------------------------
-# Required tests (ya-cnac1)
+# Required tests
 # ---------------------------------------------------------------------------
 
 

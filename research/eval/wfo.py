@@ -1,7 +1,7 @@
 """Walk-Forward Optimization (WFO) harness — rolling / anchored (expanding).
 
-Stage 2 of CPCV adoption (ya-ddnk2).  Builds sequential train/test folds with
-purge+embargo (ya-2mt9e) between each fold's train window and test block.
+Stage 2 of CPCV adoption.  Builds sequential train/test folds with
+purge+embargo between each fold's train window and test block.
 
 Key design decisions
 --------------------
@@ -11,7 +11,7 @@ Key design decisions
   window can silently exclude all past crises and leave defensive-mode behaviour
   untrained.
 * **Full convergence per fold**: total_timesteps is never reduced.  Truncating
-  introduces sample-efficiency selection bias (ya-ddnk2 spec, explicitly vetoed).
+  introduces sample-efficiency selection bias (explicitly vetoed in the evaluation spec).
 * **WFO rank-decay metric**: RL-compatible analog of de Prado's CSCV PBO.
   Measures rank degradation across sequential rolls.  Labelled
   "WFO rank-decay overfitting metric" — it is NOT the literal CSCV PBO number.

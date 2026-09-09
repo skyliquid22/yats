@@ -5,10 +5,10 @@
 All tools are versioned (`_v1` suffix). New parameters are always optional with defaults in minor versions. Breaking changes require a new major version.
 
 Tools return either:
-- **run_id** (Dagster pipeline tools) — poll status via `monitor.pipeline_status`
-- **result** (Python subprocess / QuestDB query tools) — immediate response
+- **run_id** (Dagster pipeline tools): poll status via `monitor.pipeline_status`
+- **result** (Python subprocess / QuestDB query tools): immediate response
 
-### data.* — Data Ingestion and Query
+### data.*: Data Ingestion and Query
 
 | Tool | Description | Backend |
 |------|-------------|---------|
@@ -18,10 +18,10 @@ Tools return either:
 | `data.canonicalize_v1` | Run raw → canonical reconciliation for data domains over a date range | Dagster pipeline |
 | `data.verify_v1` | Data quality checks on canonical data | Python subprocess |
 | `data.query_v1` | Parameterized SELECT against QuestDB (role-restricted table access, no DDL/DML) | Direct QuestDB |
-| `data.coverage_v1` | Coverage report per symbol — gaps, fill ratios, date ranges | Direct QuestDB |
+| `data.coverage_v1` | Coverage report per symbol: gaps, fill ratios, date ranges | Direct QuestDB |
 | `data.vendors_v1` | List available vendors and their configuration status | Static config |
 
-### features.* — Feature Computation
+### features.*: Feature Computation
 
 | Tool | Description | Backend |
 |------|-------------|---------|
@@ -33,7 +33,7 @@ Tools return either:
 | `features.coverage_v1` | Feature coverage: missing values, date range, row counts | Direct QuestDB |
 | `features.watermarks_v1` | High-water marks per symbol and feature set | Direct QuestDB |
 
-### experiment.* — Experiment Management
+### experiment.*: Experiment Management
 
 | Tool | Description | Backend |
 |------|-------------|---------|
@@ -43,7 +43,7 @@ Tools return either:
 | `experiment.get_v1` | Full experiment details: spec, metrics, artifact paths | Python subprocess |
 | `experiment.compare_v1` | Side-by-side comparison of two experiments | Python subprocess |
 
-### eval.* — Evaluation
+### eval.*: Evaluation
 
 | Tool | Description | Backend |
 |------|-------------|---------|
@@ -51,7 +51,7 @@ Tools return either:
 | `eval.metrics_v1` | Fetch evaluation metrics (performance, trading, safety, regime) | Python subprocess |
 | `eval.regime_slices_v1` | Per-regime performance breakdown | Python subprocess |
 
-### shadow.* — Shadow Execution
+### shadow.*: Shadow Execution
 
 | Tool | Description | Backend |
 |------|-------------|---------|
@@ -61,7 +61,7 @@ Tools return either:
 | `shadow.results_v1` | Fetch shadow metrics + step-level logs | Python subprocess |
 | `shadow.compare_modes_v1` | Compare shadow vs paper vs live for same experiment | Direct QuestDB |
 
-### sweep.* — Experiment Sweeps
+### sweep.*: Experiment Sweeps
 
 | Tool | Description | Backend |
 |------|-------------|---------|
@@ -69,7 +69,7 @@ Tools return either:
 | `sweep.status_v1` | Per-experiment status within a sweep | Dagster GraphQL |
 | `sweep.results_v1` | Aggregate results across sweep, sorted by metric | Direct QuestDB |
 
-### qualify.* — Qualification
+### qualify.*: Qualification
 
 | Tool | Description | Backend |
 |------|-------------|---------|
@@ -77,7 +77,7 @@ Tools return either:
 | `qualify.report_v1` | Fetch qualification_report.json | Python subprocess |
 | `qualify.gates_v1` | List all gates and their threshold defaults | Python subprocess |
 
-### promote.* — Promotion
+### promote.*: Promotion
 
 | Tool | Description | Backend |
 |------|-------------|---------|
@@ -87,7 +87,7 @@ Tools return either:
 | `promote.list_v1` | List promotion records, optionally filter by tier | Direct QuestDB |
 | `promote.history_v1` | Full promotion history for an experiment | Python subprocess |
 
-### execution.* — Paper/Live Trading
+### execution.*: Paper/Live Trading
 
 | Tool | Description | Backend |
 |------|-------------|---------|
@@ -99,7 +99,7 @@ Tools return either:
 | `execution.orders_v1` | Order history with fill details | Direct QuestDB |
 | `execution.nav_v1` | NAV and portfolio snapshot | Direct QuestDB |
 
-### monitor.* — System Health
+### monitor.*: System Health
 
 | Tool | Description | Backend |
 |------|-------------|---------|
@@ -109,7 +109,7 @@ Tools return either:
 | `monitor.audit_log_v1` | Query audit trail, filter by action/actor/experiment | Direct QuestDB |
 | `monitor.reconcile_v1` | Consistency check across QuestDB, filesystem, Dagster | QuestDB + filesystem |
 
-### stats.* — Statistical Tools
+### stats.*: Statistical Tools
 
 | Tool | Description | Backend |
 |------|-------------|---------|
@@ -122,7 +122,7 @@ Tools return either:
 | `stats.ic_analysis_v1` | Information coefficient and decay across horizons | Python subprocess |
 | `stats.scm_leakage_v1` | Look-ahead bias detection via lead-lag correlation | Python subprocess |
 
-### registry.* — Metadata
+### registry.*: Metadata
 
 | Tool | Description | Backend |
 |------|-------------|---------|
@@ -161,7 +161,7 @@ Tools return either:
 | Table | Partition | Description |
 |-------|-----------|-------------|
 | `features` | MONTH | All v1 features: OHLCV (7), cross-sectional (5), fundamental (11), regime (4) + metadata (feature_set, feature_set_version, computed_at) |
-| `feature_watermarks` | — | Incremental computation tracking (symbol, feature_set, last_computed_date) |
+| `feature_watermarks` | (none) | Incremental computation tracking (symbol, feature_set, last_computed_date) |
 
 ### Experiment Tables
 
@@ -192,10 +192,10 @@ Tools return either:
 | Table | Partition | Description |
 |-------|-----------|-------------|
 | `audit_trail` | MONTH | Every tool invocation, pipeline run, risk decision (tool_name, invoker, parameters, result_status, duration_ms) |
-| `trading_heartbeat` | — | Liveness monitoring (loop_iteration, orders_pending, last_bar_received) |
+| `trading_heartbeat` | (none) | Liveness monitoring (loop_iteration, orders_pending, last_bar_received) |
 | `reconciliation_log` | MONTH | Canonicalization diagnostics (domain, symbol, vendor selection, validation warnings) |
-| `canonical_pins` | — | Snapshot pinning for reproducibility (experiment_id, canonicalized_at) |
-| `canonical_hashes` | — | Per-symbol + universe-level hashes for feature invalidation |
+| `canonical_pins` | (none) | Snapshot pinning for reproducibility (experiment_id, canonicalized_at) |
+| `canonical_hashes` | (none) | Per-symbol + universe-level hashes for feature invalidation |
 
 ---
 
@@ -203,7 +203,7 @@ Tools return either:
 
 ### configs/risk.yml
 
-Static risk policy thresholds. Paper/live trading always uses these values — no overrides allowed.
+Static risk policy thresholds. Paper/live trading always uses these values; no overrides allowed.
 
 ```yaml
 # Kill switches
@@ -241,7 +241,7 @@ min_confidence: 0.0               # No confidence gating by default
 min_holding_period: 1             # 1 bar minimum hold
 
 # Size reduce
-minimum_order_threshold: 0.01    # 1% of NAV — below this, reject
+minimum_order_threshold: 0.01    # 1% of NAV; below this, reject
 
 # Operational
 max_broker_errors: 5
@@ -264,7 +264,7 @@ Defines which features are computed and their dependencies.
 
 Ticker lists in YAML format. Example: `sp500.yml` contains 500 tickers.
 
-The resolved ticker list is stored in the ExperimentSpec at experiment creation time — changing the universe file after creation does not affect existing experiments.
+The resolved ticker list is stored in the ExperimentSpec at experiment creation time; changing the universe file after creation does not affect existing experiments.
 
 ### configs/regime_thresholds.yml
 

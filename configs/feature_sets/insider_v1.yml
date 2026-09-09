@@ -5,7 +5,7 @@ description: >
   502-bar span. insider_* are NaN for ETFs (no insider-trades data — natural
   consequence; env skips NaN per-symbol). inst_* cover ETFs via 13F filings.
   inst_ownership_chg_qoq is DEFERRED — needs 2 quarters (~180-bar memory),
-  infeasible purge on 502 bars; unlocks with the span-extension bead.
+  infeasible purge on 502 bars; unlocks with the span-extension work.
 
 insider:
   - insider_net_buy_90d
