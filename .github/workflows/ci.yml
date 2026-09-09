@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # torch + lightgbm each bundle libomp; nested OpenMP can deadlock the suite.
+  OMP_NUM_THREADS: "1"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv + Python 3.13
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Python tests (live vendor/DB tests excluded)
+        run: >
+          PYTHONPATH=.:pipelines
+          uv run --with pytest --with pytest-timeout
+          pytest tests -q --timeout=120 -k "not live"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: TypeScript MCP server tests
+        run: |
+          npm ci
+          npm test
