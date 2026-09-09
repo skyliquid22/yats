@@ -99,6 +99,8 @@ Trial clock at last verdict: **63 trials burned**. Nothing is certified; the clo
 
 An earlier era of Sharpe ≈ 2.17 results on a 2-year window died under span extension and honest fills; that post-mortem is in the full-span verdicts doc. The docs above are kept as a **lab notebook**: dated, immutable, and linked from every claim.
 
+Raw sweep outputs live in [`docs/research/receipts/`](docs/research/receipts/). Honest scope of the reproduction claim: re-running these sweeps requires vendor API keys and a populated database (see [`docs/ingestion.md`](docs/ingestion.md)); results will drift on vendor restatements, and no input-data snapshot is distributed. The receipts are the record of what was observed, not a bit-reproducible artifact. The `make demo` verdict, by contrast, is fully deterministic.
+
 ## Setup with real data
 
 Full vendor setup, the one-command symbol backfill, and the raw → canonical pipeline are documented in [docs/ingestion.md](docs/ingestion.md).

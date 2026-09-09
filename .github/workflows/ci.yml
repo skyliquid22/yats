@@ -89,3 +89,26 @@ jobs:
             exit 1
           fi
           echo "OK: no torch/SB3/gymnasium/nvidia packages in demo venv."
+
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify repo-relative links in README and docs resolve to tracked files
+        run: |
+          python3 - <<'PY'
+          import re, subprocess, sys, glob
+          tracked = set(subprocess.check_output(["git","ls-files"], text=True).split())
+          bad = []
+          for f in ["README.md"] + glob.glob("docs/**/*.md", recursive=True):
+              for m in re.finditer(r"\]\(((?!https?://|#|mailto:)[^)#]+)(#[^)]*)?\)", open(f).read()):
+                  p = m.group(1).rstrip("/")
+                  base = "/".join(f.split("/")[:-1])
+                  cand = p if p in tracked else (f"{base}/{p}" if base else p)
+                  cand = re.sub(r"[^/]+/\.\./", "", cand)
+                  if cand not in tracked and not any(t.startswith(cand + "/") for t in tracked):
+                      bad.append(f"{f}: {p}")
+          if bad:
+              print("BROKEN LINKS:"); [print(" ", b) for b in bad]; sys.exit(1)
+          print("all repo-relative links resolve")
+          PY
