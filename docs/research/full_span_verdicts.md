@@ -25,3 +25,17 @@ Neither crosses DSR 0.95 — no certified alpha yet. But:
    "PPO champion Sharpe=2.17" — the honest same-span comparison is 0.756.
 
 Deflation clock: 48 + 8 (champion rerun) + 6 (supervised) = **62 trials**.
+
+## Addendum (2026-09-08): vol-targeting overlay on lgbm_21d — trial 63
+
+Applying the ALPHA-3 risk layer (10% vol target) to the lgbm_21d winner, same
+full-span WFO geometry: **OOS Sharpe 1.134** (from 0.905), all four folds
+positive (1.76/1.08/0.58/1.13), n=1,292. A naive 3-trial benchmark printed
+DSR 0.988; the STRICT computation — expected-max benchmark scaled to all 63
+trials over the full-span honest-fill pool — gives **DSR 0.921: not
+significant**. (Mixing dead-methodology-era trials into the pool would be
+methodologically wrong but is reported for transparency: 0.19.)
+
+Standing verdict: still nothing certified. Closest attempt: 0.92 vs the 0.95
+bar. Deflation clock: **63 trials**. Raw result JSON:
+`.yats_data/wfo_sweeps/vt_lgbm21_result.json`.
