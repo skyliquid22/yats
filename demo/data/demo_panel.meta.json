@@ -1,0 +1,37 @@
+{
+  "seed": 42,
+  "n_days": 522,
+  "symbols": [
+    "ARBRK",
+    "BLTZR",
+    "CNDRA",
+    "DRFTN",
+    "EMBRX",
+    "FLXON",
+    "GRPHL",
+    "HLIOS",
+    "NMBUS",
+    "SPY"
+  ],
+  "rows": 5220,
+  "start": "2024-01-02 00:00:00",
+  "end": "2025-12-31 00:00:00",
+  "content_sha256": "b12d5be59cd1fc7a6e2224626bfc2e612a3c002d9cf210260134695f5e2b60ca",
+  "regimes": [
+    [
+      "calm",
+      0.0,
+      0.45
+    ],
+    [
+      "spike",
+      0.45,
+      0.6
+    ],
+    [
+      "trend",
+      0.6,
+      1.0
+    ]
+  ]
+}

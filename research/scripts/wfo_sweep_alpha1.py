@@ -39,7 +39,8 @@ from scipy import stats as sp_stats
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 logger = logging.getLogger("wfo_sweep_alpha1")
 
-RIG = Path("/Users/ahmed/gt/yats/mayor/rig")
+# Repo root, resolved relative to this file so fresh checkouts work anywhere.
+RIG = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RIG))
 sys.path.insert(0, str(RIG / "pipelines"))
 
@@ -116,13 +117,8 @@ def mark(msg: str) -> None:
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_panel() -> pd.DataFrame:
-    """Fetch sweep_v1 features + close prices from QuestDB; build panel DataFrame.
-
-    Returns a DataFrame with columns: date, symbol, close, <feature_cols>,
-    fwd_5d, fwd_5d_resid, fwd_21d, fwd_21d_resid, ret_1d_realized.
-    Index: integer (reset), sorted by (date, symbol).
-    """
+def _fetch_panel_questdb() -> pd.DataFrame:
+    """Fetch sweep_v1 features + open/close prices from QuestDB (default path)."""
     qdb = QuestDBResource()
     conn = psycopg2.connect(
         host=qdb.pg_host, port=qdb.pg_port, user=qdb.pg_user,
@@ -155,7 +151,47 @@ def load_panel() -> pd.DataFrame:
     conn.close()
 
     panel = features_df.merge(closes_df, on=["date", "symbol"], how="inner")
-    panel = panel.sort_values(["date", "symbol"]).reset_index(drop=True)
+    return panel.sort_values(["date", "symbol"]).reset_index(drop=True)
+
+
+def _load_panel_from_file(path: Path) -> pd.DataFrame:
+    """DEMO_PANEL_PATH hook: load a pre-built raw panel bundle (parquet or CSV).
+
+    Used by demo/run_demo.py to run the sweep machinery without a live QuestDB.
+    The bundle must carry columns: date, symbol, open, close + FEATURE_COLS.
+    All downstream transforms (rank-normalization, forward returns,
+    residualization) are identical to the QuestDB path.
+    """
+    if path.suffix in (".parquet", ".pq"):
+        panel = pd.read_parquet(path)
+    else:
+        panel = pd.read_csv(path)
+    required = ["date", "symbol", "open", "close", *FEATURE_COLS]
+    missing = [c for c in required if c not in panel.columns]
+    if missing:
+        raise ValueError(f"DEMO_PANEL_PATH bundle {path} missing columns: {missing}")
+    panel = panel.copy()
+    panel["date"] = pd.to_datetime(panel["date"]).dt.date
+    return panel.sort_values(["date", "symbol"]).reset_index(drop=True)
+
+
+def load_panel() -> pd.DataFrame:
+    """Build the (date, symbol) panel: features + prices + targets.
+
+    Default source is QuestDB. If the DEMO_PANEL_PATH environment variable is
+    set, the raw panel is loaded from that file instead (offline demo mode);
+    everything downstream is unchanged.
+
+    Returns a DataFrame with columns: date, symbol, open, close, <feature_cols>,
+    fwd_5d, fwd_5d_resid, fwd_21d, fwd_21d_resid, ret_1d_realized, ret_oc_1d.
+    Index: integer (reset), sorted by (date, symbol).
+    """
+    demo_path = os.environ.get("DEMO_PANEL_PATH")
+    if demo_path:
+        panel = _load_panel_from_file(Path(demo_path))
+        mark(f"DATA source=DEMO_PANEL_PATH ({demo_path}) — QuestDB not used")
+    else:
+        panel = _fetch_panel_questdb()
 
     mark(f"DATA rows={len(panel)} dates={panel['date'].nunique()} symbols={panel['symbol'].nunique()}")
 
@@ -271,6 +307,33 @@ def make_eval_fn(panel: pd.DataFrame, dates: list):
 
 
 # ---------------------------------------------------------------------------
+# Per-config summary (shared by main() and demo/run_demo.py)
+# ---------------------------------------------------------------------------
+
+def summarize_config_result(cfg: dict, result) -> dict:
+    """Compute OOS Sharpe, moments, and PSR-vs-zero for one WFO config result."""
+    oos = np.asarray(result.concatenated_oos_returns, dtype=float)
+    oos = oos[~np.isnan(oos)]
+    sharpe = compute_sharpe(pd.Series(oos)) if len(oos) > 2 else 0.0
+    skew = float(sp_stats.skew(oos)) if len(oos) >= 3 else 0.0
+    kurt = float(sp_stats.kurtosis(oos)) + 3.0 if len(oos) >= 4 else 3.0
+    psr = probabilistic_sharpe_ratio(
+        observed_sharpe=sharpe, benchmark_sharpe=0.0,
+        n_observations=len(oos), returns_skewness=skew, returns_kurtosis=kurt,
+    )
+    return {
+        **cfg,
+        "sharpe": sharpe,
+        "skewness": skew,
+        "kurtosis": kurt,
+        "n_obs": len(oos),
+        "per_fold_oos_sharpe": result.per_fold_oos_sharpe,
+        "median_oos_sharpe": result.median_oos_sharpe,
+        "psr_vs_zero": psr["dsr"],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -301,30 +364,13 @@ def main() -> int:
             per_config.append({**cfg, "failed": str(exc)})
             continue
 
-        oos = np.asarray(result.concatenated_oos_returns, dtype=float)
-        oos = oos[~np.isnan(oos)]
-        sharpe = compute_sharpe(pd.Series(oos)) if len(oos) > 2 else 0.0
-        skew = float(sp_stats.skew(oos)) if len(oos) >= 3 else 0.0
-        kurt = float(sp_stats.kurtosis(oos)) + 3.0 if len(oos) >= 4 else 3.0
-        psr = probabilistic_sharpe_ratio(
-            observed_sharpe=sharpe, benchmark_sharpe=0.0,
-            n_observations=len(oos), returns_skewness=skew, returns_kurtosis=kurt,
-        )
-        per_config.append({
-            **cfg,
-            "sharpe": sharpe,
-            "skewness": skew,
-            "kurtosis": kurt,
-            "n_obs": len(oos),
-            "per_fold_oos_sharpe": result.per_fold_oos_sharpe,
-            "median_oos_sharpe": result.median_oos_sharpe,
-            "psr_vs_zero": psr["dsr"],
-            "elapsed_s": time.time() - cfg_t0,
-        })
+        cfg_summary = summarize_config_result(cfg, result)
+        cfg_summary["elapsed_s"] = time.time() - cfg_t0
+        per_config.append(cfg_summary)
         mark(
-            f"CONFIG {i} done: OOS sharpe={sharpe:.3f} "
+            f"CONFIG {i} done: OOS sharpe={cfg_summary['sharpe']:.3f} "
             f"folds={['%.2f' % (s or 0) for s in result.per_fold_oos_sharpe]} "
-            f"psr0={psr['dsr']:.3f} ({(time.time() - cfg_t0):.1f}s)"
+            f"psr0={cfg_summary['psr_vs_zero']:.3f} ({(time.time() - cfg_t0):.1f}s)"
         )
 
     # DSR over this sweep (6 configs)
