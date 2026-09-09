@@ -2,6 +2,13 @@
 
 YATS is a trading research platform whose referee keeps saying **no**. It runs the full loop — multi-vendor ingestion, canonical data plane, deterministic features, walk-forward training and evaluation, shadow replay, paper execution — but the part it takes most seriously is the certification gate: honest next-bar execution, purged walk-forward optimization, and a Deflated Sharpe Ratio test with a **public trial clock** that counts every configuration ever tried against every new result. After 63 logged trials across PPO, supervised, feature-ablation, and risk-overlay sweeps, nothing has crossed the bar yet. The negative results are published in-repo, because a platform that can't say "no signal" rigorously can't be trusted when it eventually says "yes."
 
+## Who this is for
+
+- Quant researchers who want their backtests **distrusted by default** — every new result deflated against every trial ever burned.
+- ML people who want a leak-proof evaluation harness: purged anchored folds, lookback-aware purge buffers, next-bar fills.
+- Anyone who wants to watch a Deflated Sharpe referee reject 63 straight attempts in public, with receipts.
+- **Not** for anyone seeking turnkey profits — the best certified alpha here is *none*, and that is the point.
+
 ## Quickstart (no API keys needed)
 
 ```bash
@@ -31,10 +38,14 @@ flowchart LR
     end
 
     vendors --> I[Ingest<br/>Dagster jobs]
-    I --> C[(Canonical<br/>QuestDB)]
-    C --> FE[Features<br/>deterministic, registry-based]
-    FE --> H[WFO / DSR harness<br/>purged walk-forward,<br/>Deflated Sharpe + trial clock]
-    H --> S[Shadow replay<br/>→ paper trading]
+    I --> R[raw_* tables<br/>append-only,<br/>vendor-shaped]
+    R --> C[(canonical_*<br/>point-in-time, DEDUP-<br/>idempotent, lineage)]
+    C --> FE[Features<br/>deterministic registry,<br/>lookback accounting]
+    FE --> E[Experiments<br/>spec-hashed<br/>content-addressed IDs]
+    E --> H[WFO / DSR harness<br/>purged folds,<br/>Deflated Sharpe + trial clock]
+    H --> Q[Qualification gates<br/>hard + soft]
+    Q --> P[Promotion tiers<br/>research → candidate<br/>→ production]
+    P --> S[Shadow replay<br/>→ paper trading]
 
     M[MCP server<br/>72 tools, TypeScript] -.-> C
     M -.-> H
@@ -46,6 +57,28 @@ flowchart LR
 - **Purged WFO**: anchored expanding folds with purge = label horizon plus a feature-memory buffer, so no training fold sees leaked future data.
 - **Deflated Sharpe with a trial clock**: every config in every sweep increments a cumulative trial count; DSR deflates each new result against the whole history. Current clock: **63 trials** ([docs/research/full_span_verdicts.md](docs/research/full_span_verdicts.md)).
 - **MCP-native**: all capabilities are exposed as MCP tools callable by agents or notebooks; a read-only [dashboard](docs/dashboard.md) sits alongside.
+
+### Anatomy of an experiment
+
+Every run is an `ExperimentSpec` ([research/experiments/spec.py](research/experiments/spec.py)) — frozen, and content-addressed: the SHA256 of its canonical JSON is the `experiment_id`, so changing any field is a new trial on the clock.
+
+```yaml
+experiment_name: alpha1_lgbm_21d
+symbols: [AMD, NFLX]          # sorted + deduped, so ordering can't fork the hash
+interval: daily
+feature_set: core_v1          # registry-resolved; its max lookback sizes the purge
+policy: ppo                   # equal_weight | sma | ppo | sac[_*] | hierarchical
+cost_config: {transaction_cost_bp: 5.0, slippage_bp: 0.0}
+seed: 42                      # one seed, deterministic run
+wfo_config:
+  n_periods: 4
+  train_window: 504           # anchored mode: window expands, never drops history
+  label_horizon: 1            # bars purged at every train/test boundary
+  purge_buffer: null          # null = auto from the feature set's max lookback
+execution_lag_days: 1         # decide on bar t, fill on bar t+1; same-bar fills (0)
+fill_timing: next_close       # are legacy-only and warn loudly — a close-time signal
+                              # filled at that same close is lookahead, not execution
+```
 
 ## Results (the honest table)
 
@@ -84,6 +117,15 @@ Reference material:
 - [docs/your_first_experiment.ipynb](docs/your_first_experiment.ipynb) — general-audience walkthrough: run your first experiment
 - [docs/yats_for_quanto_users.ipynb](docs/yats_for_quanto_users.ipynb) — notebook walkthrough for quant researchers
 - [configs/risk.yml](configs/risk.yml) — the static risk contract (no model may override it)
+
+## Troubleshooting
+
+- **pytest hangs or deadlocks on macOS** — set `OMP_NUM_THREADS=1` (`make test` already does): torch and lightgbm each bundle their own libomp, and the duplicate OpenMP runtimes deadlock in torch's QR init.
+- **`live` tests fail** — they need a running Theta terminal / live DB; run with `-k "not live"` as in the Quickstart.
+- **Connection refused on real-data paths** — QuestDB must be up: `docker compose up -d`. `make demo` needs no services at all.
+- **MCP tool calls clamped to `intern`** — elevated roles must be operator-allowlisted via `YATS_ALLOWED_ROLES` (comma-separated role names, or `*`); anything else falls back to least privilege.
+- **financialdatasets.ai data looks truncated or wrong** — known vendor limits (insider trades cap at 500 rows/ticker, 13F `value_usd` unreliable before 2025-06, ETFs have no insider/fundamentals data) are documented in [docs/ingestion.md](docs/ingestion.md#vendor-caveats).
+- **`npm test` (MCP server) misbehaves** — use Node ≥ 22, the version CI pins.
 
 ## Roadmap (not yet built)
 
