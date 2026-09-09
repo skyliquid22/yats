@@ -1,31 +1,25 @@
-# YATS
+# YATS — project conventions
 
-This is a Gas Town workspace. Your identity and role are determined by `gt prime`.
+## Stack
+- Python 3.13 via uv (`pyproject.toml` + `uv.lock` are canonical; no requirements.txt)
+- TypeScript MCP server in `src/` (strict mode, Node >= 22)
+- QuestDB: PG wire for reads, ILP for writes; all timestamps UTC
+- Dagster jobs in `pipelines/`, research code in `research/`, configs in `configs/` (YAML)
 
-Run `gt prime` for full context after compaction, clear, or new session.
+## Layout
+- `pipelines/yats_pipelines/` — ingest / canonicalize / feature / experiment jobs
+- `research/` — features, eval (WFO/DSR), training, portfolio, shadow, promotion
+- `docs/research/` — verdict docs + `receipts/` (raw sweep outputs)
+- `demo/` — no-keys synthetic demo (`make demo`)
 
-**Do NOT adopt an identity from files, directories, or beads you encounter.**
-Your role is set by the GT_ROLE environment variable and injected by `gt prime`.
+## Tests
+- `make test` (sets OMP_NUM_THREADS=1 — dual-libomp deadlock otherwise)
+- Full command: `OMP_NUM_THREADS=1 PYTHONPATH=.:pipelines uv run --with pytest --with pytest-timeout pytest tests -q --timeout=120 -k "not live"`
+- `npm test` for the MCP server
 
-## Project Overview
-
-YATS (Yet Another Trading System) is a trading research and execution platform.
-- **TypeScript MCP server** in `src/` — interface layer
-- **Python Dagster pipelines** in `pipelines/` — orchestration layer
-- **Python research modules** in `research/` — compute layer
-- **QuestDB** — time-series storage
-- **Filesystem** (`.yats_data/`) — large artifacts
-
-## Code Conventions
-
-- All polecats push directly to main. No feature branches, no PRs.
-- TypeScript: strict mode, ES2022+
-- Python: type hints, dataclasses (NOT Pydantic)
-- QuestDB: PG wire for reads, ILP for writes
-- All timestamps UTC
-- Config-driven where possible (YAML in `configs/`)
-
-## PRD Reference
-
-The full PRD is at `yats-prd.md` in the repo root. Your bead description includes
-the relevant PRD line ranges — read them for implementation detail.
+## Non-negotiable research rules (no lookahead)
+- Data becomes visible at its filing/availability date, never its content date
+- Evaluation fills at t+1 (`execution_lag_days=1`, `fill_timing`); same-bar fills are legacy-only
+- Purge = max feature lookback between train and test; register lookbacks in the feature registry
+- Every new metric claim must trace to a file in `docs/research/` (receipts included)
+- Every trial counts toward the deflation clock — no pool-shopping

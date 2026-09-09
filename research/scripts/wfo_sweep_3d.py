@@ -28,7 +28,7 @@ import pandas as pd
 import psycopg2
 from scipy import stats as sp_stats
 
-RIG = Path("/Users/ahmed/gt/yats/mayor/rig")
+RIG = Path(__file__).resolve().parents[2]  # repo root, checkout-independent
 sys.path.insert(0, str(RIG))
 sys.path.insert(0, str(RIG / "pipelines"))
 
