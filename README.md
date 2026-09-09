@@ -18,10 +18,12 @@ make demo
 
 `make demo` replays the bundled `demo/` dataset through the research harness — feature computation, a small purged walk-forward sweep, and a Deflated Sharpe verdict — with no vendor credentials required. See [Setup with real data](#setup-with-real-data) to plug in live vendors.
 
-Run the test suite (no services required — live-DB tests skip automatically):
+The demo install is deliberately lean: it does **not** pull the RL stack (torch, stable-baselines3, gymnasium — an optional `rl` extra). Demo install ≈ 800 MB; full research stack (`uv sync --extra rl`, CPU-pinned torch) ≈ 1.5 GB.
+
+Run the test suite (no services required — live-DB tests skip automatically; the RL trainer tests need the `rl` extra):
 
 ```bash
-PYTHONPATH=.:pipelines uv run --with pytest --with pytest-timeout \
+PYTHONPATH=.:pipelines uv run --extra rl --with pytest --with pytest-timeout \
   pytest tests -q --timeout=120 -k "not live"
 ```
 

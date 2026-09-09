@@ -11,8 +11,16 @@ from __future__ import annotations
 
 from typing import Any
 
-import gymnasium
 import numpy as np
+
+try:
+    import gymnasium
+except ModuleNotFoundError as _err:
+    raise ModuleNotFoundError(
+        "gymnasium is not installed. The RL stack (gymnasium, torch, "
+        "stable-baselines3) is an optional extra; install it with "
+        "`uv sync --extra rl` (or `pip install 'yats[rl]'`)."
+    ) from _err
 
 
 class SB3EnvWrapper(gymnasium.Env):

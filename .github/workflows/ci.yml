@@ -22,10 +22,10 @@ jobs:
           python-version: "3.13"
           enable-cache: true
 
-      - name: Python tests (live vendor/DB tests excluded)
+      - name: Python tests (live vendor/DB tests excluded; rl extra, CPU-pinned torch)
         run: >
           PYTHONPATH=.:pipelines
-          uv run --with pytest --with pytest-timeout
+          uv run --extra rl --with pytest --with pytest-timeout
           pytest tests -q --timeout=120 -k "not live"
 
       - name: Set up Node
@@ -38,3 +38,54 @@ jobs:
         run: |
           npm ci
           npm test
+
+  # Guards the no-keys quickstart: `make demo` must work WITHOUT the rl extra
+  # (no torch/SB3/gymnasium), install small, and finish fast.
+  demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv + Python 3.13
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install core deps only (no rl extra)
+        run: uv sync
+
+      - name: Assert demo venv < 1.5 GB
+        run: |
+          size_bytes=$(du -sb .venv | cut -f1)
+          limit_bytes=$((1500 * 1000 * 1000))
+          echo "demo venv size: ${size_bytes} bytes ($(du -sh .venv | cut -f1))"
+          if [ "${size_bytes}" -ge "${limit_bytes}" ]; then
+            echo "FAIL: demo venv is ${size_bytes} bytes (>= 1.5 GB limit of ${limit_bytes} bytes)." >&2
+            echo "The no-rl install must stay small — did an RL/CUDA dep leak into core dependencies?" >&2
+            exit 1
+          fi
+
+      - name: Run make demo (assert < 180s wall clock, verdict rendered)
+        run: |
+          start=$(date +%s)
+          make demo 2>&1 | tee demo_output.log
+          elapsed=$(( $(date +%s) - start ))
+          echo "make demo wall clock: ${elapsed}s"
+          if [ "${elapsed}" -ge 180 ]; then
+            echo "FAIL: make demo took ${elapsed}s (>= 180s limit)." >&2
+            exit 1
+          fi
+          if ! grep -q "DO NOT PROMOTE" demo_output.log; then
+            echo "FAIL: demo output did not render the 'DO NOT PROMOTE' verdict." >&2
+            exit 1
+          fi
+
+      - name: Assert no RL packages leaked into the demo venv
+        run: |
+          if uv pip list | grep -iE '^(torch|stable[-_]baselines3|gymnasium|nvidia-)'; then
+            echo "FAIL: RL/CUDA packages found in the no-rl demo venv." >&2
+            exit 1
+          fi
+          echo "OK: no torch/SB3/gymnasium/nvidia packages in demo venv."

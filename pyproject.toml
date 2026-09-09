@@ -19,9 +19,6 @@ dependencies = [
     "pandas>=3.0,<4.0",
     "scipy",
     "statsmodels",
-    "gymnasium>=1.2,<2.0",
-    "torch>=2.10,<3.0",
-    "stable-baselines3>=2.7,<3.0",
     "pyyaml",
     "websockets>=16.0",
     "fastapi>=0.100,<1.0",
@@ -32,6 +29,16 @@ dependencies = [
     "pyarrow>=16.0",
 ]
 
+# RL stack is optional: the demo and the supervised (ridge/lgbm) research path
+# never import it. On Linux the default torch wheel pulls CUDA + cuDNN + NCCL
+# (~7.7 GB); keep that out of the base install. `uv sync --extra rl` to get it.
+[project.optional-dependencies]
+rl = [
+    "gymnasium>=1.2,<2.0",
+    "torch>=2.10,<3.0",
+    "stable-baselines3>=2.7,<3.0",
+]
+
 [tool.setuptools.packages.find]
 include = ["pipelines*", "research*", "compute*", "dashboard*"]
 
@@ -39,3 +46,13 @@ include = ["pipelines*", "research*", "compute*", "dashboard*"]
 markers = [
     "live_db: requires a live QuestDB instance on localhost:8812",
 ]
+
+# Pin torch to the CPU-only wheel index so even `--extra rl` stays small on
+# Linux (CPU wheels, no CUDA/cuDNN/NCCL). GPU users can override locally.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }

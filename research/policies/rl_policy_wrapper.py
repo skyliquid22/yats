@@ -16,6 +16,12 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+_RL_EXTRA_HINT = (
+    "stable-baselines3 is not installed. The RL stack (gymnasium, torch, "
+    "stable-baselines3) is an optional extra; install it with "
+    "`uv sync --extra rl` (or `pip install 'yats[rl]'`)."
+)
+
 
 class RLPolicyWrapper:
     """Wraps a stable-baselines3 model to match PolicyProtocol.act().
@@ -66,7 +72,10 @@ def load_rl_checkpoint(
         ValueError: If policy_name is not a recognized RL policy.
     """
     if policy_name == "ppo":
-        from stable_baselines3 import PPO
+        try:
+            from stable_baselines3 import PPO
+        except ModuleNotFoundError as err:
+            raise ModuleNotFoundError(_RL_EXTRA_HINT) from err
 
         checkpoint_path = checkpoint_dir / "ppo_checkpoint"
         if not checkpoint_path.exists() and not checkpoint_path.with_suffix(".zip").exists():
@@ -78,7 +87,10 @@ def load_rl_checkpoint(
         logger.info("Loaded PPO checkpoint from %s", checkpoint_path)
 
     elif policy_name == "sac" or policy_name.startswith("sac_"):
-        from stable_baselines3 import SAC
+        try:
+            from stable_baselines3 import SAC
+        except ModuleNotFoundError as err:
+            raise ModuleNotFoundError(_RL_EXTRA_HINT) from err
 
         checkpoint_path = checkpoint_dir / "sac_checkpoint"
         if not checkpoint_path.exists() and not checkpoint_path.with_suffix(".zip").exists():
