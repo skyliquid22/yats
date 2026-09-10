@@ -1,0 +1,62 @@
+name: breadth_v1
+description: >
+  Universe-breadth pilot feature set (liquid50). Derived from sweep_v1 with
+  three deliberate changes. (1) MINUS the options group: EOD options chains
+  exist only for the original 10 mega-cap names; on a 50-name universe the
+  five options columns would be null for the 40 new names, and cross-sectional
+  rank normalization over a 10-valued/40-null column silently biases ranks
+  toward the legacy names. Excluded until options coverage exists for the full
+  universe. (2) PLUS mom_12m_excl_1m restored to cross_sectional: its 252-bar
+  lookback made honest purging (purge_buffer = max lookback) geometrically
+  infeasible on the old 502-bar span, which is why sweep_v1 dropped it. On the
+  full 2020-01..present span (~1,640 bars), purge=252 leaves ample anchored
+  4-fold geometry, so the strongest classical cross-sectional momentum factor
+  comes back. (3) PLUS the insider and institutional groups (fields per
+  sweep_v2), which are natural cross-sectional signals and only become
+  meaningfully rankable at 50 names. Max lookback = 252 (mom_12m_excl_1m);
+  purge accordingly.
+
+ohlcv:
+  - ret_1d
+  - ret_5d
+  - ret_21d
+  - rv_21d
+  - rv_63d
+  - dist_20d_high
+  - dist_20d_low
+
+cross_sectional:
+  - mom_3m
+  - mom_12m_excl_1m
+  - log_mkt_cap
+  - size_rank
+  - value_rank
+
+fundamental:
+  - pe_ttm
+  - ps_ttm
+  - pb
+  - ev_ebitda
+  - roe
+  - gross_margin
+  - operating_margin
+  - fcf_margin
+  - debt_equity
+  - eps_growth_1y
+  - revenue_growth_1y
+
+regime:
+  - market_vol_20d
+  - market_trend_20d
+  - dispersion_20d
+  - corr_mean_20d
+
+insider:
+  - insider_net_buy_90d
+  - insider_buy_intensity_30d
+  - insider_cluster_30d
+  - exec_net_buy_90d
+
+institutional:
+  - inst_ownership_pct
+  - inst_top10_share
