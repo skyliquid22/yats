@@ -12,6 +12,8 @@ from research.experiments.spec import (
     EvaluationSplitConfig,
     ExecutionSimConfig,
     ExperimentSpec,
+    PortfolioRiskConfig,
+    RegimeConditioningConfig,
     RiskConfig,
     _deep_merge,
     _normalize,
@@ -609,3 +611,68 @@ class TestNormalize:
         spec_int = ExperimentSpec(**_base_kwargs(cost_config=CostConfig(transaction_cost_bp=5)))
         spec_float = ExperimentSpec(**_base_kwargs(cost_config=CostConfig(transaction_cost_bp=5.0)))
         assert spec_int.experiment_id == spec_float.experiment_id
+
+
+# ===================================================================
+# PortfolioRiskConfig.regime_conditioning — spec / canonical JSON
+# ===================================================================
+
+class TestRegimeConditioningSpec:
+    def test_spec_without_portfolio_risk_serializes_null(self):
+        # Specs with portfolio_risk=None (the default) are unaffected by the
+        # regime_conditioning field: portfolio_risk stays null in canonical JSON.
+        spec = _make_spec()
+        d = spec.to_canonical_dict()
+        assert d["portfolio_risk"] is None
+
+    def test_canonical_dict_includes_regime_conditioning_null(self):
+        # execution_lag_days precedent: new field is included in canonical JSON
+        # (as null when unset) for any spec that sets portfolio_risk.
+        spec = _make_spec(portfolio_risk=PortfolioRiskConfig())
+        d = spec.to_canonical_dict()
+        assert "regime_conditioning" in d["portfolio_risk"]
+        assert d["portfolio_risk"]["regime_conditioning"] is None
+
+    def test_canonical_dict_normalizes_nested_config(self):
+        rc = RegimeConditioningConfig(enabled=True, low_target=0.06)
+        spec = _make_spec(portfolio_risk=PortfolioRiskConfig(regime_conditioning=rc))
+        d = spec.to_canonical_dict()
+        nested = d["portfolio_risk"]["regime_conditioning"]
+        assert nested["enabled"] is True
+        assert nested["feature"] == "spy_iv_zscore_60d"
+        assert nested["low_target"] == 0.06
+        assert nested["high_target"] == 0.15
+        assert nested["zscore_lo"] == -1.0
+        assert nested["zscore_hi"] == 1.0
+
+    def test_experiment_id_deterministic(self):
+        rc = dict(enabled=True, feature="spy_vrp", low_target=0.04, high_target=0.16)
+        spec1 = _make_spec(
+            portfolio_risk=PortfolioRiskConfig(regime_conditioning=rc)
+        )
+        spec2 = _make_spec(
+            portfolio_risk=PortfolioRiskConfig(
+                regime_conditioning=RegimeConditioningConfig(**rc)
+            )
+        )
+        # Dict-coerced and dataclass-built configs hash identically
+        assert spec1.experiment_id == spec2.experiment_id
+
+    def test_experiment_id_changes_when_enabled(self):
+        base = _make_spec(portfolio_risk=PortfolioRiskConfig())
+        conditioned = _make_spec(
+            portfolio_risk=PortfolioRiskConfig(
+                regime_conditioning=RegimeConditioningConfig(enabled=True)
+            )
+        )
+        assert base.experiment_id != conditioned.experiment_id
+
+    def test_json_serializable(self):
+        spec = _make_spec(
+            portfolio_risk=PortfolioRiskConfig(
+                regime_conditioning=RegimeConditioningConfig(enabled=True)
+            )
+        )
+        # Canonical JSON round-trips without error
+        canonical = json.dumps(spec.to_canonical_dict(), sort_keys=True)
+        assert "regime_conditioning" in canonical

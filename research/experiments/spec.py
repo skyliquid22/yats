@@ -172,6 +172,54 @@ class ExecutionSimConfig:
 
 
 @dataclass(frozen=True)
+class RegimeConditioningConfig:
+    """Regime-conditioned vol targeting — controller-layer use of slow features.
+
+    Motivated by the twice-replicated finding (wfo_sweep_3d / wfo_sweep_4b)
+    that slow market-implied regime features degrade totals when fed to the
+    policy as raw observations but stabilize the most recent fold: the
+    hypothesis is they belong in the controller layer. When enabled, the
+    risk layer's per-bar vol target is no longer the constant
+    PortfolioRiskConfig.vol_target; instead it interpolates linearly between
+    high_target (calm: feature value <= zscore_lo) and low_target (stressed:
+    feature value >= zscore_hi), clamped outside [zscore_lo, zscore_hi].
+
+    The conditioning value is a strictly causal (lagged) reading of the
+    regime feature — see research.portfolio.risk_layer.apply_risk_layer_batch
+    for the exact alignment convention.
+
+    Off by default (enabled=False), and PortfolioRiskConfig.regime_conditioning
+    defaults to None; see that field's note for experiment-id impact.
+    """
+
+    enabled: bool = False
+    feature: str = "spy_iv_zscore_60d"  # regime feature column (regime_features_v2)
+    low_target: float = 0.05    # annualized vol target when stressed (feature >= zscore_hi)
+    high_target: float = 0.15   # annualized vol target when calm (feature <= zscore_lo)
+    zscore_lo: float = -1.0     # calm threshold — at/below this, target = high_target
+    zscore_hi: float = 1.0      # stress threshold — at/above this, target = low_target
+
+    def __post_init__(self) -> None:
+        if not self.feature:
+            raise ValueError("regime_conditioning.feature must be non-empty")
+        if self.low_target <= 0:
+            raise ValueError("regime_conditioning.low_target must be > 0")
+        if self.high_target <= 0:
+            raise ValueError("regime_conditioning.high_target must be > 0")
+        if self.low_target > self.high_target:
+            raise ValueError(
+                "regime_conditioning.low_target must be <= high_target "
+                "(de-risk in stress): got "
+                f"low_target={self.low_target} > high_target={self.high_target}"
+            )
+        if self.zscore_lo >= self.zscore_hi:
+            raise ValueError(
+                "regime_conditioning.zscore_lo must be < zscore_hi, got "
+                f"zscore_lo={self.zscore_lo} >= zscore_hi={self.zscore_hi}"
+            )
+
+
+@dataclass(frozen=True)
 class PortfolioRiskConfig:
     """Portfolio-level risk transforms applied as a post-policy step.
 
@@ -185,6 +233,18 @@ class PortfolioRiskConfig:
 
     New optional field on ExperimentSpec — defaults to None so existing
     experiment_ids are unaffected when portfolio_risk is not set.
+
+    regime_conditioning (optional, default None) makes the vol target
+    regime-conditioned — see RegimeConditioningConfig. Canonical-JSON
+    handling follows the execution_lag_days / fill_timing precedent:
+    the field is validated in __post_init__ and included in canonical
+    JSON. Because canonical serialization reflects over all dataclass
+    fields, adding this field appends "regime_conditioning": null to the
+    canonical JSON of any spec that sets portfolio_risk — those
+    experiment_ids change once. Specs with portfolio_risk=None (the
+    default) serialize portfolio_risk as null and keep their ids.
+    A dict passed for regime_conditioning (e.g. from JSON spec files) is
+    coerced to RegimeConditioningConfig.
     """
 
     vol_target: float = 0.10   # annualized target portfolio vol (10%)
@@ -193,6 +253,7 @@ class PortfolioRiskConfig:
     beta_lookback: int = 60    # trailing bars for beta regression (trading days)
     beta_cap: float = 1.0      # max allowed portfolio beta in long-only mode
     spy_symbol: str = "SPY"   # market proxy for beta computation
+    regime_conditioning: RegimeConditioningConfig | None = None
 
     def __post_init__(self) -> None:
         if self.vol_target <= 0:
@@ -203,6 +264,20 @@ class PortfolioRiskConfig:
             raise ValueError("beta_lookback must be >= 2")
         if self.beta_cap <= 0:
             raise ValueError("beta_cap must be > 0")
+        # Coerce dict (JSON spec files / _reconstruct_spec) to dataclass
+        if isinstance(self.regime_conditioning, Mapping):
+            object.__setattr__(
+                self,
+                "regime_conditioning",
+                RegimeConditioningConfig(**self.regime_conditioning),
+            )
+        if self.regime_conditioning is not None and not isinstance(
+            self.regime_conditioning, RegimeConditioningConfig
+        ):
+            raise ValueError(
+                "regime_conditioning must be a RegimeConditioningConfig, "
+                f"a mapping, or None; got {type(self.regime_conditioning).__name__}"
+            )
 
 
 # ---------------------------------------------------------------------------

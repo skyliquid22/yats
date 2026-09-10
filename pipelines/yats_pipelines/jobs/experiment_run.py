@@ -343,10 +343,34 @@ def evaluate_experiment(
         pr = spec.portfolio_risk
         spy_sym = pr.spy_symbol
         spy_ret_series = returns_df[spy_sym] if spy_sym in returns_df.columns else None
-        weights_df = apply_risk_layer_batch(weights_df, returns_df, spy_ret_series, pr)
+
+        # Regime-conditioned vol targeting: pull the conditioning feature from
+        # the eval panel rows (regime columns are carried on each row). The
+        # series is indexed by observation date; apply_risk_layer_batch lags it
+        # one bar relative to the fill-date weights index (strictly causal).
+        regime_cond_series = None
+        rc = pr.regime_conditioning
+        if rc is not None and rc.enabled:
+            if eval_data and rc.feature in eval_data[0]:
+                rc_df = _build_regime_df(eval_data, [rc.feature])
+                if rc_df is not None:
+                    regime_cond_series = rc_df[rc.feature]
+            if regime_cond_series is None:
+                context.log.warning(
+                    "Regime conditioning enabled but feature '%s' not found in "
+                    "panel rows; falling back to unconditioned vol_target=%.1f%%",
+                    rc.feature, pr.vol_target * 100,
+                )
+
+        weights_df = apply_risk_layer_batch(
+            weights_df, returns_df, spy_ret_series, pr,
+            regime_series=regime_cond_series,
+        )
         context.log.info(
-            "Portfolio risk layer applied: vol_target=%.1f%%, beta_neutral=%s",
+            "Portfolio risk layer applied: vol_target=%.1f%%, beta_neutral=%s, "
+            "regime_conditioning=%s",
             pr.vol_target * 100, pr.beta_neutral,
+            (rc.feature if rc is not None and rc.enabled else "off"),
         )
 
     # Build regime features DataFrame if available

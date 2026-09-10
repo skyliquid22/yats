@@ -29,20 +29,61 @@ from research.experiments.spec import PortfolioRiskConfig
 
 
 def _compute_vol_scale(
-    portfolio_returns: np.ndarray, config: PortfolioRiskConfig,
+    portfolio_returns: np.ndarray,
+    config: PortfolioRiskConfig,
+    vol_target: float | None = None,
 ) -> float:
     """Compute vol-targeting scale factor from trailing portfolio returns.
 
     Returns a scale in (0, 1] — never amplifies, only attenuates.
     Returns 1.0 when insufficient history or vol is zero.
+
+    Args:
+        portfolio_returns: Trailing daily portfolio returns (causal window).
+        config: PortfolioRiskConfig.
+        vol_target: Per-bar vol target override (regime-conditioned path).
+                    None → config.vol_target (unconditioned).
     """
+    target = config.vol_target if vol_target is None else vol_target
     window = portfolio_returns[-config.vol_lookback :]
     if len(window) < 2:
         return 1.0
     trailing_vol = float(np.std(window, ddof=1)) * np.sqrt(252.0)
     if trailing_vol <= 0.0:
         return 1.0
-    return min(1.0, config.vol_target / trailing_vol)
+    return min(1.0, target / trailing_vol)
+
+
+def _regime_conditioned_vol_target(
+    regime_value: float | None, config: PortfolioRiskConfig,
+) -> float:
+    """Resolve the per-bar vol target under optional regime conditioning.
+
+    When config.regime_conditioning is None or disabled, or regime_value is
+    None/non-finite (no causal regime reading available), returns the
+    unconditioned config.vol_target — bit-identical to prior behavior.
+
+    Otherwise interpolates linearly between high_target (calm) and
+    low_target (stressed), clamped at both ends:
+        regime_value <= zscore_lo             -> high_target
+        regime_value >= zscore_hi             -> low_target
+        zscore_lo < regime_value < zscore_hi  -> linear interpolation
+
+    regime_value MUST already be strictly causal — the caller is responsible
+    for lagging the regime series (see apply_risk_layer_batch for the batch
+    alignment convention).
+    """
+    rc = config.regime_conditioning
+    if rc is None or not rc.enabled:
+        return config.vol_target
+    if regime_value is None or not np.isfinite(regime_value):
+        return config.vol_target
+    if regime_value <= rc.zscore_lo:
+        return rc.high_target
+    if regime_value >= rc.zscore_hi:
+        return rc.low_target
+    frac = (regime_value - rc.zscore_lo) / (rc.zscore_hi - rc.zscore_lo)
+    return rc.high_target + frac * (rc.low_target - rc.high_target)
 
 
 def compute_betas(
@@ -104,6 +145,8 @@ def apply_risk_layer(
     symbol_returns: np.ndarray | None,
     spy_returns: np.ndarray | None,
     config: PortfolioRiskConfig,
+    *,
+    regime_value: float | None = None,
 ) -> np.ndarray:
     """Apply portfolio risk transforms to a single weight vector.
 
@@ -118,15 +161,22 @@ def apply_risk_layer(
         spy_returns: Trailing SPY daily returns (T,).
                      Pass None when beta_neutral=False or unavailable.
         config: PortfolioRiskConfig from ExperimentSpec.
+        regime_value: Optional regime feature reading for regime-conditioned
+                      vol targeting (config.regime_conditioning). Must be the
+                      value from the most recent COMPLETED bar strictly before
+                      this bar's fill — same causality contract as the trailing
+                      return history the caller passes. None = unconditioned.
+                      Ignored unless regime conditioning is enabled.
 
     Returns:
         Scaled weight vector — always ≤ input weights component-wise.
     """
     w = weights.copy()
 
-    # 1. Vol targeting
+    # 1. Vol targeting (optionally regime-conditioned)
     if len(portfolio_returns) >= 2:
-        scale = _compute_vol_scale(portfolio_returns, config)
+        vol_target = _regime_conditioned_vol_target(regime_value, config)
+        scale = _compute_vol_scale(portfolio_returns, config, vol_target=vol_target)
         w = w * scale
 
     # 2. Beta adjustment (long-only: beta-cap mode)
@@ -150,6 +200,8 @@ def apply_risk_layer_batch(
     returns: pd.DataFrame,
     spy_returns: pd.Series | None,
     config: PortfolioRiskConfig,
+    *,
+    regime_series: pd.Series | None = None,
 ) -> pd.DataFrame:
     """Apply portfolio risk transforms to a full weights DataFrame (WFO eval path).
 
@@ -160,12 +212,31 @@ def apply_risk_layer_batch(
     Vol estimate uses raw policy weights × historical returns as an approximation;
     pre-scaling vol upper-bounds post-scaling vol so this is conservative.
 
+    REGIME ALIGNMENT (regime-conditioned vol targeting): when
+    config.regime_conditioning is enabled and regime_series is provided, the
+    per-bar vol target interpolates between high_target (calm) and low_target
+    (stressed) — see _regime_conditioned_vol_target. The conditioning value
+    applied to the weight at row t is regime_series at row t-1 (after
+    reindexing regime_series to weights.index): the most recent COMPLETED
+    bar strictly before row t. This is the same exclusive-of-bar-t convention
+    as the trailing-vol window [t-vol_lookback, t), and is consistent with
+    fill timing — weights.index rows are fill dates, EOD-computed regime
+    features for date t are not observable before the fill at bar t, so only
+    the t-1 reading is admissible. Row t=0 has no completed prior bar and is
+    unconditioned. Rows where the (lagged) regime value is missing/NaN fall
+    back to the unconditioned config.vol_target.
+
     Args:
-        weights: DataFrame (T, n_symbols) of policy weights.
+        weights: DataFrame (T, n_symbols) of policy weights, indexed by fill date.
         returns: DataFrame (T, n_symbols) of per-symbol daily returns.
         spy_returns: Series of SPY returns aligned to returns.index.
                      Used only when config.beta_neutral=True. May be None.
         config: PortfolioRiskConfig.
+        regime_series: Optional Series of the regime conditioning feature
+                       (e.g. spy_iv_zscore_60d), aligned/alignable to
+                       weights.index (reindexed internally). None =
+                       unconditioned vol targeting. Ignored unless
+                       config.regime_conditioning is enabled.
 
     Returns:
         DataFrame of same shape / index / columns as weights, risk-layer applied.
@@ -175,6 +246,13 @@ def apply_risk_layer_batch(
 
     ret_arr = returns.values.astype(np.float64)
     spy_arr = spy_returns.values.astype(np.float64) if spy_returns is not None else None
+
+    rc = config.regime_conditioning
+    regime_arr: np.ndarray | None = None
+    if rc is not None and rc.enabled and regime_series is not None:
+        regime_arr = (
+            regime_series.reindex(weights.index).values.astype(np.float64)
+        )
 
     scaled_arr = weights.values.astype(np.float64).copy()
 
@@ -186,7 +264,14 @@ def apply_risk_layer_batch(
         port_hist = port_ret_arr[vol_start:t]
 
         if len(port_hist) >= 2:
-            vol_scale = _compute_vol_scale(port_hist, config)
+            # Regime reading at row t-1 — strictly before bar t (see docstring)
+            regime_val = (
+                float(regime_arr[t - 1])
+                if regime_arr is not None and t >= 1
+                else None
+            )
+            vol_target_t = _regime_conditioned_vol_target(regime_val, config)
+            vol_scale = _compute_vol_scale(port_hist, config, vol_target=vol_target_t)
             w_t = w_t * vol_scale
 
         # Beta adjustment

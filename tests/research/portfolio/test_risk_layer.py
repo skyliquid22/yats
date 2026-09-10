@@ -6,13 +6,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from research.experiments.spec import PortfolioRiskConfig
+from research.experiments.spec import PortfolioRiskConfig, RegimeConditioningConfig
 from research.portfolio.risk_layer import (
     apply_risk_layer,
     apply_risk_layer_batch,
     compute_betas,
     _compute_vol_scale,
     _compute_beta_cap_scale,
+    _regime_conditioned_vol_target,
 )
 
 
@@ -358,3 +359,327 @@ class TestApplyRiskLayerBatch:
         assert abs(result.iloc[15, 0] - 1.0) < 1e-9
         # At bar 16+, spike in window → scale < 1.0
         assert result.iloc[16, 0] < 1.0
+
+
+# ---------------------------------------------------------------------------
+# RegimeConditioningConfig validation
+# ---------------------------------------------------------------------------
+
+class TestRegimeConditioningConfig:
+    def test_defaults_off(self):
+        rc = RegimeConditioningConfig()
+        assert rc.enabled is False
+        assert rc.feature == "spy_iv_zscore_60d"
+        assert rc.low_target == 0.05
+        assert rc.high_target == 0.15
+        assert rc.zscore_lo == -1.0
+        assert rc.zscore_hi == 1.0
+
+    def test_empty_feature_raises(self):
+        with pytest.raises(ValueError, match="feature"):
+            RegimeConditioningConfig(feature="")
+
+    def test_nonpositive_low_target_raises(self):
+        with pytest.raises(ValueError, match="low_target"):
+            RegimeConditioningConfig(low_target=0.0)
+
+    def test_nonpositive_high_target_raises(self):
+        with pytest.raises(ValueError, match="high_target"):
+            RegimeConditioningConfig(high_target=-0.1)
+
+    def test_low_above_high_raises(self):
+        with pytest.raises(ValueError, match="low_target"):
+            RegimeConditioningConfig(low_target=0.20, high_target=0.10)
+
+    def test_equal_targets_allowed(self):
+        rc = RegimeConditioningConfig(low_target=0.10, high_target=0.10)
+        assert rc.low_target == rc.high_target == 0.10
+
+    def test_zscore_lo_geq_hi_raises(self):
+        with pytest.raises(ValueError, match="zscore_lo"):
+            RegimeConditioningConfig(zscore_lo=1.0, zscore_hi=1.0)
+        with pytest.raises(ValueError, match="zscore_lo"):
+            RegimeConditioningConfig(zscore_lo=2.0, zscore_hi=-2.0)
+
+    def test_frozen(self):
+        rc = RegimeConditioningConfig()
+        with pytest.raises(AttributeError):
+            rc.enabled = True  # type: ignore
+
+    def test_portfolio_risk_default_none(self):
+        cfg = PortfolioRiskConfig()
+        assert cfg.regime_conditioning is None
+
+    def test_portfolio_risk_coerces_dict(self):
+        # JSON spec files pass the nested config as a plain dict
+        cfg = PortfolioRiskConfig(
+            regime_conditioning={"enabled": True, "low_target": 0.06},
+        )
+        assert isinstance(cfg.regime_conditioning, RegimeConditioningConfig)
+        assert cfg.regime_conditioning.enabled is True
+        assert cfg.regime_conditioning.low_target == 0.06
+        assert cfg.regime_conditioning.high_target == 0.15  # default preserved
+
+    def test_portfolio_risk_coerced_dict_validates(self):
+        with pytest.raises(ValueError, match="low_target"):
+            PortfolioRiskConfig(
+                regime_conditioning={"low_target": 0.5, "high_target": 0.1},
+            )
+
+    def test_portfolio_risk_rejects_bad_type(self):
+        with pytest.raises(ValueError, match="regime_conditioning"):
+            PortfolioRiskConfig(regime_conditioning=3.14)  # type: ignore
+
+
+# ---------------------------------------------------------------------------
+# Regime-conditioned vol target — interpolation math
+# ---------------------------------------------------------------------------
+
+def _regime_config(**rc_kw) -> PortfolioRiskConfig:
+    rc_defaults = dict(
+        enabled=True, low_target=0.05, high_target=0.15,
+        zscore_lo=-1.0, zscore_hi=1.0,
+    )
+    rc_defaults.update(rc_kw)
+    return PortfolioRiskConfig(
+        vol_target=0.10,
+        regime_conditioning=RegimeConditioningConfig(**rc_defaults),
+    )
+
+
+class TestRegimeConditionedVolTarget:
+    def test_disabled_returns_base_target(self):
+        cfg = _regime_config(enabled=False)
+        assert _regime_conditioned_vol_target(5.0, cfg) == cfg.vol_target
+
+    def test_no_regime_config_returns_base_target(self):
+        cfg = _make_config(vol_target=0.10)
+        assert _regime_conditioned_vol_target(5.0, cfg) == 0.10
+
+    def test_none_value_returns_base_target(self):
+        cfg = _regime_config()
+        assert _regime_conditioned_vol_target(None, cfg) == cfg.vol_target
+
+    def test_nan_value_returns_base_target(self):
+        cfg = _regime_config()
+        assert _regime_conditioned_vol_target(float("nan"), cfg) == cfg.vol_target
+
+    def test_calm_boundary_returns_high_target(self):
+        cfg = _regime_config()
+        assert _regime_conditioned_vol_target(-1.0, cfg) == 0.15
+
+    def test_stress_boundary_returns_low_target(self):
+        cfg = _regime_config()
+        assert _regime_conditioned_vol_target(1.0, cfg) == 0.05
+
+    def test_clamped_below_lo(self):
+        cfg = _regime_config()
+        assert _regime_conditioned_vol_target(-7.3, cfg) == 0.15
+
+    def test_clamped_above_hi(self):
+        cfg = _regime_config()
+        assert _regime_conditioned_vol_target(4.2, cfg) == 0.05
+
+    def test_midpoint_interpolation(self):
+        cfg = _regime_config()
+        # z = 0 is halfway between -1 and 1 → mean of targets
+        assert abs(_regime_conditioned_vol_target(0.0, cfg) - 0.10) < 1e-12
+
+    def test_linear_interpolation_arbitrary_point(self):
+        cfg = _regime_config(zscore_lo=-2.0, zscore_hi=2.0)
+        # z = 1.0 → frac = (1 - (-2)) / 4 = 0.75 → 0.15 + 0.75 * (0.05 - 0.15)
+        expected = 0.15 + 0.75 * (0.05 - 0.15)
+        assert abs(_regime_conditioned_vol_target(1.0, cfg) - expected) < 1e-12
+
+    def test_monotone_nonincreasing_in_stress(self):
+        cfg = _regime_config()
+        zs = np.linspace(-3.0, 3.0, 61)
+        targets = [_regime_conditioned_vol_target(z, cfg) for z in zs]
+        assert all(a >= b - 1e-12 for a, b in zip(targets, targets[1:]))
+
+
+# ---------------------------------------------------------------------------
+# Regime-conditioned vol targeting — batch behavior & causality
+# ---------------------------------------------------------------------------
+
+class TestApplyRiskLayerBatchRegime:
+    LOOKBACK = 10
+
+    def _fixture(self, n: int = 40):
+        """Single-symbol fixture with deterministic nonzero vol.
+
+        Alternating ±2% daily returns → annualized trailing vol ≈ 32%,
+        above every target in play, so the vol scale is always < 1 once
+        history is available and is exactly target / trailing_vol.
+        """
+        dates = pd.bdate_range("2023-01-02", periods=n)
+        weights = pd.DataFrame(np.ones((n, 1)), index=dates, columns=["X"])
+        rets = np.where(np.arange(n) % 2 == 0, 0.02, -0.02)
+        returns = pd.DataFrame(rets, index=dates, columns=["X"])
+        return weights, returns, dates
+
+    def _expected_scale(self, port_rets: np.ndarray, t: int, target: float) -> float:
+        window = port_rets[max(0, t - self.LOOKBACK):t]
+        vol = float(np.std(window, ddof=1)) * np.sqrt(252.0)
+        return min(1.0, target / vol)
+
+    def _regime_batch_config(self, **rc_kw) -> PortfolioRiskConfig:
+        rc_defaults = dict(
+            enabled=True, low_target=0.05, high_target=0.15,
+            zscore_lo=-1.0, zscore_hi=1.0,
+        )
+        rc_defaults.update(rc_kw)
+        return PortfolioRiskConfig(
+            vol_target=0.10, vol_lookback=self.LOOKBACK,
+            regime_conditioning=RegimeConditioningConfig(**rc_defaults),
+        )
+
+    # ---- off-by-default no-op ----
+
+    def test_off_by_default_bit_identical_to_reference(self):
+        # Reference reimplementation of the pre-regime vol-targeting loop:
+        # target is the constant config.vol_target at every bar.
+        cfg = _make_config(vol_target=0.10, vol_lookback=self.LOOKBACK)
+        assert cfg.regime_conditioning is None
+        weights, returns, dates = self._fixture()
+        port_rets = (weights * returns).sum(axis=1).values
+
+        expected = weights.values.astype(np.float64).copy()
+        for t in range(len(weights)):
+            window = port_rets[max(0, t - self.LOOKBACK):t]
+            if len(window) >= 2:
+                vol = float(np.std(window, ddof=1)) * np.sqrt(252.0)
+                scale = 1.0 if vol <= 0 else min(1.0, cfg.vol_target / vol)
+                expected[t] = expected[t] * scale
+
+        result = apply_risk_layer_batch(weights, returns, None, cfg)
+        np.testing.assert_array_equal(result.values, expected)
+
+    def test_regime_series_ignored_when_not_configured(self):
+        cfg = _make_config(vol_target=0.10, vol_lookback=self.LOOKBACK)
+        weights, returns, dates = self._fixture()
+        regime = pd.Series(np.linspace(-3, 3, len(dates)), index=dates)
+        base = apply_risk_layer_batch(weights, returns, None, cfg)
+        with_regime = apply_risk_layer_batch(
+            weights, returns, None, cfg, regime_series=regime,
+        )
+        pd.testing.assert_frame_equal(with_regime, base, check_exact=True)
+
+    def test_regime_series_ignored_when_disabled(self):
+        cfg = self._regime_batch_config(enabled=False)
+        weights, returns, dates = self._fixture()
+        regime = pd.Series(np.linspace(-3, 3, len(dates)), index=dates)
+        base = apply_risk_layer_batch(weights, returns, None, cfg)
+        with_regime = apply_risk_layer_batch(
+            weights, returns, None, cfg, regime_series=regime,
+        )
+        pd.testing.assert_frame_equal(with_regime, base, check_exact=True)
+
+    def test_enabled_without_series_is_unconditioned(self):
+        cfg_regime = self._regime_batch_config()
+        cfg_plain = _make_config(vol_target=0.10, vol_lookback=self.LOOKBACK)
+        weights, returns, _ = self._fixture()
+        with_cfg = apply_risk_layer_batch(weights, returns, None, cfg_regime)
+        without = apply_risk_layer_batch(weights, returns, None, cfg_plain)
+        pd.testing.assert_frame_equal(with_cfg, without, check_exact=True)
+
+    # ---- alignment: value applied at bar t is the t-1 reading ----
+
+    def test_value_at_t_is_lagged_one_bar(self):
+        cfg = self._regime_batch_config()
+        weights, returns, dates = self._fixture()
+        n = len(dates)
+        k = 20  # single stress reading at bar k
+        regime = pd.Series(np.full(n, -5.0), index=dates)  # calm everywhere
+        regime.iloc[k] = 5.0                               # stressed at k only
+        port_rets = (weights * returns).sum(axis=1).values
+
+        result = apply_risk_layer_batch(
+            weights, returns, None, cfg, regime_series=regime,
+        )
+        # Bar k uses regime[k-1] = calm → high_target (stress at k not yet visible)
+        assert abs(
+            result.iloc[k, 0] - self._expected_scale(port_rets, k, 0.15)
+        ) < 1e-12
+        # Bar k+1 uses regime[k] = stressed → low_target
+        assert abs(
+            result.iloc[k + 1, 0] - self._expected_scale(port_rets, k + 1, 0.05)
+        ) < 1e-12
+        # Bar k+2 uses regime[k+1] = calm again → high_target
+        assert abs(
+            result.iloc[k + 2, 0] - self._expected_scale(port_rets, k + 2, 0.15)
+        ) < 1e-12
+
+    def test_first_bar_unconditioned(self):
+        # Row 0 has no completed prior bar → no regime reading; also no vol
+        # history → weights pass through unchanged even under extreme stress.
+        cfg = self._regime_batch_config()
+        weights, returns, dates = self._fixture()
+        regime = pd.Series(np.full(len(dates), 10.0), index=dates)
+        result = apply_risk_layer_batch(
+            weights, returns, None, cfg, regime_series=regime,
+        )
+        np.testing.assert_array_almost_equal(result.iloc[0], weights.iloc[0])
+
+    def test_nan_regime_falls_back_to_base_target(self):
+        cfg = self._regime_batch_config()
+        weights, returns, dates = self._fixture()
+        n = len(dates)
+        k = 20
+        regime = pd.Series(np.full(n, np.nan), index=dates)
+        regime.iloc[k] = np.nan  # explicit: reading before k+1 is missing
+        port_rets = (weights * returns).sum(axis=1).values
+        result = apply_risk_layer_batch(
+            weights, returns, None, cfg, regime_series=regime,
+        )
+        # All-NaN series → every bar uses the unconditioned vol_target
+        assert abs(
+            result.iloc[k + 1, 0]
+            - self._expected_scale(port_rets, k + 1, cfg.vol_target)
+        ) < 1e-12
+
+    # ---- causality: mutating regime at bar t cannot reach bars <= t ----
+
+    def test_mutating_regime_at_t_does_not_affect_bars_up_to_t(self):
+        cfg = self._regime_batch_config()
+        weights, returns, dates = self._fixture()
+        n = len(dates)
+        k = 25
+        regime_a = pd.Series(np.zeros(n), index=dates)
+        regime_b = regime_a.copy()
+        regime_b.iloc[k] = 5.0  # mutate ONLY bar k
+
+        result_a = apply_risk_layer_batch(
+            weights, returns, None, cfg, regime_series=regime_a,
+        )
+        result_b = apply_risk_layer_batch(
+            weights, returns, None, cfg, regime_series=regime_b,
+        )
+        # Per the documented alignment, regime[k] first influences bar k+1:
+        # every bar <= k must be bit-identical...
+        pd.testing.assert_frame_equal(
+            result_a.iloc[: k + 1], result_b.iloc[: k + 1], check_exact=True,
+        )
+        # ...and bar k+1 must actually differ (vol scaling is active and the
+        # target moved from midpoint 0.10 to low_target 0.05).
+        assert abs(result_a.iloc[k + 1, 0] - result_b.iloc[k + 1, 0]) > 1e-9
+
+    # ---- single-step API parity ----
+
+    def test_apply_risk_layer_regime_value(self):
+        cfg = self._regime_batch_config()
+        weights = np.array([0.5, 0.5])
+        # Alternating ±2% → ≈32% annualized trailing vol ≫ all targets
+        port_rets = np.where(np.arange(25) % 2 == 0, 0.02, -0.02)
+        stressed = apply_risk_layer(
+            weights, port_rets, None, None, cfg, regime_value=5.0,
+        )
+        calm = apply_risk_layer(
+            weights, port_rets, None, None, cfg, regime_value=-5.0,
+        )
+        none = apply_risk_layer(weights, port_rets, None, None, cfg)
+        # low_target < vol_target < high_target ⇒ ordering of scaled weights
+        assert np.all(stressed < none)
+        assert np.all(none < calm)
+        # Exact ratio: scales are target/vol, so stressed/calm = 0.05/0.15
+        np.testing.assert_allclose(stressed / calm, 0.05 / 0.15, rtol=1e-9)
