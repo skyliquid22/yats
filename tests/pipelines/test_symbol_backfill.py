@@ -7,7 +7,7 @@ per-domain config plumbing (equity / option_eod / fundamentals + feature sets),
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -27,7 +27,7 @@ from yats_pipelines.jobs.backfill.symbol_backfill import (
 
 
 def _today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +149,7 @@ class TestValidateParams:
 
 
 class TestResolveEndDate:
-    def test_empty_resolves_to_today_utc(self):
+    def test_empty_resolves_to_yesterday_utc(self):
         assert resolve_end_date("") == _today()
 
     def test_explicit_end_passthrough(self):
@@ -341,7 +341,7 @@ class TestRunSymbolBackfill:
                    [1]["run_config"]["ops"]["fetch_thetadata_options"]["config"])
         assert cfg["underlyings"] == ["NFLX", "AMD"]
 
-    def test_default_end_date_is_today(self):
+    def test_default_end_date_is_yesterday(self):
         calls: list[str] = []
         with self._patched(calls):
             run_symbol_backfill(["NFLX"], "2020-01-01")  # no end date

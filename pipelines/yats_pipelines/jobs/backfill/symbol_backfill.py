@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from yats_pipelines.jobs.canonicalize import canonicalize
 from yats_pipelines.jobs.feature_pipeline import feature_pipeline
@@ -57,8 +57,9 @@ def default_max_concurrent() -> int:
 
 
 def resolve_end_date(end_date: str) -> str:
-    """Empty end date defaults to today (UTC)."""
-    return end_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """Empty end date defaults to YESTERDAY (UTC): free-tier Alpaca returns
+    403 Forbidden for current-day SIP data, which would abort the whole chain."""
+    return end_date or (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def validate_params(symbols: list[str], start_date: str, end_date: str) -> None:

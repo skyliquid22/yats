@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--end",
         default="",
-        help="End date in YYYY-MM-DD format (default: today, UTC)",
+        help="End date in YYYY-MM-DD format (default: yesterday, UTC — free-tier data providers block current-day)",
     )
     parser.add_argument(
         "--skip-stages",
