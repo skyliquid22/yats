@@ -257,7 +257,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     now = datetime.now(timezone.utc)
-    window_end = now.date()
+    # End at T-1: free-tier Alpaca returns 403 for current-day SIP data.
+    window_end = now.date() - timedelta(days=1)
     window_start = window_end - timedelta(days=args.window_days)
 
     candidates = screen_candidates()
