@@ -49,7 +49,7 @@ from research.alpha.models import AlphaModelResult, predict_alpha_scores, train_
 from research.alpha.portfolio import portfolio_returns_from_weights, rank_weighted_portfolio
 from research.alpha.targets import compute_forward_returns, residualize_vs_spy
 from research.alpha.transforms import rank_normalize_cross_sectional
-from research.eval.metrics import compute_sharpe
+from research.eval.metrics import compute_sharpe, compute_turnover
 from research.eval.wfo import compute_sweep_wfo_rank_decay, run_wfo
 from research.experiments.spec import WFOConfig
 from yats_pipelines.resources.questdb import QuestDBResource
@@ -234,17 +234,24 @@ def load_panel() -> pd.DataFrame:
 # WFO train/eval functions (constructed per-config)
 # ---------------------------------------------------------------------------
 
-def make_train_fn(panel: pd.DataFrame, cfg: dict, dates: list):
-    """Factory: returns train_fn(date_indices) -> AlphaModelResult."""
+def make_train_fn(panel: pd.DataFrame, cfg: dict, dates: list, feature_cols: list[str] | None = None):
+    """Factory: returns train_fn(date_indices) -> AlphaModelResult.
+
+    feature_cols=None keeps the historical behavior (module-level FEATURE_COLS,
+    the sweep_v1 columns). Callers running other feature sets (e.g. the
+    liquid50 breadth pilot) pass their own column list — the training math is
+    identical either way.
+    """
     horizon = cfg["horizon"]
     target_col = f"fwd_{horizon}d_resid"
+    cols = list(feature_cols) if feature_cols is not None else FEATURE_COLS
 
     def train_fn(date_indices: list[int]) -> AlphaModelResult | None:
         fold_dates = set(dates[i] for i in date_indices if i < len(dates))
         train_panel = panel[panel["date"].isin(fold_dates)].copy()
         try:
             return train_alpha_model(
-                train_panel, FEATURE_COLS, target_col,
+                train_panel, cols, target_col,
                 model_type=cfg["model"],
                 horizon=horizon,
                 reg=cfg["reg"],
@@ -256,8 +263,42 @@ def make_train_fn(panel: pd.DataFrame, cfg: dict, dates: list):
     return train_fn
 
 
-def make_eval_fn(panel: pd.DataFrame, dates: list):
-    """Factory: returns eval_fn(date_indices, model) -> (returns, sharpe)."""
+def make_eval_fn(
+    panel: pd.DataFrame,
+    dates: list,
+    *,
+    symbols: list[str] | None = None,
+    fill_timing: str | None = None,
+    execution_lag: int | None = None,
+    cost_bp: float = 0.0,
+    fold_capture: list | None = None,
+):
+    """Factory: returns eval_fn(date_indices, model) -> (returns, sharpe).
+
+    Defaults (all None / 0.0) reproduce the historical ALPHA-1 behavior
+    exactly: module-level SYMBOLS / FILL_TIMING / EXECUTION_LAG, gross
+    returns, no capture. Optional extensions used by the liquid50 pilot:
+
+    - symbols / fill_timing / execution_lag: per-call overrides of the
+      module-level defaults (the math is unchanged).
+    - cost_bp: linear transaction cost in basis points, charged per unit of
+      daily turnover (sum |Δw| across symbols at each fill date, per
+      research.eval.metrics.compute_turnover — the fold's first fill date is
+      charged full establishment turnover from an all-zero book).
+      cost_bp=0.0 is bit-identical to the historical gross path.
+    - fold_capture: a list; when provided, each eval call (one per WFO fold,
+      in fold order) appends {"weights": DataFrame, "returns": DataFrame},
+      both indexed by fill date with one column per symbol. Used to apply
+      post-hoc portfolio overlays (e.g. vol targeting) without re-running
+      training.
+    """
+    syms = list(symbols) if symbols is not None else SYMBOLS
+    timing = fill_timing if fill_timing is not None else FILL_TIMING
+    lag = execution_lag if execution_lag is not None else EXECUTION_LAG
+    if timing not in ("next_close", "next_open"):
+        raise ValueError(f"fill_timing must be 'next_close' or 'next_open', got '{timing}'")
+    if timing == "next_open" and lag == 0:
+        raise ValueError("fill_timing='next_open' requires execution_lag=1 (no same-day open fills)")
 
     def eval_fn(
         date_indices: list[int], model_result: AlphaModelResult | None
@@ -278,7 +319,7 @@ def make_eval_fn(panel: pd.DataFrame, dates: list):
         # sits at fill-date t+1 (shift below). The return it earns at t+1 is
         #   next_close: ret_1d_realized[t+1] = close(t+1)->close(t+2)
         #   next_open:  ret_oc_1d[t+1] = open(t+1)->close(t+1) (intraday)
-        return_col = "ret_oc_1d" if FILL_TIMING == "next_open" else "ret_1d_realized"
+        return_col = "ret_oc_1d" if timing == "next_open" else "ret_1d_realized"
         weights_by_date: dict = {}
         returns_by_date: dict = {}
         for dt, grp in test_panel.groupby("date", sort=True):
@@ -290,14 +331,42 @@ def make_eval_fn(panel: pd.DataFrame, dates: list):
         # Apply execution lag: decision from close(t-1) fills at close(t)
         # (next_close, earning ret_1d_realized[t]) or at open(t) (next_open,
         # earning ret_oc_1d[t])
-        if EXECUTION_LAG > 0:
+        if lag > 0:
             sorted_dts = sorted(weights_by_date.keys())
             weights_by_date = {
                 sorted_dts[i + 1]: weights_by_date[sorted_dts[i]]
                 for i in range(len(sorted_dts) - 1)
             }
 
-        port_returns = portfolio_returns_from_weights(weights_by_date, returns_by_date, SYMBOLS)
+        port_returns = portfolio_returns_from_weights(weights_by_date, returns_by_date, syms)
+
+        # Optional extensions (no-ops on the historical path): capture per-fold
+        # weights/returns matrices and/or charge linear transaction costs.
+        # fill_dates is sorted identically to portfolio_returns_from_weights'
+        # internal iteration, so row i of the matrices is port_returns[i].
+        if cost_bp > 0.0 or fold_capture is not None:
+            fill_dates = sorted(set(weights_by_date) & set(returns_by_date))
+            if fill_dates:
+                weights_df = pd.DataFrame(
+                    [weights_by_date[dt].reindex(syms).fillna(0.0) for dt in fill_dates],
+                    index=fill_dates,
+                )
+                rets_df = pd.DataFrame(
+                    [
+                        pd.to_numeric(returns_by_date[dt].reindex(syms), errors="coerce").fillna(0.0)
+                        for dt in fill_dates
+                    ],
+                    index=fill_dates,
+                )
+                if fold_capture is not None:
+                    fold_capture.append({"weights": weights_df, "returns": rets_df})
+                if cost_bp > 0.0:
+                    turnover = compute_turnover(weights_df)
+                    port_returns = [
+                        float(r) - float(t) * cost_bp / 1e4
+                        for r, t in zip(port_returns, turnover.tolist())
+                    ]
+
         if len(port_returns) < 2:
             return port_returns, None
         oos_sharpe = compute_sharpe(pd.Series(port_returns))
