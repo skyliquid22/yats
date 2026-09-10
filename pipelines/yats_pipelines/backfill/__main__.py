@@ -41,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="End date in YYYY-MM-DD format (default: today, UTC)",
     )
     parser.add_argument(
+        "--skip-stages",
+        default="",
+        help="Comma-separated stage names to skip (e.g. ingest_thetadata for universes without options data)",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Re-fetch option days even if already ingested (disables resume)",
@@ -78,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
             force=args.force,
             max_concurrent=args.max_concurrent,
             feature_sets=feature_sets,
+            skip_stages=tuple(x.strip() for x in args.skip_stages.split(",") if x.strip()),
         )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)

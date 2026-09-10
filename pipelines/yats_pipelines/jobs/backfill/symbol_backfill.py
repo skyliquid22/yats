@@ -84,8 +84,13 @@ def build_stage_plan(
     force: bool = False,
     max_concurrent: int | None = None,
     feature_sets: tuple[str, ...] | list[str] = DEFAULT_FEATURE_SETS,
+    skip_stages: tuple[str, ...] | list[str] = (),
 ) -> list[tuple[str, object, dict]]:
     """Build the ordered (stage_name, job_def, run_config) execution plan.
+
+    skip_stages: stage names to omit (e.g. ("ingest_thetadata",) when a
+    universe needs no options data — per-symbol options history is the slow
+    stage). Canonicalize domains are trimmed to match skipped ingests.
 
     Dates are ISO YYYY-MM-DD throughout; the thetadata ingest op strips the
     dashes itself for the vendor's YYYYMMDD format.
@@ -181,6 +186,17 @@ def build_stage_plan(
             )
         )
 
+    if skip_stages:
+        skip = set(skip_stages)
+        plan = [(name, job, cfg) for (name, job, cfg) in plan if name not in skip]
+        # trim canonicalize domains matching skipped ingests
+        if "ingest_thetadata" in skip:
+            for name, _job, cfg in plan:
+                if name == "canonicalize":
+                    doms = cfg["ops"]["canonicalize_op"]["config"]["domains"]
+                    cfg["ops"]["canonicalize_op"]["config"]["domains"] = [
+                        d for d in doms if d != "option_eod"
+                    ]
     return plan
 
 
@@ -192,6 +208,7 @@ def run_symbol_backfill(
     force: bool = False,
     max_concurrent: int | None = None,
     feature_sets: tuple[str, ...] | list[str] = DEFAULT_FEATURE_SETS,
+    skip_stages: tuple[str, ...] | list[str] = (),
 ) -> bool:
     """Run the full backfill chain for the given symbols.
 
@@ -213,6 +230,7 @@ def run_symbol_backfill(
         force=force,
         max_concurrent=max_concurrent,
         feature_sets=feature_sets,
+        skip_stages=skip_stages,
     )
 
     for stage_name, job_def, run_config in plan:
