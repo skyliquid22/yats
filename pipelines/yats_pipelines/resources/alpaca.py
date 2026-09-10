@@ -12,7 +12,14 @@ logger = logging.getLogger(__name__)
 
 RETRY_DELAYS = [1, 5, 30]  # seconds — exponential backoff
 DATA_BASE_URL = "https://data.alpaca.markets/v2"
-TRADING_BASE_URL = "https://api.alpaca.markets/v2"
+# Trading-API host follows the account tier: paper keys are Unauthorized on
+# the live host. Derive from APCA_API_BASE_URL (which already encodes the
+# tier), defaulting to the paper host.
+TRADING_BASE_URL = os.environ.get(
+    "APCA_API_BASE_URL", "https://paper-api.alpaca.markets/v2"
+).rstrip("/")
+if not TRADING_BASE_URL.endswith("/v2"):
+    TRADING_BASE_URL += "/v2"
 
 
 @dataclass
