@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 RETRY_DELAYS = [1, 5, 30]  # seconds — exponential backoff
 DATA_BASE_URL = "https://data.alpaca.markets/v2"
+TRADING_BASE_URL = "https://api.alpaca.markets/v2"
 
 
 @dataclass
@@ -29,6 +30,7 @@ class AlpacaResource:
         default_factory=lambda: os.environ.get("APCA_API_SECRET_KEY", "")
     )
     data_base_url: str = DATA_BASE_URL
+    trading_base_url: str = TRADING_BASE_URL
     max_concurrency: int = 5
     request_delay: float = 0.2  # seconds between requests for rate limiting
 
@@ -38,7 +40,7 @@ class AlpacaResource:
             "APCA-API-SECRET-KEY": self.api_secret,
         }
 
-    def _request_with_retry(self, url: str, params: dict) -> dict:
+    def _request_with_retry(self, url: str, params: dict) -> dict | list:
         """Execute GET request with exponential backoff retry (3 attempts)."""
         last_exc: Exception | None = None
         for attempt, delay in enumerate(RETRY_DELAYS):
@@ -72,6 +74,34 @@ class AlpacaResource:
         raise RuntimeError(
             f"Alpaca API request failed after {len(RETRY_DELAYS)} attempts: {last_exc}"
         ) from last_exc
+
+    def get_assets(
+        self,
+        status: str = "active",
+        asset_class: str = "us_equity",
+    ) -> list[dict]:
+        """List assets from the Trading API (api.alpaca.markets/v2/assets).
+
+        Args:
+            status: "active" or "inactive". Inactive includes delisted
+                names — required for point-in-time universe construction.
+            asset_class: Asset class filter (default "us_equity").
+
+        Returns:
+            List of asset dicts (keys include symbol, name, exchange,
+            status, tradable). The endpoint returns the full list in one
+            response — no pagination.
+        """
+        url = f"{self.trading_base_url}/assets"
+        data = self._request_with_retry(
+            url, {"status": status, "asset_class": asset_class}
+        )
+        if not isinstance(data, list):
+            raise RuntimeError(
+                f"Unexpected /assets response type: {type(data).__name__}"
+            )
+        logger.info("Fetched %d %s %s assets", len(data), status, asset_class)
+        return data
 
     def get_historical_bars(
         self,

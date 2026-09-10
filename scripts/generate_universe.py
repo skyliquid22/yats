@@ -26,45 +26,34 @@ from __future__ import annotations
 import argparse
 import logging
 import pathlib
-import statistics
 import sys
 from datetime import datetime, timedelta, timezone
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "pipelines"))
+sys.path.insert(0, str(REPO_ROOT))
 
 from yats_pipelines.resources.alpaca import AlpacaResource  # noqa: E402
+from research.universe.screen import (  # noqa: E402,F401 — re-exported API
+    EXCLUDED_ETFS,
+    FETCH_CHUNK_SIZE,
+    MIN_BARS,
+    fetch_bars,
+    median_dollar_volumes,
+    rank_universe,
+)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "configs" / "universes"
 
-# Minimum daily bars required within the window for a symbol to be ranked.
-# Guards against halted/delisted/recently-listed names producing a median
-# over a handful of prints.
-MIN_BARS = 20
-
-# Symbols are fetched in chunks to keep request URLs well under length limits.
-FETCH_CHUNK_SIZE = 100
-
 # ---------------------------------------------------------------------------
 # Candidate pool
 # ---------------------------------------------------------------------------
-# ETFs excluded from the candidate pool. Fundamentals and insider-transaction
-# data are structurally null for funds (no 10-K/10-Q, no Form 4 filers), so
-# ETFs would rank highly on dollar volume yet contribute nothing but nulls to
-# fundamental/insider features. Kept as an explicit denylist so any future
-# seed-list edit that reintroduces one fails loudly.
-EXCLUDED_ETFS: frozenset[str] = frozenset({
-    "SPY", "QQQ", "QQQM", "IWM", "DIA", "VOO", "IVV", "VTI", "RSP",
-    "VEA", "VWO", "IEFA", "IEMG", "EEM", "EFA", "EWZ", "FXI", "KWEB",
-    "VUG", "VTV", "SCHD", "JEPI", "JEPQ",
-    "XLF", "XLK", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB",
-    "XLRE", "XLC", "KRE", "XBI", "IBB", "SMH", "SOXX", "GDX",
-    "GLD", "SLV", "USO", "UNG",
-    "TLT", "HYG", "LQD", "AGG", "BND",
-    "ARKK", "SOXL", "TQQQ", "SQQQ", "UVXY", "VXX",
-})
+# ETF exclusion rationale and the EXCLUDED_ETFS denylist live in
+# research/universe/screen.py (shared with the point-in-time membership
+# builder, scripts/build_pit_universe.py), as do the median-dollar-volume
+# ranking helpers and MIN_BARS/FETCH_CHUNK_SIZE constants re-exported above.
 
 # Seed pool: S&P 100 constituents plus ~50 additional large/liquid US common
 # stocks (as of generation-tool authoring). US-listed common stock only — no
@@ -109,67 +98,6 @@ def screen_candidates(seed: tuple[str, ...] = SEED_TICKERS) -> list[str]:
         seen.add(symbol)
         candidates.append(symbol)
     return candidates
-
-
-def median_dollar_volumes(
-    bars_by_symbol: dict[str, list[dict]],
-    min_bars: int = MIN_BARS,
-) -> dict[str, float]:
-    """Compute median daily dollar volume (close * volume) per symbol.
-
-    Symbols with fewer than ``min_bars`` bars in the window are dropped
-    (halted, recently listed, or bad symbol) with a warning.
-
-    Args:
-        bars_by_symbol: Symbol -> list of Alpaca wire-format bars
-            (keys ``c`` close, ``v`` volume).
-        min_bars: Minimum bar count required to be ranked.
-
-    Returns:
-        Symbol -> median daily dollar volume.
-    """
-    result: dict[str, float] = {}
-    for symbol, bars in bars_by_symbol.items():
-        if len(bars) < min_bars:
-            logger.warning(
-                "Skipping %s: only %d bars in window (min %d)",
-                symbol, len(bars), min_bars,
-            )
-            continue
-        result[symbol] = statistics.median(
-            float(bar["c"]) * float(bar["v"]) for bar in bars
-        )
-    return result
-
-
-def rank_universe(
-    dollar_volumes: dict[str, float], top: int
-) -> list[tuple[str, float]]:
-    """Rank symbols by median daily dollar volume, descending; take top N.
-
-    Ties break alphabetically for deterministic output.
-    """
-    ranked = sorted(dollar_volumes.items(), key=lambda kv: (-kv[1], kv[0]))
-    return ranked[:top]
-
-
-def fetch_bars(
-    alpaca: AlpacaResource,
-    symbols: list[str],
-    start: str,
-    end: str,
-    chunk_size: int = FETCH_CHUNK_SIZE,
-) -> dict[str, list[dict]]:
-    """Fetch daily bars for all symbols in chunks via the Alpaca adapter."""
-    all_bars: dict[str, list[dict]] = {}
-    for i in range(0, len(symbols), chunk_size):
-        chunk = symbols[i : i + chunk_size]
-        all_bars.update(
-            alpaca.get_historical_bars(
-                symbols=chunk, start=start, end=end, timeframe="1Day"
-            )
-        )
-    return all_bars
 
 
 # ---------------------------------------------------------------------------
