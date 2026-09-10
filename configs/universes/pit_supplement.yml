@@ -1,0 +1,47 @@
+# Curated supplement to the point-in-time candidate pool.
+#
+# WHY: the vendor's asset directory (active + inactive) is not a complete
+# delisted-securities master — its inactive list covers older delistings
+# (2020-21 M&A names appear) but misses most 2022+ departures. Without a
+# supplement, recent delistings (incl. the 2023 bank failures) would be
+# silently absent, re-introducing survivorship bias in its most
+# results-flattering form.
+#
+# METHOD: hand-curated list of major liquid US delistings / symbol
+# retirements 2022-2026 (M&A closings, bank failures, take-privates,
+# pre-rename symbols). Every symbol verified to return daily bars from the
+# data API (29/30 candidates verified 2026-09-11; WORK had none and was
+# dropped). HONEST LIMIT: curated means non-exhaustive — smaller or
+# overlooked delistings may still be missing; the residual bias is reduced,
+# not eliminated. A licensed point-in-time constituency source remains the
+# upgrade path.
+symbols:
+  - TWTR   # X/Twitter take-private 2022-10
+  - ATVI   # Microsoft acquisition 2023-10
+  - SIVB   # SVB failure 2023-03
+  - SBNY   # Signature Bank failure 2023-03
+  - FRC    # First Republic failure/JPM 2023-05
+  - BBBY   # bankruptcy 2023
+  - SGEN   # Pfizer acquisition 2023-12
+  - SPLK   # Cisco acquisition 2024-03
+  - PXD    # Exxon acquisition 2024-05
+  - MRO    # ConocoPhillips acquisition 2024-11
+  - CTLT   # Novo acquisition 2024-12
+  - VMW    # Broadcom acquisition 2023-11
+  - ABMD   # J&J acquisition 2022-12
+  - CTXS   # take-private 2022-09
+  - NLSN   # take-private 2022-10
+  - Y      # Berkshire/Alleghany 2022-10
+  - HZNP   # Amgen acquisition 2023-10
+  - SWN    # Chesapeake merger 2024-10
+  - JNPR   # HPE acquisition
+  - ANSS   # Synopsys acquisition
+  - DFS    # Capital One acquisition
+  - K      # Mars/Kellanova acquisition
+  - ETRN   # EQT merger 2024-07
+  - STOR   # take-private 2023-02
+  - COUP   # take-private 2023-02
+  - ZEN    # take-private 2022-11
+  - FISV   # pre-rename symbol (now FI)
+  - X      # Nippon/US Steel
+  - ALTR   # Siemens acquisition

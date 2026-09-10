@@ -317,6 +317,15 @@ def main(argv: list[str] | None = None) -> int:
     active = alpaca.get_assets(status="active", asset_class="us_equity")
     inactive = alpaca.get_assets(status="inactive", asset_class="us_equity")
     candidates = filter_common_stock(active + inactive)
+    # Curated supplement: the vendor asset directory misses most 2022+
+    # delistings (verified: TWTR/ATVI/SIVB absent) — merge the documented
+    # supplement list so recent departures participate point-in-time.
+    supp_path = pathlib.Path("configs/universes/pit_supplement.yml")
+    if supp_path.exists():
+        supp = yaml.safe_load(supp_path.read_text()).get("symbols", [])
+        added = sorted(set(supp) - set(candidates))
+        candidates = sorted(set(candidates) | set(supp))
+        logger.info("Supplement: +%d curated delisted symbols (%s...)", len(added), ",".join(added[:5]))
     if args.max_symbols is not None:
         candidates = candidates[: args.max_symbols]
     pool_stats = {

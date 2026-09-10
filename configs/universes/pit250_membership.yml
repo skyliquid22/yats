@@ -9,7 +9,7 @@ name: pit250
 description: point-in-time top 250 US common stocks by median daily dollar volume;
   quarterly rebalance; 90d trailing screen ending at each rebalance date; active +
   delisted candidate pool (no survivorship bias)
-generated_at: 2026-09-10 20:29:18 UTC
+generated_at: 2026-09-10 20:54:12 UTC
 method:
   ranking: median daily dollar volume (close * volume)
   window_days: 90
@@ -25,8 +25,8 @@ rebalance_dates:
 candidate_pool:
   assets_active: 14309
   assets_inactive: 19183
-  after_common_stock_filter: 6875
-  with_bar_history: 6481
+  after_common_stock_filter: 6903
+  with_bar_history: 6509
 candidate_filter: 'us_equity assets (active + inactive) filtered to plausible common
   stock: 1-5 uppercase letters (no ''.'', ''/'', digits), no NASDAQ W/R/U 5th-letter
   suffixes, name heuristics reject warrants/rights/units/preferred/debt/escrow/funds,
@@ -38,7 +38,7 @@ bar_history:
 artifact:
   path: configs/universes/pit250_membership.parquet
   rows: 6750
-  size_bytes: 80367
+  size_bytes: 81149
   columns:
   - rebalance_date
   - symbol
