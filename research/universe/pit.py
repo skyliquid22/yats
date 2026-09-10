@@ -76,6 +76,19 @@ _NAME_REJECT_PATTERNS = [
         r"\bexchange[- ]traded\b",
         r"\bfund\b",             # open/closed-end funds
         r"\bwhen[- ]issued\b",
+        # Pure fund-issuer brands: catch leveraged/inverse/commodity products
+        # whose names dodge the ETF/fund word heuristics ("ProShares Ultra
+        # S&P500", "iShares Gold Trust"). Deliberately NOT \btrust\b (REITs:
+        # "Digital Realty Trust") or \bultra\b ("Ultra Clean Holdings").
+        # Brands that are also listed operating companies (Invesco Ltd,
+        # WisdomTree Inc) are excluded from this list on purpose.
+        r"\bproshares\b",
+        r"\bishares\b",
+        r"\bspdr\b",
+        r"\bdirexion\b",
+        r"\bgraniteshares\b",
+        r"\bsprott\b",
+        r"\bminishares\b",
     )
 ]
 
