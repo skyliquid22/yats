@@ -94,7 +94,7 @@ class TestGrid:
             "configs/universes/pit250_membership.parquet"
         )
         assert str(pit.RECEIPT_PATH).endswith(
-            "docs/research/receipts/pit250_sweep.json"
+            "docs/research/receipts/pit250_sweep_run2.json"
         )
 
 
@@ -314,36 +314,39 @@ def _fake_family():
 
 
 # ---------------------------------------------------------------------------
-# Strict deflation: SR0 must use the 78-trial expected-max benchmark
+# Strict deflation: run 2 (amendment 3) — SR0 uses the 83-trial benchmark
 # ---------------------------------------------------------------------------
 
 class TestStrictDeflation:
-    def test_uses_78_trials(self):
+    def test_uses_83_trials(self):
         result = pit.strict_deflation(_fake_family())
-        assert result["n_trials_emax"] == 78
-        assert result["expected_max_sr"] == pytest.approx(_expected_max_sr_benchmark(78))
+        assert result["n_trials_emax"] == 83
+        assert result["expected_max_sr"] == pytest.approx(_expected_max_sr_benchmark(83))
 
-    def test_pool_is_registered_25_plus_the_5_new_trials(self):
+    def test_pool_is_registered_30_plus_the_5_new_trials(self):
         family = _fake_family()
         result = pit.strict_deflation(family)
-        assert len(pit.HONEST_FILL_POOL_PRE_PIT250) == 25
-        assert len(result["pool_sharpes"]) == 30
+        assert len(pit.HONEST_FILL_POOL_PRE_PIT250) == 30
+        assert len(result["pool_sharpes"]) == 35
         for c in family:
             assert float(c["sharpe"]) in result["pool_sharpes"]
 
-    def test_registered_pool_matches_pilot_receipt(self):
+    def test_registered_pool_matches_run1_receipt(self):
+        # first 25 = pilot receipt pool; last 5 = run 1's per-config sharpes
         receipt = json.loads(
-            (ROOT / "docs/research/receipts/pilot_liquid50.json").read_text()
+            (ROOT / "docs/research/receipts/pit250_sweep.json").read_text()
         )
-        assert pit.HONEST_FILL_POOL_PRE_PIT250 == pytest.approx(
-            receipt["strict_deflation"]["pool_sharpes"]
+        assert pit.HONEST_FILL_POOL_PRE_PIT250[:25] == pytest.approx(
+            receipt["strict_deflation"]["pool_sharpes"][:25]
         )
+        run1 = [c["sharpe"] for c in receipt["strict_deflation"]["per_config"]]
+        assert pit.HONEST_FILL_POOL_PRE_PIT250[25:] == pytest.approx(run1)
 
-    def test_sr0_is_pool_std_times_emax_at_78(self):
+    def test_sr0_is_pool_std_times_emax_at_83(self):
         family = _fake_family()
         result = pit.strict_deflation(family)
         pool = pit.HONEST_FILL_POOL_PRE_PIT250 + [c["sharpe"] for c in family]
-        expected_sr0 = float(np.std(pool)) * _expected_max_sr_benchmark(78)
+        expected_sr0 = float(np.std(pool)) * _expected_max_sr_benchmark(83)
         assert result["sr0"] == pytest.approx(expected_sr0)
         # Guard against deflating at the family size, the pool size, or the
         # stale pre-family clock instead of 78:
@@ -542,7 +545,7 @@ class TestReceipt:
         assert receipt["membership_parquet"] == "configs/universes/pit250_membership.parquet"
         assert receipt["feature_set"] == "breadth_v1"
         assert receipt["trials_charged"] == 5
-        assert receipt["deflation_clock"] == 78
+        assert receipt["deflation_clock"] == 83
         assert receipt["preregistration"].endswith("2026-09-11_pit250_sweep.md")
         assert "is_member" in receipt["pit_eligibility_rule"]
         assert "last available close" in receipt["pit_eligibility_rule"]
@@ -575,4 +578,4 @@ class TestReceipt:
     def test_receipt_is_json_serializable(self):
         receipt = self._build()
         parsed = json.loads(json.dumps(receipt, default=str))
-        assert parsed["strict_deflation"]["n_trials_emax"] == 78
+        assert parsed["strict_deflation"]["n_trials_emax"] == 83

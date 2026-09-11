@@ -157,8 +157,8 @@ COST_BP = pilot.COST_BP                # 5.0
 START = pilot.START                    # 2020-01-01 (YATS_SWEEP_START)
 END = pilot.END                        # None -> latest (YATS_SWEEP_END)
 
-OUT_DIR = RIG / ".yats_data" / "wfo_sweeps" / "pit250_sweep"
-RECEIPT_PATH = RIG / "docs" / "research" / "receipts" / "pit250_sweep.json"
+OUT_DIR = RIG / ".yats_data" / "wfo_sweeps" / "pit250_sweep_run2"
+RECEIPT_PATH = RIG / "docs" / "research" / "receipts" / "pit250_sweep_run2.json"
 PREREG_PATH = "docs/research/preregistrations/2026-09-11_pit250_sweep.md"
 
 # ---------------------------------------------------------------------------
@@ -179,10 +179,16 @@ HONEST_FILL_POOL_PRE_PIT250 = [
     0.7488736319006262, 0.6301957271370994,                 # pilot arm B bases
     0.759441569409167, 0.8482920555098233,
     1.1570143680299465,                                     # pilot arm B vt10
+    # pit250 run 1 (trials 74-78; insider panel data-defective, amendment 3):
+    0.44651729263704965, 0.6510368481239657,
+    0.4373738981065142,                                     # lgbm_21d, lgbm_5d, no_insider
+    0.6886630187263603, 0.7238646138022323,                 # vt10, rcvt overlays
 ]
 
 # Every DSR under this registration deflates at the POST-family clock.
-N_TRIALS_DEFLATION = 78  # 73 at registration + the 5 trials of this family
+# Run 2 (amendment 3): same 5 configs on the corrected insider/13F panel,
+# charged as trials 79-83 on top of run 1's 74-78.
+N_TRIALS_DEFLATION = 83
 CERTIFICATION_BAR = 0.95
 
 # References for the insider-attribution gradient readout (display only).
