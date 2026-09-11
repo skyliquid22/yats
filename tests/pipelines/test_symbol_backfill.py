@@ -8,6 +8,7 @@ per-domain config plumbing (equity / option_eod / fundamentals + feature sets),
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -26,8 +27,10 @@ from yats_pipelines.jobs.backfill.symbol_backfill import (
 )
 
 
-def _today() -> str:
-    return (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+def _yesterday_et() -> str:
+    # Mirrors resolve_end_date: T-1 anchored to the US session calendar,
+    # not UTC — after ~20:00 ET "yesterday UTC" is the open session.
+    return (datetime.now(ZoneInfo("America/New_York")) - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 # ---------------------------------------------------------------------------
@@ -149,8 +152,8 @@ class TestValidateParams:
 
 
 class TestResolveEndDate:
-    def test_empty_resolves_to_yesterday_utc(self):
-        assert resolve_end_date("") == _today()
+    def test_empty_resolves_to_yesterday_eastern(self):
+        assert resolve_end_date("") == _yesterday_et()
 
     def test_explicit_end_passthrough(self):
         assert resolve_end_date("2024-06-30") == "2024-06-30"
@@ -347,7 +350,7 @@ class TestRunSymbolBackfill:
             run_symbol_backfill(["NFLX"], "2020-01-01")  # no end date
             cfg = (sb.ingest_thetadata.execute_in_process.call_args
                    [1]["run_config"]["ops"]["fetch_thetadata_options"]["config"])
-        assert cfg["end_date"] == _today()
+        assert cfg["end_date"] == _yesterday_et()
 
     def test_invalid_dates_raise_before_any_stage_runs(self):
         calls: list[str] = []
