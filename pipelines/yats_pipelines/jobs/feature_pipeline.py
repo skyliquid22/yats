@@ -66,11 +66,48 @@ class FeaturePipelineConfig(Config):
 
 
 def _pg_conn(qdb: QuestDBResource):
-    return psycopg2.connect(
-        host=qdb.pg_host, port=qdb.pg_port,
-        user=qdb.pg_user, password=qdb.pg_password,
-        database=qdb.pg_database,
-    )
+    return _ReconnectingConn(qdb)
+
+
+class _ReconnectingConn:
+    """psycopg2 connection that survives server-side idle reaps.
+
+    The pipeline holds one connection across long pure-Python compute
+    phases (insider/institutional feature builds run for many minutes on
+    a full universe); QuestDB reaps idle PG-wire connections in the
+    meantime and the next execute hits a dead socket. cursor() pings
+    first and transparently reconnects. Only the cursor()/close() surface
+    the pipeline uses is provided.
+    """
+
+    def __init__(self, qdb: QuestDBResource):
+        self._qdb = qdb
+        self._conn = self._connect()
+
+    def _connect(self):
+        return psycopg2.connect(
+            host=self._qdb.pg_host, port=self._qdb.pg_port,
+            user=self._qdb.pg_user, password=self._qdb.pg_password,
+            database=self._qdb.pg_database,
+        )
+
+    def cursor(self):
+        try:
+            cur = self._conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchall()
+            return self._conn.cursor()
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            logger.warning("PG connection dead (idle reap?) — reconnecting")
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = self._connect()
+            return self._conn.cursor()
+
+    def close(self):
+        self._conn.close()
 
 
 def _ilp_sender(qdb: QuestDBResource):
