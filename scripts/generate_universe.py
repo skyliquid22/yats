@@ -28,6 +28,7 @@ import logging
 import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "pipelines"))
@@ -184,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(ZoneInfo("America/New_York"))  # T-1 vs the US session, not UTC
     # End at T-1: free-tier Alpaca returns 403 for current-day SIP data.
     window_end = now.date() - timedelta(days=1)
     window_start = window_end - timedelta(days=args.window_days)

@@ -44,6 +44,7 @@ import pathlib
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "pipelines"))
@@ -309,7 +310,7 @@ def main(argv: list[str] | None = None) -> int:
     # Pace paginated requests under the free-tier 200 req/min cap.
     alpaca.request_delay = REQUEST_INTERVAL_SECONDS
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(ZoneInfo("America/New_York"))  # T-1 vs the US session, not UTC
     # End at T-1: free-tier Alpaca returns 403 for current-day SIP data.
     history_end = now.date() - timedelta(days=1)
     history_start = default_history_start(args.start, args.window_days)

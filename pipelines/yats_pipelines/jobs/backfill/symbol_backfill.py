@@ -25,6 +25,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from yats_pipelines.jobs.canonicalize import canonicalize
 from yats_pipelines.jobs.feature_pipeline import feature_pipeline
@@ -57,9 +58,17 @@ def default_max_concurrent() -> int:
 
 
 def resolve_end_date(end_date: str) -> str:
-    """Empty end date defaults to YESTERDAY (UTC): free-tier Alpaca returns
-    403 Forbidden for current-day SIP data, which would abort the whole chain."""
-    return end_date or (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    """Empty end date defaults to yesterday in US/Eastern, NOT UTC.
+
+    Free-tier Alpaca returns 403 Forbidden for current-day SIP data. The
+    current day is defined by the US session: after ~20:00 ET, "yesterday
+    UTC" IS the still-open/just-closed session and still 403s. Anchoring
+    to the exchange calendar's timezone is correct in every UTC offset.
+    """
+    if end_date:
+        return end_date
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    return (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def validate_params(symbols: list[str], start_date: str, end_date: str) -> None:
