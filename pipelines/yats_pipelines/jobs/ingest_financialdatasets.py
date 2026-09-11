@@ -31,6 +31,11 @@ class IngestFinancialdatasetsConfig(Config):
 
     ticker_list: list[str]
     data_domains: list[str] = list(ALL_DOMAINS)
+    # Backfill window (YYYY-MM-DD). When set, insider trades cursor-paginate
+    # back to start_date and 13F quarters span [start_date, end_date] instead
+    # of the recent-N default.
+    start_date: str = ""
+    end_date: str = ""
 
 
 def _ilp_sender(qdb: QuestDBResource):
@@ -210,11 +215,14 @@ def _ingest_earnings(fd: FinancialDatasetsResource, sender, tickers: list[str], 
     return rows
 
 
-def _ingest_insider_trades(fd: FinancialDatasetsResource, sender, tickers: list[str], now: datetime) -> int:
+def _ingest_insider_trades(
+    fd: FinancialDatasetsResource, sender, tickers: list[str], now: datetime,
+    start_date: str = "",
+) -> int:
     rows = 0
     for ticker in tickers:
         try:
-            records = fd.get_insider_trades(ticker)
+            records = fd.get_insider_trades(ticker, start_date=start_date or None)
         except Exception:
             logger.warning("Failed insider_trades %s", ticker, exc_info=True)
             continue
@@ -268,11 +276,15 @@ def _ingest_insider_trades(fd: FinancialDatasetsResource, sender, tickers: list[
 def _ingest_institutional_holdings(
     fd: FinancialDatasetsResource, sender, tickers: list[str], now: datetime,
     run_id: str = "",
+    start_date: str = "", end_date: str = "",
 ) -> int:
     rows = 0
     for ticker in tickers:
         try:
-            records = fd.get_institutional_holdings(ticker)
+            records = fd.get_institutional_holdings(
+                ticker,
+                report_periods=f"{start_date}:{end_date}" if start_date else None,
+            )
         except Exception:
             logger.warning("Failed institutional_holdings %s", ticker, exc_info=True)
             continue
@@ -388,7 +400,13 @@ def ingest_financialdatasets_op(context: OpExecutionContext, config: IngestFinan
                 if fn is None:
                     context.log.warning("Unknown domain: %s — skipping", domain)
                     continue
-                extra = {"run_id": context.run_id} if domain == "institutional_holdings" else {}
+                extra: dict = {}
+                if domain == "institutional_holdings":
+                    extra["run_id"] = context.run_id
+                    extra["start_date"] = config.start_date
+                    extra["end_date"] = config.end_date
+                elif domain == "insider_trades":
+                    extra["start_date"] = config.start_date
                 rows = fn(fd, sender, tickers, now, **extra)
                 _total_rows += rows
                 context.log.info("Domain %s: %d rows ingested", domain, rows)

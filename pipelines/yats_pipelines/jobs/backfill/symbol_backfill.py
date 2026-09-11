@@ -154,6 +154,8 @@ def build_stage_plan(
                         "config": {
                             "ticker_list": symbols,
                             # data_domains defaults to all six FD domains
+                            "start_date": start_date,
+                            "end_date": end_date,
                         }
                     }
                 }
