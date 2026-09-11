@@ -928,6 +928,26 @@ def feature_pipeline_op(context: OpExecutionContext, config: FeaturePipelineConf
                     "Computed regime_v2 features: %d rows, %d columns",
                     len(regime_v2_df), len(regime_v2_df.columns),
                 )
+                if not regime_v2_df.empty and not spy_ohlcv.empty:
+                    # Chain quote_dates are midnight UTC; OHLCV bar labels are
+                    # intraday UTC. Re-label v2 rows onto the session's bar
+                    # timestamp before joining: an outer join of the two label
+                    # conventions interleaves same-day rows, and the broadcast
+                    # reindex(ffill) fills missing labels, not NaN values on
+                    # existing ones — every v2 column lands null downstream.
+                    bar_ts_by_date = {
+                        ts.normalize(): ts
+                        for ts in pd.DatetimeIndex(spy_ohlcv["timestamp"])
+                    }
+                    v2_bar_ts = [
+                        bar_ts_by_date.get(ts.normalize())
+                        for ts in regime_v2_df.index
+                    ]
+                    keep = [i for i, t in enumerate(v2_bar_ts) if t is not None]
+                    regime_v2_df = regime_v2_df.iloc[keep]
+                    regime_v2_df.index = pd.DatetimeIndex(
+                        [v2_bar_ts[i] for i in keep]
+                    )
                 if not regime_v2_df.empty:
                     if regime_df.empty:
                         regime_df = regime_v2_df
