@@ -81,12 +81,16 @@ def _row(sender, table: str, symbols: dict, columns: dict, at: datetime) -> None
 # ---------------------------------------------------------------------------
 
 
-def _ingest_fundamentals(fd: FinancialDatasetsResource, sender, tickers: list[str], now: datetime) -> int:
+def _ingest_fundamentals(
+    fd: FinancialDatasetsResource, sender, tickers: list[str], now: datetime,
+    start_date: str = "",
+) -> int:
     rows = 0
     for ticker in tickers:
         for period in ("annual", "quarterly", "ttm"):
             try:
-                records = fd.get_income_statements(ticker, period=period)
+                records = fd.get_income_statements(
+                    ticker, period=period, start_date=start_date or None)
             except Exception:
                 logger.warning("Failed fundamentals %s/%s", ticker, period, exc_info=True)
                 continue
@@ -130,12 +134,16 @@ def _ingest_fundamentals(fd: FinancialDatasetsResource, sender, tickers: list[st
     return rows
 
 
-def _ingest_metrics(fd: FinancialDatasetsResource, sender, tickers: list[str], now: datetime) -> int:
+def _ingest_metrics(
+    fd: FinancialDatasetsResource, sender, tickers: list[str], now: datetime,
+    start_date: str = "",
+) -> int:
     rows = 0
     for ticker in tickers:
         for period in ("annual", "quarterly", "ttm"):
             try:
-                records = fd.get_financial_metrics(ticker, period=period)
+                records = fd.get_financial_metrics(
+                    ticker, period=period, start_date=start_date or None)
             except Exception:
                 logger.warning("Failed metrics %s/%s", ticker, period, exc_info=True)
                 continue
@@ -405,7 +413,7 @@ def ingest_financialdatasets_op(context: OpExecutionContext, config: IngestFinan
                     extra["run_id"] = context.run_id
                     extra["start_date"] = config.start_date
                     extra["end_date"] = config.end_date
-                elif domain == "insider_trades":
+                elif domain in ("insider_trades", "fundamentals", "metrics"):
                     extra["start_date"] = config.start_date
                 rows = fn(fd, sender, tickers, now, **extra)
                 _total_rows += rows

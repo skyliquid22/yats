@@ -66,16 +66,73 @@ class FinancialDatasetsResource:
     # Domain: Fundamentals (income statements)
     # ------------------------------------------------------------------
 
+    def _paginate_by_report_period(
+        self, path: str, result_key: str, ticker: str, period: str,
+        limit: int, start_date: str,
+    ) -> list[dict]:
+        """Cursor-paginate an endpoint that caps responses (~10 rows) and
+        ignores ``limit``, using ``report_period_lte`` as the cursor —
+        same endpoint behavior class as insider-trades (verified live
+        2026-09-16). Pages backwards until exhausted or older than
+        ``start_date``. Dedupes on (report_period, period)."""
+        from datetime import date as _date, timedelta as _timedelta
+
+        out: list[dict] = []
+        seen: set[tuple] = set()
+        lte: str | None = None
+        while True:
+            params = {"ticker": ticker, "period": period, "limit": limit}
+            if lte is not None:
+                params["report_period_lte"] = lte
+            try:
+                page = self._get(path, params).get(result_key, [])
+            except Exception as exc:
+                # Paging past a symbol's first-ever report 404s instead of
+                # returning empty (verified: DKNG metrics pre-2019). Treat
+                # any error on a CURSOR page as end-of-history; first-page
+                # errors still raise so callers see real failures.
+                if lte is not None:
+                    break
+                raise exc
+            if not page:
+                break
+            fresh = 0
+            oldest: str | None = None
+            for rec in page:
+                rp = (rec.get("report_period") or "")[:10]
+                key = (rp, rec.get("period"))
+                if key not in seen:
+                    seen.add(key)
+                    out.append(rec)
+                    fresh += 1
+                if rp and (oldest is None or rp < oldest):
+                    oldest = rp
+            if oldest is None or oldest <= start_date:
+                break
+            if fresh:
+                lte = oldest
+            else:
+                d = _date.fromisoformat(oldest) - _timedelta(days=1)
+                lte = d.isoformat()
+        return out
+
     def get_income_statements(
-        self, ticker: str, period: str = "annual", limit: int = 100
+        self, ticker: str, period: str = "annual", limit: int = 100,
+        start_date: str | None = None,
     ) -> list[dict]:
         """Fetch income statements for a ticker.
 
         Args:
             ticker: Stock symbol (e.g. "AAPL").
             period: "annual", "quarterly", or "ttm".
-            limit: Max records to return.
+            limit: Max records to return per request (endpoint caps ~10).
+            start_date: When given, cursor-paginate back to this date;
+                otherwise a single page is fetched (legacy behavior).
         """
+        if start_date is not None:
+            return self._paginate_by_report_period(
+                "/financials/income-statements", "income_statements",
+                ticker, period, limit, start_date)
         data = self._get("/financials/income-statements", {
             "ticker": ticker, "period": period, "limit": limit,
         })
@@ -86,9 +143,17 @@ class FinancialDatasetsResource:
     # ------------------------------------------------------------------
 
     def get_financial_metrics(
-        self, ticker: str, period: str = "annual", limit: int = 100
+        self, ticker: str, period: str = "annual", limit: int = 100,
+        start_date: str | None = None,
     ) -> list[dict]:
-        """Fetch financial metrics (PE, ROE, margins, shares_outstanding, etc.)."""
+        """Fetch financial metrics (PE, ROE, margins, shares_outstanding, etc.).
+
+        start_date triggers report_period_lte cursor pagination (endpoint
+        caps responses like income-statements)."""
+        if start_date is not None:
+            return self._paginate_by_report_period(
+                "/financial-metrics", "financial_metrics",
+                ticker, period, limit, start_date)
         data = self._get("/financial-metrics", {
             "ticker": ticker, "period": period, "limit": limit,
         })
