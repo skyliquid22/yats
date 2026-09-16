@@ -45,3 +45,41 @@ symbols:
   - FISV   # pre-rename symbol (now FI)
   - X      # Nippon/US Steel
   - ALTR   # Siemens acquisition
+  # --- 2016-2019 era additions (SPAN-16 family, verified bars 2026-09-16;
+  # excluded: SE/SNDK symbol reuse, BRCM/CAM span-edge, STI no bars served) ---
+  - LNKD   # Microsoft acquisition 2016-12
+  - EMC    # Dell acquisition 2016-09
+  - WFM    # Amazon acquisition 2017-08
+  - MON    # Bayer acquisition 2018-06
+  - ESRX   # Cigna acquisition 2018-12
+  - RHT    # IBM acquisition 2019-07
+  - APC    # Occidental acquisition 2019-08
+  - TWX    # AT&T acquisition 2018-06
+  - YHOO   # Verizon acquisition 2017-06
+  - CA     # Broadcom acquisition 2018-11
+  - AET    # CVS acquisition 2018-11
+  - COL    # UTC acquisition 2018-11
+  - DPS    # Keurig merger 2018-07
+  - TSS    # Global Payments merger 2019-09
+  - LLL    # L3Harris merger 2019-06
+  - HRS    # L3Harris merger 2019-06 (pre-merger symbol)
+  - BBT    # Truist merger 2019-12
+  - FDC    # Fiserv acquisition 2019-07
+  - VIAB   # ViacomCBS merger 2019-12
+  - CBS    # ViacomCBS merger 2019-12
+  - SCG    # Dominion acquisition 2019-01
+  - ANDV   # Marathon acquisition 2018-10
+  - XL     # AXA acquisition 2018-09
+  - GGP    # Brookfield acquisition 2018-08
+  - LLTC   # Analog Devices acquisition 2017-03
+  - HAR    # Samsung acquisition 2017-03
+  - STJ    # Abbott acquisition 2017-01
+  - MJN    # Reckitt acquisition 2017-06
+  - RAI    # BAT acquisition 2017-07
+  - PNRA   # JAB take-private 2017-07
+  - LVLT   # CenturyLink acquisition 2017-11
+  - TYC    # Johnson Controls merger 2016-09
+  - BXLT   # Shire acquisition 2016-06
+  - WYN    # Wyndham split 2018-05 (pre-split symbol)
+  - DNB    # take-private 2019-02 (pre-relisting spell)
+  - APU    # UGI buy-in 2019-08
