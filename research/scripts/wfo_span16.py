@@ -81,10 +81,10 @@ PCA_N_FACTORS = 5
 PCA_WINDOW = 252
 
 BASE_GRID = [
-    {"model": "lgbm", "horizon": 21, "reg": "l2", "label": "lgbm_21d_clean_R", "labels": "R"},
-    {"model": "lgbm", "horizon": 5, "reg": "l2", "label": "lgbm_5d_clean_R", "labels": "R"},
-    {"model": "lgbm", "horizon": 21, "reg": "l2", "label": "lgbm_21d_clean_N", "labels": "N"},
-    {"model": "lgbm", "horizon": 5, "reg": "l2", "label": "lgbm_5d_clean_N", "labels": "N"},
+    {"model": "lgbm", "horizon": 21, "reg": 0.1, "label": "lgbm_21d_clean_R", "labels": "R"},
+    {"model": "lgbm", "horizon": 5, "reg": 0.1, "label": "lgbm_5d_clean_R", "labels": "R"},
+    {"model": "lgbm", "horizon": 21, "reg": 0.1, "label": "lgbm_21d_clean_N", "labels": "N"},
+    {"model": "lgbm", "horizon": 5, "reg": 0.1, "label": "lgbm_5d_clean_N", "labels": "N"},
 ]
 TOTAL_TRIALS = len(BASE_GRID) + 1   # + vt10 on best base
 

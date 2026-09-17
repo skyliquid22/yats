@@ -79,7 +79,7 @@ class TestFoldRule:
             median_oos_sharpe=1.0,
         )
         summary = span16.summarize_with_fold_rule(
-            {"label": "t", "model": "lgbm", "horizon": 21, "reg": "l2"}, result
+            {"label": "t", "model": "lgbm", "horizon": 21, "reg": 0.1}, result
         )
         assert summary["n_obs_primary"] == 100
         assert [e["fold_index"] for e in summary["excluded_folds"]] == [0, 1]
