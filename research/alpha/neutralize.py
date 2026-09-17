@@ -92,6 +92,9 @@ def pca_neutralize_column(
         uncovered by the block's factor estimate or ``fwd_col`` is NaN.
     """
     px = closes.pivot_table(index=date_col, columns=symbol_col, values="close", aggfunc="first").sort_index()
+    # panel dates may be datetime.date objects; the causality comparison in
+    # trailing_pca_eigenvectors needs a real DatetimeIndex
+    px.index = pd.to_datetime(px.index)
     rets = px.pct_change()
 
     dates = np.array(sorted(panel[date_col].unique()))

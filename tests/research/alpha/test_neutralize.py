@@ -99,3 +99,19 @@ class TestPcaNeutralizeColumn:
         )
         nan_fwd = panel["fwd"].isna()
         assert resid[nan_fwd].isna().all()
+
+
+class TestDateTypedPanel:
+    def test_date_objects_not_timestamps(self):
+        """Production panels carry datetime.date, not pd.Timestamp."""
+        dates, _, _, closes = _factor_market(n_days=400)
+        panel = _panel_with_fwd(closes)
+        panel["date"] = [d.date() for d in panel["date"]]
+        closes_long = _long_closes(closes)
+        closes_long["date"] = [d.date() for d in closes_long["date"]]
+        resid = pca_neutralize_column(
+            panel, "fwd", closes_long, [dates[300]]
+        )
+        late = panel["date"] >= dates[300].date()
+        ok = resid[late & panel["fwd"].notna()]
+        assert ok.notna().mean() > 0.9
