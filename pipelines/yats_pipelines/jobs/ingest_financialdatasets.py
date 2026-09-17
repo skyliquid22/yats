@@ -39,10 +39,82 @@ class IngestFinancialdatasetsConfig(Config):
 
 
 def _ilp_sender(qdb: QuestDBResource):
-    """Create a QuestDB ILP Sender context manager."""
-    from questdb.ingress import Sender, Protocol
+    """Create a reconnecting ILP sender (context manager).
 
-    return Sender(Protocol.Tcp, qdb.ilp_host, qdb.ilp_port)
+    With cursor pagination, hours can pass between writes; QuestDB reaps
+    the idle ILP socket and the next (auto-)flush dies with a broken pipe.
+    The wrapper replays rows buffered since the last successful flush after
+    reconnecting — duplicate raw rows are safe (canonicalize dedups).
+    """
+    return _RetrySender(qdb)
+
+
+class _RetrySender:
+    FLUSH_EVERY = 5000
+
+    def __init__(self, qdb: QuestDBResource):
+        self._qdb = qdb
+        self._sender = None
+        self._pending: list[tuple] = []
+        self._since_flush = 0
+
+    def _open(self):
+        from questdb.ingress import Protocol, Sender
+
+        sender = Sender(Protocol.Tcp, self._qdb.ilp_host, self._qdb.ilp_port)
+        sender.establish()
+        return sender
+
+    def __enter__(self):
+        self._sender = self._open()
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if not any(exc):
+                self.flush()
+        finally:
+            try:
+                self._sender.close()
+            except Exception:
+                pass
+        return False
+
+    def row(self, table, *, symbols, columns, at):
+        from questdb.ingress import IngressError
+
+        self._pending.append((table, symbols, columns, at))
+        try:
+            self._sender.row(table, symbols=symbols, columns=columns, at=at)
+            self._since_flush += 1
+            if self._since_flush >= self.FLUSH_EVERY:
+                self.flush()
+        except IngressError:
+            logger.warning("ILP write failed (idle reap?) — reconnecting and replaying %d rows", len(self._pending))
+            self._reconnect_replay()
+
+    def flush(self):
+        from questdb.ingress import IngressError
+
+        try:
+            self._sender.flush()
+            self._pending.clear()
+            self._since_flush = 0
+        except IngressError:
+            logger.warning("ILP flush failed (idle reap?) — reconnecting and replaying %d rows", len(self._pending))
+            self._reconnect_replay()
+
+    def _reconnect_replay(self):
+        try:
+            self._sender.close()
+        except Exception:
+            pass
+        self._sender = self._open()
+        for table, symbols, columns, at in self._pending:
+            self._sender.row(table, symbols=symbols, columns=columns, at=at)
+        self._sender.flush()
+        self._pending.clear()
+        self._since_flush = 0
 
 
 def _ts(val: str | None) -> datetime | None:
