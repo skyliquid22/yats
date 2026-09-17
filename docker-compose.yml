@@ -1,6 +1,10 @@
 services:
   questdb:
     image: questdb/questdb:latest
+    # survive Docker daemon restarts / machine sleep: an exited DB looks
+    # like "connection refused" mid-backfill and invites wrong-target
+    # recovery (a brew-installed questdb squats the same ports)
+    restart: unless-stopped
     ports:
       - "9000:9000"   # HTTP / web console
       - "8812:8812"   # PG wire (psycopg2)
