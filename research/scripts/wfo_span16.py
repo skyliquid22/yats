@@ -203,7 +203,9 @@ def daily_net_series(captures: list[dict], capture_indices: list[int]) -> pd.Ser
         pieces.append(net)
     if not pieces:
         return pd.Series(dtype=float)
-    out = pd.concat(pieces).sort_index()
+    out = pd.concat(pieces)
+    out.index = pd.to_datetime(out.index)  # panel dates are datetime.date
+    out = out.sort_index()
     return out[~out.index.duplicated(keep="first")]
 
 
@@ -495,7 +497,12 @@ def main() -> int:
         w, r = cap["weights"], cap["returns"]
         scaled = apply_risk_layer_batch(w, r, None, PortfolioRiskConfig(vol_target=pilot.VOL_TARGET))
         vt_pieces.append((scaled * r).sum(axis=1) - compute_turnover(scaled) * (COST_BP / 1e4))
-    series_by_label[overlay["label"]] = pd.concat(vt_pieces).sort_index() if vt_pieces else pd.Series(dtype=float)
+    if vt_pieces:
+        vt_series = pd.concat(vt_pieces)
+        vt_series.index = pd.to_datetime(vt_series.index)
+        series_by_label[overlay["label"]] = vt_series.sort_index()
+    else:
+        series_by_label[overlay["label"]] = pd.Series(dtype=float)
     mark(f"{overlay['label']} done: sharpe={overlay['sharpe']:.3f}")
 
     deflation = strict_deflation(per_config)
