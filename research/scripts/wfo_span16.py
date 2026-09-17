@@ -406,7 +406,9 @@ def main() -> int:
         f"symbols={panel_r['symbol'].nunique()}"
     )
 
-    n_periods = max(2, (n_dates - TRAIN_ANCHOR) // TEST_WINDOW)
+    # geometry: anchor + (purge_buffer + label_horizon) gap + n tests
+    gap = LABEL_PURGE_BUFFER + 21
+    n_periods = max(2, (n_dates - TRAIN_ANCHOR - gap) // TEST_WINDOW)
     wfo_cfg = WFOConfig(
         train_window=TRAIN_ANCHOR,
         test_window=TEST_WINDOW,
