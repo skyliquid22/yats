@@ -481,6 +481,7 @@ def main() -> int:
     result = results[best["label"]]
     keep = included_capture_indices(result)
     kept_captures = [captures[best["label"]][i] for i in keep]
+    best.setdefault("variant", best.get("labels", "clean"))  # pit overlay helper expects it
     overlay = pit.apply_vt10_overlay(best, kept_captures)
     overlay["label"] = f"{best['label']}_vt10"
     overlay["n_obs_primary"] = overlay["n_obs"]
